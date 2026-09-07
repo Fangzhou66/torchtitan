@@ -28,7 +28,9 @@ from torchtitan.experiments.rl.rollout.types import Rollout, RolloutStatus
         (0.9, [], None, 0, 0),
     ],
 )
-def test_evolution_ratio(monkeypatch, tmp_path, ratio, rewards, direction, solved, total):
+def test_evolution_ratio(
+    monkeypatch, tmp_path, ratio, rewards, direction, solved, total
+):
     monkeypatch.setenv("TRL_RUN_DIR", str(tmp_path))
     monkeypatch.setenv("SWE_EVOLUTION_SIGNALS", "1")
     worker = object.__new__(rollouter.TMaxRollouter)
@@ -54,7 +56,9 @@ def test_evolution_ratio(monkeypatch, tmp_path, ratio, rewards, direction, solve
     if signals:
         signal = json.loads(signals[0].read_text())
         assert (signal["direction"], signal["solved"], signal["total"]) == (
-            direction, solved, total
+            direction,
+            solved,
+            total,
         )
         assert len(signal["attempts"]) == total
 
@@ -69,3 +73,27 @@ def test_invalid_ratio_fails_before_dataset_loading(ratio):
 
 def test_default_ratio_requires_all_pass():
     assert rollouter.TMaxRollouter.Config().evolution_harder_ratio == 1.0
+
+
+@pytest.mark.parametrize(
+    "rewards,expected", [([0.5, 0.5], "harder"), ([0.5, 1.0], None)]
+)
+def test_dense_evolution_keeps_zero_variance_rule(
+    monkeypatch, tmp_path, rewards, expected
+):
+    monkeypatch.setenv("TRL_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("SWE_EVOLUTION_SIGNALS", "1")
+    worker = object.__new__(rollouter.TMaxRollouter)
+    worker._reward_mode = "dense"
+    worker._evolution_harder_ratio = 0.9
+    siblings = [
+        Rollout(group_id=1, rollout_id=i, status=RolloutStatus.COMPLETED, reward=r)
+        for i, r in enumerate(rewards)
+    ]
+    worker._maybe_emit_evolution_signal(
+        SimpleNamespace(instance_id="task", rev=0), siblings
+    )
+    signals = list(tmp_path.glob("signals/*.json"))
+    assert len(signals) == int(expected is not None)
+    if signals:
+        assert json.loads(signals[0].read_text())["direction"] == expected

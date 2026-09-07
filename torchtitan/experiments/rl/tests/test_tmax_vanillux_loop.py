@@ -79,6 +79,10 @@ class _FakeAdapter:
 
 @pytest.fixture(autouse=True)
 def _patch_sandbox_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests bypass __init__; supply its default evolution configuration.
+    monkeypatch.setattr(TMaxRollouter, "_reward_mode", "sparse", raising=False)
+    monkeypatch.setattr(TMaxRollouter, "_evolution_harder_ratio", 1.0, raising=False)
+
     async def prepare_runtime(sb: Any) -> None:
         pass
 

@@ -959,11 +959,8 @@ class TMaxRollouter(Rollouter):
 
         # Group reward-shape metrics. With evolution_harder_ratio < 1, evolution
         # additionally hardens high-success mixed groups; these metrics retain
-        # their zero-variance meaning. A
-        # zero-variance group produces no gradient and is the one re-tuned, 0/k ("too
-        # hard") made easier and k/k ("too easy") made harder. Logging the split here
-        # puts the evolve loop's input rate on the training wandb (frac of groups per
-        # step, so frac * groups-per-step = count). Filter to scored rollouts
+        # their zero-variance meaning rather than counting every evolution trigger.
+        # Filter to scored rollouts
         # (is_scored) so an infra-failed sibling's NaN reward is excluded -- statistics
         # .pstdev raises on NaN under Python 3.12. Training groups only (group_id >= 0).
         if group_id >= 0:
@@ -1090,7 +1087,9 @@ class TMaxRollouter(Rollouter):
                 # policy rather than applying a binary-success knob to it.
                 if statistics.pstdev(rewards) != 0.0:
                     return
-            elif not all_failed and solved / len(rewards) < self._evolution_harder_ratio:
+            elif (
+                not all_failed and solved / len(rewards) < self._evolution_harder_ratio
+            ):
                 return
             group_id = rollouts[0].group_id
             if all_failed and not any(len(r.turns) for r in rollouts):
@@ -1163,7 +1162,6 @@ class TMaxRollouter(Rollouter):
                 )
             return str(content or "")
         return "" if message is None else str(message)
-
 
     async def _run_agent_rollout(
         self,
