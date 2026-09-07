@@ -94,9 +94,7 @@ from torchtitan.experiments.rl.examples.tmax.grading import (
     read_ctrf_report,
     seed_workspace,
 )
-from torchtitan.experiments.rl.examples.tmax.integrity_baseline import (
-    capture_baseline,
-)
+from torchtitan.experiments.rl.examples.tmax.integrity_baseline import capture_baseline
 from torchtitan.experiments.rl.examples.tmax.rubric import RewardTMax, TMAX_REWARD_KEY
 from torchtitan.experiments.rl.examples.tmax.vanillux_loop import (  # noqa: F401 -- registers the default agent
     vanillux_agent,
