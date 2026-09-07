@@ -290,7 +290,7 @@ def _package_sha256(
     """The split builder's task_content_sha256: sorted file members, relpath + NUL + content + NUL,
     relpath relative to the PACKAGE prefix ('instruction.md'), never the tar root."""
     h = hashlib.sha256()
-    for m in sorted(members, key=lambda m: m.name):
+    for m in sorted(members, key=lambda member: member.name):
         rel = m.name[len(prefix) + 1 :]
         f = tar.extractfile(m)
         assert f is not None

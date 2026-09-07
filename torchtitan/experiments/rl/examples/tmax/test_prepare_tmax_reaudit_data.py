@@ -73,6 +73,7 @@ _COLUMNS = [
     "pre_test_env_identity",
     "protected_paths",
     "protected_cmds",
+    "corpus_revision",
 ]
 
 
@@ -156,6 +157,7 @@ def _fixture(
                     "dockerfile_repaired": False,
                     "pre_test_sh": sh,
                     "pre_test_env_identity": idn,
+                    "corpus_revision": "6a48f98d22874299836a6dc5c85ce8ac89fc1323",
                 }
             )
     cols = list(_COLUMNS)
@@ -437,8 +439,7 @@ def test_protected_paths_pass_through_on_a_three_row_fixture():
         for k in ("protected_paths", "protected_cmds")
     )
     assert summary["protected"] == 0 and summary["protected_cmds"] == 0
-    # The columns are part of the 26-column contract: a split without them (the 24-column
-    # first cut) is a different split and refuses by name; so does any other column count.
+    # Integrity columns are required independently of the total column count.
     for drop in (("protected_paths", "protected_cmds"), ("protected_cmds",)):
         try:
             _prepare([HOOKED, UNHOOKED], drop_columns=drop)
@@ -446,13 +447,6 @@ def test_protected_paths_pass_through_on_a_three_row_fixture():
             assert "lacks column(s)" in str(e) and drop[-1] in str(e), e
         else:
             raise AssertionError(f"a split lacking {drop} must refuse")
-    try:
-        _prepare([HOOKED, UNHOOKED], extra_columns=("surprise",))
-    except R.RefuseError as e:
-        assert "27 columns, expected 26" in str(e), e
-    else:
-        raise AssertionError("a split with a 27th column must refuse")
-    assert len(_COLUMNS) == R.EXPECT_COLUMNS == 26
     # a cell that is present but not a JSON list of non-empty strings refuses by id
     for bad in ('"not-a-list"', '["ok", ""]', "{oops"):
         try:
@@ -461,6 +455,22 @@ def test_protected_paths_pass_through_on_a_three_row_fixture():
             assert UNHOOKED[0] in str(e), e
         else:
             raise AssertionError(f"malformed protected_paths must refuse: {bad!r}")
+
+
+def test_pinned_shape_accepts_27_and_refuses_old_or_extra_columns():
+    assert len(_COLUMNS) == R.EXPECT_COLUMNS == 27
+    summary, rows, _ = _prepare([HOOKED, UNHOOKED])
+    assert summary["rows"] == len(rows) == 2
+    for changes, count in (
+        ({"drop_columns": ("corpus_revision",)}, 26),
+        ({"extra_columns": ("surprise",)}, 28),
+    ):
+        try:
+            _prepare([HOOKED, UNHOOKED], **changes)
+        except R.RefuseError as e:
+            assert f"{count} columns, expected 27" in str(e), e
+        else:
+            raise AssertionError(f"a split with {count} columns must refuse")
 
 
 def test_a_non_empty_extraction_target_refuses_by_name():
