@@ -37,6 +37,37 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # @concurrent_endpoint is not available in the stable Monarch release yet (#3832).
 os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
 
+# Claim OpenTelemetry's GLOBAL tracer provider before monarch's import installs its own.
+#
+# monarch/_src/actor/telemetry/__init__.py:203 sets a RustTracerProvider as the global
+# provider, at import time. The Daytona SDK decorates every async call with an OTel span and
+# awaits INSIDE it (daytona/_utils/otel_decorator.py:127), so each sandbox call holds a monarch
+# span across an await. SpanWrapper.end() calls into Rust against a thread-local ORDERED
+# tracing stack, and under asyncio the spans of concurrent rollouts exit out of order. The
+# result is a SIGSEGV: the process dies mid-run with no traceback and no exception, and rc=139
+# rather than the 137 an OOM kill reports. Reproduced at 48 and at 91 concurrent rollouts.
+#
+# OpenTelemetry refuses a second set_tracer_provider ("Overriding of current TracerProvider is
+# not allowed"), so claiming it first makes monarch's install a no-op and the SDK's spans come
+# back as NonRecordingSpan instead of monarch's SpanWrapper. Note the check is the span CLASS:
+# is_recording() is False in BOTH cases, and OTEL_SDK_DISABLED does not help, because that
+# variable is honoured by the OTel SDK and not by a third-party provider that replaced it.
+#
+# THIS MUST STAY ABOVE THE MONARCH IMPORT. Placed below it the claim is refused and does
+# nothing, silently -- the same import-order trap as MONARCH_ACTOR_QUEUE_DISPATCH above.
+#
+# SCOPE: this covers processes that start from train.py, which includes the default
+# num_rollout_workers=0 configuration where every rollout runs in the controller process. It
+# does NOT cover spawned RolloutWorker processes: proc_mesh.py:891 launches those as
+# `python -m monarch._src.actor.bootstrap_main`, which imports monarch before any torchtitan
+# module exists, so no file in this repository can run earlier. Covering those needs an
+# interpreter-level hook (a sitecustomize.py on the run venv, verified to work) or an upstream
+# monarch change; its telemetry module has no env guard.
+from opentelemetry import trace as _otel_trace
+from opentelemetry.trace import NoOpTracerProvider as _NoOpTracerProvider
+
+_otel_trace.set_tracer_provider(_NoOpTracerProvider())
+
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
