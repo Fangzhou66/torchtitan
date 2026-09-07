@@ -34,16 +34,17 @@ variant relies on files or command outputs the solver must leave untouched, list
 them in `tests/protected_paths.json` as `{"paths": [...], "cmds": [...]}`; the
 harness digests them before and after the episode and any change scores 0.
 
-The caller reads these declarations from `run/`:
+Record the job's evidence and declarations in `run/`:
 
-| `run/operator.txt` | the harder job's chosen axis, alone on one line, written before editing. |
+| `run/operator.txt` | required only when the harder prompt supplies an operator menu; the chosen axis, alone on one line. |
+| `run/hardening.md` | for student-guided hardening: observed strategy, trace evidence, proposed change and the new decision it requires. |
 | `run/simplify.json` | the easier job's operator, retained skill, change, restoration and trace evidence, as specified in its prompt. |
 | `run/verdict.txt` | written only when you stop without finishing — see *Giving up* below. |
 
-For harder jobs, the caller rebuilds the pool's axis balance by reading `run/operator.txt` off
-every task that comes back. A task folded in without it is invisible to that
-count, so a session that finishes the work but never declares the axis is
-discarded rather than kept.
+When a harder prompt supplies an operator menu, its declaration is required for
+the pool's axis counts. Student-guided hardening has no operator requirement:
+choose the change from the actual attempts and record its rationale in
+`run/hardening.md` before editing.
 
 ## What each file has to hold
 
@@ -192,8 +193,10 @@ reference solution knows the name of makes the task unsolvable. That list is
 advice too, recorded with the rewrite rather than rejecting it. Editing `sandbox`, or shaping the task around it, costs you the
 whole session and gains nothing.
 
-**A harder task is one rung above the seed, and the rung is measured.** Keep
-everything the seed asks for and add one requirement. The reference solution
+**A harder task preserves the original goal and changes one bottleneck.** Follow
+the prompt's hardening mode. Student-guided changes must require a new inference
+or decision in the core workflow; an unrelated deliverable is insufficient.
+The reference solution
 may grow by 3 to 8 non-comment lines over the seed's; the verifier may gain at
 most 5 assertions. `./sandbox check` fails outside that and the caller rejects
 the rewrite. The numbers come from this corpus: the seed at its own size was

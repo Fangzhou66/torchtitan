@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """SWE_VERIFIER_AUTHOR=blind: the verifier is written by a session that never
 sees the solution, in a package copy under its own session directory, and
 the two meet only in the harness's own check."""
@@ -22,16 +28,32 @@ SEED = {
     "test_state_py": "import os\n\ndef test_result():\n    assert os.path.isfile('/app/result.txt')\n",
     "_verifier_rel": "tests/test_state.py",
 }
-NEW_SOLVE = SEED["solve_sh"] + "test -s /app/result.txt\nsha256sum /app/result.txt > /app/result.sha\ntest -s /app/result.sha\n"
+NEW_SOLVE = (
+    SEED["solve_sh"]
+    + "test -s /app/result.txt\nsha256sum /app/result.txt > /app/result.sha\ntest -s /app/result.sha\n"
+)
 NEW_INSTRUCTION = SEED["instruction"] + "Also write its SHA-256 to /app/result.sha.\n"
-NEW_VERIFIER = SEED["test_state_py"] + "\ndef test_sha():\n    assert os.path.isfile('/app/result.sha')\n    assert open('/app/result.sha').read().strip()\n"
+NEW_VERIFIER = (
+    SEED["test_state_py"]
+    + "\ndef test_sha():\n    assert os.path.isfile('/app/result.sha')\n    assert open('/app/result.sha').read().strip()\n"
+)
 
 
 def _pass(pkg: Path, **extra) -> None:
     (pkg / "run").mkdir(exist_ok=True)
     with (pkg / "run" / "checks.jsonl").open("a") as fh:
-        fh.write(json.dumps({"verdict": "pass", "reward": 1.0, "solve_exit": 0,
-                             "measured": {"mem_peak_mb": 50}, **extra}) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "verdict": "pass",
+                    "reward": 1.0,
+                    "solve_exit": 0,
+                    "measured": {"mem_peak_mb": 50},
+                    **extra,
+                }
+            )
+            + "\n"
+        )
 
 
 def _rewrite(tmp_path, monkeypatch) -> layout.RewriteDir:
@@ -46,12 +68,20 @@ def _rewrite(tmp_path, monkeypatch) -> layout.RewriteDir:
 
 def test_blind_layout_hides_the_solution_and_the_harness_files(tmp_path) -> None:
     pkg = tmp_path / "pkg"
-    for rel, text in {"instruction.md": "do it", "solution/solve.sh": "secret",
-                      "tests/test_state.py": "t", "environment/Dockerfile": "FROM x",
-                      "environment/fixture.csv": "1,2", "traces/attempt-01.jsonl": "{}",
-                      "run/checks.jsonl": "{}", "run/verdict.txt": "x",
-                      "run/seed_size.json": "{}", "run/resources.json": "{}",
-                      "AGENTS.md": "author spec", "sandbox": "#!/bin/bash"}.items():
+    for rel, text in {
+        "instruction.md": "do it",
+        "solution/solve.sh": "secret",
+        "tests/test_state.py": "t",
+        "environment/Dockerfile": "FROM x",
+        "environment/fixture.csv": "1,2",
+        "traces/attempt-01.jsonl": "{}",
+        "run/checks.jsonl": "{}",
+        "run/verdict.txt": "x",
+        "run/seed_size.json": "{}",
+        "run/resources.json": "{}",
+        "AGENTS.md": "author spec",
+        "sandbox": "#!/bin/bash",
+    }.items():
         (pkg / rel).parent.mkdir(parents=True, exist_ok=True)
         (pkg / rel).write_text(text)
     vpkg = tmp_path / "vpkg"
@@ -59,8 +89,14 @@ def test_blind_layout_hides_the_solution_and_the_harness_files(tmp_path) -> None
     seen = {str(p.relative_to(vpkg)) for p in vpkg.rglob("*") if p.is_file()}
     assert "solution/solve.sh" not in seen and "traces/attempt-01.jsonl" not in seen
     assert "run/checks.jsonl" not in seen and "run/verdict.txt" not in seen
-    assert {"instruction.md", "tests/test_state.py", "environment/Dockerfile",
-            "environment/fixture.csv", "run/seed_size.json", "run/resources.json"} <= seen
+    assert {
+        "instruction.md",
+        "tests/test_state.py",
+        "environment/Dockerfile",
+        "environment/fixture.csv",
+        "run/seed_size.json",
+        "run/resources.json",
+    } <= seen
     # The spec is the verifier author's, not the task author's.
     assert (vpkg / "AGENTS.md").read_text() != "author spec"
     assert "not shown the reference solution" in (vpkg / "AGENTS.md").read_text()
@@ -96,12 +132,20 @@ def _wire(monkeypatch, sessions: list, checks: list, verifier_text=NEW_VERIFIER)
 
     def fake_run_codex(run, cwd, prompt, resume=None):
         role = "verifier" if not (cwd / "solution").exists() else "author"
-        sessions.append({"role": role, "cwd": cwd, "session": run.dir, "prompt": prompt,
-                         "resume": resume, "saw_solution": (cwd / "solution" / "solve.sh").exists()})
+        sessions.append(
+            {
+                "role": role,
+                "cwd": cwd,
+                "session": run.dir,
+                "prompt": prompt,
+                "resume": resume,
+                "saw_solution": (cwd / "solution" / "solve.sh").exists(),
+            }
+        )
         if role == "author":
             (cwd / "solution" / "solve.sh").write_text(NEW_SOLVE)
             (cwd / "instruction.md").write_text(NEW_INSTRUCTION)
-            _pass(cwd)                      # the author's own check, seed verifier
+            _pass(cwd)  # the author's own check, seed verifier
         else:
             # A resumed verifier session repairs; an unchanged file would be
             # refused as "changed nothing", which is its own failure.
@@ -121,7 +165,9 @@ def _wire(monkeypatch, sessions: list, checks: list, verifier_text=NEW_VERIFIER)
     monkeypatch.setattr(ec, "_harness_check", fake_harness_check)
 
 
-def test_blind_mode_runs_two_sessions_and_the_second_never_sees_the_solution(tmp_path, monkeypatch) -> None:
+def test_blind_mode_runs_two_sessions_and_the_second_never_sees_the_solution(
+    tmp_path, monkeypatch
+) -> None:
     rw = _rewrite(tmp_path, monkeypatch)
     sessions, checks = [], []
     _wire(monkeypatch, sessions, checks)
@@ -136,6 +182,7 @@ def test_blind_mode_runs_two_sessions_and_the_second_never_sees_the_solution(tmp
     assert sessions[1]["session"].path.parent == rw.sessions
     assert "Leave `tests/` exactly as it is" in sessions[0]["prompt"]
     assert "not shown the reference solution" in sessions[1]["prompt"]
+
     # The verifier came back into the author's package, and the harness ran
     # the check the two sessions never could.
     assert checks == ["check.blind1"]
@@ -151,7 +198,49 @@ def test_blind_mode_runs_two_sessions_and_the_second_never_sees_the_solution(tmp
         assert json.loads(s.meta.read_text())["status"] == "completed"
 
 
-def test_same_mode_runs_one_session_that_writes_everything(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("mode", [None, "0", "1"])
+def test_harder_menu_is_opt_in(tmp_path, monkeypatch, mode):
+    if mode is None:
+        monkeypatch.delenv("EVOLVE_HARDER_OPERATORS", raising=False)
+    else:
+        monkeypatch.setenv("EVOLVE_HARDER_OPERATORS", mode)
+    rw = _rewrite(tmp_path, monkeypatch)
+    sessions, checks = [], []
+    _wire(monkeypatch, sessions, checks)
+    if mode == "1":
+        (rw.package / "run").mkdir(exist_ok=True)
+        (rw.package / "run/operator.txt").write_text("test_operator")
+    out = ec.evolve_agentic(
+        rw,
+        dict(SEED),
+        "harder",
+        operator=[("test_family", "test_operator", "test_definition")],
+    )
+    prompt = sessions[0]["prompt"]
+    if mode == "1":
+        assert "test_definition" in prompt and "Pick from that list" in prompt
+        assert out["_operator"] == "test_operator"
+    else:
+        assert "test_definition" not in prompt and "Pick from that list" not in prompt
+        assert "run/hardening.md" in prompt
+        assert "new inference or decision" in prompt
+        assert "_operator" not in out
+        assert out["_harder_mode"] == "student"
+
+
+def test_operator_mode_still_requires_declaration(tmp_path, monkeypatch):
+    monkeypatch.setenv("EVOLVE_HARDER_OPERATORS", "1")
+    rw = _rewrite(tmp_path, monkeypatch)
+    _wire(monkeypatch, [], [])
+    with pytest.raises(RuntimeError, match="did not declare"):
+        ec.evolve_agentic(
+            rw, dict(SEED), "harder", operator=[("family", "op", "definition")]
+        )
+
+
+def test_same_mode_runs_one_session_that_writes_everything(
+    tmp_path, monkeypatch
+) -> None:
     rw = _rewrite(tmp_path, monkeypatch)
     sessions, checks = [], []
     _wire(monkeypatch, sessions, checks)
@@ -173,7 +262,9 @@ def test_same_mode_runs_one_session_that_writes_everything(tmp_path, monkeypatch
     assert len(rw.session_dirs()) == 1
 
 
-def test_a_disagreement_gets_one_repair_of_the_verifier_then_is_discarded(tmp_path, monkeypatch) -> None:
+def test_a_disagreement_gets_one_repair_of_the_verifier_then_is_discarded(
+    tmp_path, monkeypatch
+) -> None:
     rw = _rewrite(tmp_path, monkeypatch)
     sessions, checks = [], []
     _wire(monkeypatch, sessions, checks)
@@ -183,7 +274,10 @@ def test_a_disagreement_gets_one_repair_of_the_verifier_then_is_discarded(tmp_pa
         checks.append(name)
         (pkg / "run").mkdir(exist_ok=True)
         with (pkg / "run" / "checks.jsonl").open("a") as fh:
-            fh.write(json.dumps({"verdict": next(verdicts), "reward": 0.0, "solve_exit": 1}) + "\n")
+            fh.write(
+                json.dumps({"verdict": next(verdicts), "reward": 0.0, "solve_exit": 1})
+                + "\n"
+            )
         return "VERDICT: fail   stage=oracle\nAssertionError: no /app/result.sha"
 
     monkeypatch.setattr(ec, "_harness_check", failing_check)
@@ -197,14 +291,23 @@ def test_a_disagreement_gets_one_repair_of_the_verifier_then_is_discarded(tmp_pa
     assert sessions[2]["resume"] == "sid-v"
     assert sessions[2]["cwd"] == sessions[1]["cwd"]
     assert "does not agree with the task's reference solution" in sessions[2]["prompt"]
-    assert (sessions[2]["cwd"] / "run" / "failure.txt").read_text().startswith("VERDICT: fail")
+    assert (
+        (sessions[2]["cwd"] / "run" / "failure.txt")
+        .read_text()
+        .startswith("VERDICT: fail")
+    )
     assert checks == ["check.blind1", "check.blind2"]
     repair = sessions[2]["session"]
     assert repair.path.name.endswith("--repair")
-    assert json.loads(repair.meta.read_text())["resumed"] == f"sessions/{sessions[1]['session'].path.name}"
+    assert (
+        json.loads(repair.meta.read_text())["resumed"]
+        == f"sessions/{sessions[1]['session'].path.name}"
+    )
 
 
-def test_resume_of_a_blind_rewrite_goes_to_the_verifiers_session(tmp_path, monkeypatch) -> None:
+def test_resume_of_a_blind_rewrite_goes_to_the_verifiers_session(
+    tmp_path, monkeypatch
+) -> None:
     rw = _rewrite(tmp_path, monkeypatch)
     sessions, checks = [], []
     _wire(monkeypatch, sessions, checks)
@@ -213,8 +316,15 @@ def test_resume_of_a_blind_rewrite_goes_to_the_verifiers_session(tmp_path, monke
     repaired_verifier = NEW_VERIFIER.replace("read().strip()", "read()")
 
     def repair_session(run, cwd, prompt, resume=None):
-        sessions.append({"role": "resume", "cwd": cwd, "session": run.dir, "resume": resume,
-                         "prompt": prompt})
+        sessions.append(
+            {
+                "role": "resume",
+                "cwd": cwd,
+                "session": run.dir,
+                "resume": resume,
+                "prompt": prompt,
+            }
+        )
         (cwd / "tests" / "test_state.py").write_text(repaired_verifier)
         return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 

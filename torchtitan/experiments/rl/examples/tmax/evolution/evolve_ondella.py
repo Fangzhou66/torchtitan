@@ -542,6 +542,7 @@ def handle(
         }
     for key in (
         "operator",
+        "harder_mode",
         "family",
         "hint",
         "simplify",
@@ -663,6 +664,15 @@ def reusable_rewrite(
         meta = json.loads(
             (root.evolution.path / reference / "rewrite.json").read_text()
         )
+        if sig.data["direction"] == "harder":
+            mode = (
+                "student"
+                if os.environ.get("SWE_RETUNE_AGENT", "chat") == "codex"
+                and not ops.harder_uses_operators()
+                else "operators"
+            )
+            if meta.get("harder_mode", "operators") != mode:
+                return None
         if meta.get("status") in {"accepted", "rejected", "kept", "blocked"}:
             return reference
         return None
@@ -813,7 +823,11 @@ def operator_history(root: layout.Root) -> tuple[dict, dict]:
     used_fams: dict[str, int] = {}
     for _task, _rw, meta in _rewrite_metas(root):
         op = meta.get("operator")
-        if meta.get("status") != "accepted" or not op or meta.get("family") == "simplify":
+        if (
+            meta.get("status") != "accepted"
+            or not op
+            or meta.get("family") == "simplify"
+        ):
             continue
         used_ops[op] = used_ops.get(op, 0) + 1
         fam = fam_of.get(op)

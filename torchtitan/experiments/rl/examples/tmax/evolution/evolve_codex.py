@@ -48,6 +48,7 @@ import simplify_operators as so
 import synth_client as llm
 import task_size as ts
 import verifier_literals as vl
+from synth_operators import harder_uses_operators
 from torchtitan.experiments.rl.examples.tmax import layout
 
 
@@ -855,8 +856,7 @@ HIDDEN_FROM_VERIFIER = (
 )
 AGENT_TIMEOUT = int(os.environ.get("EVOLVE_AGENT_TIMEOUT", "2400"))
 
-_HARDER_JOB = """This task was solved {solved} of {attempts} attempts and met the
-hardening threshold. Make it one rung harder, along exactly one of these
+_OPERATOR_HARDER_GUIDANCE = """Make it one rung harder, along exactly one of these
 axes:
 
 {candidates}
@@ -870,14 +870,6 @@ instruction handed over, the step the agent never had to work out. Before you
 choose the axis, list the commands of two or three attempts end to end; the
 attempt that solved it in the fewest turns says which step was free.
 
-The size of the rewrite is checked, not trusted. The reference solution may
-grow by {min_added} to {max_added} non-comment lines over the seed's
-{seed_lines}; the verifier may gain at most {max_asserts} assertions over the
-seed's {seed_asserts}. `./sandbox check` fails outside that and the caller
-rejects the rewrite. Measured on this corpus: rewrites that grew to 125 lines
-came back 0/16 five times in six, while the seed at its own size was solved
-every time. A harder task is one more thing to get right, not a new workflow.
-
 Pick from that list and nothing else. The list is not a menu of equals — it is
 ordered, and the order was computed against the whole task pool: which
 transformations are under-represented right now, and which ones this task has a
@@ -885,6 +877,50 @@ foothold for. Work down it and take the first axis this package genuinely
 supports, so that substituting whichever is easiest to write cannot quietly
 collapse the pool onto a few kinds of change. Then write that axis's id, alone
 on one line, to `run/operator.txt`, before you start changing anything.
+
+"""
+
+
+_STUDENT_HARDER_GUIDANCE = """Choose one change from the student's actual attempts
+in `traces/`. Start by identifying the successful strategy and a task-relevant
+judgment it currently bypasses. Inspect failures as well: distinguish a missing
+skill from unclear requirements or infrastructure trouble.
+
+Before editing, write `run/hardening.md`: cite attempt filenames and concrete
+actions or observations; explain the current strategy, the changed condition,
+and the new inference or decision needed to reach the original goal. State why
+the old strategy with a routine post-processing step would be insufficient.
+Use that analysis to design the patch; no operator menu or operator declaration
+is required.
+
+Make the change interact with the core workflow. An upstream discovery can
+determine a downstream transformation, or conflicting evidence can require a
+decision before an existing action. More dependencies, files, commands, checks,
+or execution time alone are not evidence of difficulty. A separate report or
+checksum appended after the original solution is not enough merely because it
+reads the original outputs. Choose the mechanism the traces justify, rather
+than applying an example mechanically.
+
+Preserve the original user goal and a solvable, discoverable specification.
+Aim for a modest reduction in this student's solve rate toward mixed success,
+not universal failure. Describe this as a hypothesis for student re-testing;
+passing the reference solution only establishes validity. If the traces do not
+support a useful change within the size limits, use the existing give-up path.
+"""
+
+
+_HARDER_JOB = """This task was solved {solved} of {attempts} attempts and met the
+hardening threshold.
+
+{guidance}
+
+The size of the rewrite is checked, not trusted. The reference solution may
+grow by {min_added} to {max_added} non-comment lines over the seed's
+{seed_lines}; the verifier may gain at most {max_asserts} assertions over the
+seed's {seed_asserts}. `./sandbox check` fails outside that and the caller
+rejects the rewrite. Measured on this corpus: rewrites that grew to 125 lines
+came back 0/16 five times in six, while the seed at its own size was solved
+every time. These limits bound the patch size; student re-testing measures difficulty.
 
 Then do the work in this order, one file at a time. The order is not
 arbitrary — each file is written against the one before it, and the synthesis
@@ -949,19 +985,9 @@ different counts, and that note is what it reads.
 Aim for a task a capable agent lands about half the time."""
 
 _HARDER_JOB_BLIND = """This task was solved {solved} of {attempts} attempts and met the
-hardening threshold. Make it one rung harder, along exactly one of these
-axes:
+hardening threshold.
 
-{candidates}
-
-One rung, not a new task. Keep everything the seed asks for and add ONE
-requirement that the agent which solved it never had to meet. The attempts
-are in `traces/`, one file per attempt (format under TRACES at
-the end). Some may have failed; inspect those failures too. What made the
-successful attempts easy is visible there: the guidance the
-instruction handed over, the step the agent never had to work out. Before you
-choose the axis, list the commands of two or three attempts end to end; the
-attempt that solved it in the fewest turns says which step was free.
+{guidance}
 
 The size of the rewrite is checked, not trusted. The reference solution may
 grow by {min_added} to {max_added} non-comment lines over the seed's
@@ -969,15 +995,7 @@ grow by {min_added} to {max_added} non-comment lines over the seed's
 seed's {seed_asserts}. `./sandbox check` fails outside that and the caller
 rejects the rewrite. Measured on this corpus: rewrites that grew to 125 lines
 came back 0/16 five times in six, while the seed at its own size was solved
-every time. A harder task is one more thing to get right, not a new workflow.
-
-Pick from that list and nothing else. The list is not a menu of equals — it is
-ordered, and the order was computed against the whole task pool: which
-transformations are under-represented right now, and which ones this task has a
-foothold for. Work down it and take the first axis this package genuinely
-supports, so that substituting whichever is easiest to write cannot quietly
-collapse the pool onto a few kinds of change. Then write that axis's id, alone
-on one line, to `run/operator.txt`, before you start changing anything.
+every time. These limits bound the patch size; student re-testing measures difficulty.
 
 Then do the work in this order, one file at a time. The order is not
 arbitrary — each file is written against the one before it, and the synthesis
@@ -1064,8 +1082,8 @@ fresh one.
 
 Confirm with `./sandbox check` before you stop."""
 
-_VERIFIER_JOB = """The task in this package was just made one rung harder: `instruction.md` now
-asks for one more thing than the seed did. Write the verifier for the task as the
+_VERIFIER_JOB = """The task in this package was just made one rung harder through a
+change to its requirements or workflow. Write the verifier for the task as the
 instruction states it.
 
 You are shown the instruction, `environment/`, and the seed's verifier at
@@ -1300,7 +1318,10 @@ def evolve_agentic(
     # `operator` is the scored shortlist, in score order, each entry
     # (family, operator_id, definition) -- the same order operator_shortlist
     # and pick_operator both return.
-    cands = list(operator or [])
+    use_operators = job == "harder" and harder_uses_operators()
+    cands = list(operator or []) if use_operators else []
+    if use_operators and not cands:
+        raise ValueError("operator mode requires a nonempty harder shortlist")
     allowed = {op: fam for fam, op, _ in cands}
     seed_size = ts.size_of(
         task["solve_sh"],
@@ -1313,7 +1334,11 @@ def evolve_agentic(
             "harder": (_HARDER_JOB_BLIND if blind else _HARDER_JOB).format(
                 solved=solved,
                 attempts=attempts_n,
-                candidates=_candidates(cands),
+                guidance=(
+                    _OPERATOR_HARDER_GUIDANCE.format(candidates=_candidates(cands))
+                    if use_operators
+                    else _STUDENT_HARDER_GUIDANCE
+                ),
                 seed_lines=seed_size["solution_lines"],
                 seed_asserts=seed_size["verifier_asserts"],
                 min_added=ts.MIN_ADDED,
@@ -1367,6 +1392,8 @@ def evolve_agentic(
     out["_hint"] = f"agent_{job}"
     out["_agent_validated"] = _agent_checked(pkg)
     out["_session"] = str(run.dir.path)
+    if job == "harder":
+        out["_harder_mode"] = "operators" if use_operators else "student"
     if job == "easier":
         decision = so.read_decision(pkg, task.get("_simplify_hint", "vague"))
         decision["hint_level"] = task.get("_simplify_hint", "vague")

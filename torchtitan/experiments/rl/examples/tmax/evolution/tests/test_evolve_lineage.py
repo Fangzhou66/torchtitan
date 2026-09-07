@@ -448,6 +448,31 @@ def test_changed_feedback_runs_again_and_rejection_is_reused(
     assert len(seen) == 3
 
 
+def test_switching_harder_mode_does_not_reuse_the_old_decision(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
+    monkeypatch.setenv("EVOLVE_HARDER_OPERATORS", "1")
+    _signal(root)
+    seen = _stub(monkeypatch, status="kept")
+    process = od.fb.process_one
+
+    def record_mode(*args, **kwargs):
+        result = process(*args, **kwargs)
+        result["harder_mode"] = (
+            "operators" if od.ops.harder_uses_operators() else "student"
+        )
+        return result
+
+    monkeypatch.setattr(od.fb, "process_one", record_mode)
+    od.run_round(root, workers=1)
+    monkeypatch.setenv("EVOLVE_HARDER_OPERATORS", "0")
+    _signal(root, group=8)
+    assert od.run_round(root, workers=1)["handled"] == 1
+    _signal(root, group=9)
+    assert od.run_round(root, workers=1)["reused"] == 1
+    assert len(seen) == 2
+
+
 def test_failed_execution_can_retry_unchanged_feedback(tmp_path, monkeypatch) -> None:
     root = _root(tmp_path, monkeypatch)
     _signal(root)
@@ -554,7 +579,11 @@ def test_operator_history_counts_accepted_rewrites_only(tmp_path, monkeypatch) -
         ("20260904-100000Z", "accepted", {}),
         ("20260904-110000Z", "rejected", {}),
         ("20260904-120000Z", "accepted", {"dry": True}),
-        ("20260904-130000Z", "accepted", {"operator": "reduce_scale", "family": "simplify"}),
+        (
+            "20260904-130000Z",
+            "accepted",
+            {"operator": "reduce_scale", "family": "simplify"},
+        ),
     ):
         rw = task.rewrite("harder", stamp_)
         layout.write_json_atomic(
