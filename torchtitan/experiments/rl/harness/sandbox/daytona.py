@@ -48,6 +48,12 @@ _SESSION_RPC_TIMEOUT_SEC = 60
 _COMMAND_RECOVERY_DELAYS_SEC = (0.0, 0.25, 1.0)
 _EXEC_OUTPUT_DIR = "/tmp/.torchtitan_exec"
 _EXEC_RESULT_DIR = "/dev/shm/.torchtitan_exec"
+# Result files are removed once read, but a command that is timed out, cancelled or
+# whose session is deleted is never read, so its pair stays. /dev/shm defaults to 64 MB
+# in a container: without a sweep those survivors accumulate for the sandbox's life and
+# a later exec fails to write its status, which surfaces as a hang rather than an error.
+# Age-bounded so it can never remove a concurrent command's files.
+_EXEC_RESULT_TTL_MIN = 30
 _EXEC_STAGING_DIR = "/dev/shm"
 _EXEC_RAW_OUTPUT_LIMIT_BYTES = 1_048_576
 _EXEC_OUTPUT_HEAD_BYTES = 10_000
@@ -201,11 +207,18 @@ def _build_observable_exec(full: str, command_key: str) -> _ObservableExecComman
     quoted_status = shlex.quote(status_path)
     quoted_status_tmp = shlex.quote(status_tmp_path)
     quoted_wrapper = shlex.quote(wrapper_path)
+    # The status write fails when /dev/shm is full, and that failure is swallowed, so the
+    # client sees no status and polls to its deadline. The rc is written here instead --
+    # on the overlay, not the tmpfs that just filled -- so the hang is distinguishable
+    # afterwards from a command that never finished.
+    quoted_status_fallback = shlex.quote(f"{_EXEC_OUTPUT_DIR}/{command_key}.status")
     truncation_marker = shlex.quote("\n[torchtitan: command output truncated]\n")
     wrapper = (
         f"rm -f {quoted_wrapper}; "
         f"_tt_run() {{ {full}; _tt_exec_rc=$?; }}; "
         f"mkdir -p {quoted_result_dir} 2>/dev/null || :; "
+        f"find {quoted_result_dir} -type f -mmin +{_EXEC_RESULT_TTL_MIN} "
+        f"-delete 2>/dev/null || :; "
         f"rm -f {quoted_output} {quoted_output_tmp} {quoted_status} "
         f"{quoted_status_tmp}; "
         f"if mkdir -p {quoted_output_dir} 2>/dev/null "
@@ -243,7 +256,9 @@ def _build_observable_exec(full: str, command_key: str) -> _ObservableExecComman
         "fi; "
         f"mkdir -p {quoted_result_dir} 2>/dev/null || :; "
         f"(printf '%s\\n' \"$_tt_exec_rc\" > {quoted_status_tmp} "
-        f"&& mv -f {quoted_status_tmp} {quoted_status}) 2>/dev/null || :; "
+        f"&& mv -f {quoted_status_tmp} {quoted_status}) 2>/dev/null "
+        f"|| {{ mkdir -p {quoted_output_dir} 2>/dev/null; printf '%s\\n' "
+        f"\"$_tt_exec_rc\" > {quoted_status_fallback} 2>/dev/null; }} || :; "
         '(exit "$_tt_exec_rc")'
     )
     encoded_wrapper = base64.b64encode(wrapper.encode()).decode("ascii")
@@ -994,6 +1009,24 @@ class DaytonaSandbox:
             )
         return rc, out, err
 
+    async def _discard_exec_results(self, *paths: str) -> None:
+        """Drop this command's result files now that both have been read.
+
+        Best effort in the strongest sense: the outcome is already in hand, so a failure
+        here must never change what exec returns. The wrapper's age-bounded sweep is what
+        covers the commands that are never read at all.
+        """
+        import asyncio
+
+        for path in paths:
+            try:
+                await asyncio.wait_for(
+                    self._sb.fs.delete_file(path),
+                    timeout=_SESSION_RPC_TIMEOUT_SEC,
+                )
+            except Exception:  # noqa: BLE001 -- cleanup never fails a completed command
+                pass
+
     async def _delete_exec_session(self, sid: str, *, reason: str) -> None:
         """Best-effort cleanup for a command whose outcome is not usable."""
         import asyncio
@@ -1420,6 +1453,7 @@ class DaytonaSandbox:
                 output = _MISSING_OUTPUT_MESSAGE
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
+        await self._discard_exec_results(status_path, output_path)
         return exit_code, str(output)
 
     async def write_file(
