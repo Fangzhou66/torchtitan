@@ -991,12 +991,35 @@ class Controller(Configurable):
             # the eval engines without shrinking training-generator KV capacity.
             # Sized for the validation pass instead of the rollout pool, on their own
             # router.
+            # Eval-only cudagraph mode override. The eval generator reloads
+            # weights only once per validation pass (not every train step), so it
+            # can afford a wider cudagraph mode than the training generators --
+            # notably FULL_AND_PIECEWISE, which also graphs prefill/mixed batches
+            # (the long-context per-turn prefill that dominates eval wall-clock).
+            # Empty (default) inherits config.generator.cudagraph unchanged, so
+            # other RL examples that never set this env are unaffected.
+            _eval_cg_mode = os.environ.get("SWE_EVAL_GEN_CUDAGRAPH_MODE", "").strip()
+            if _eval_cg_mode and _eval_cg_mode not in (
+                "FULL_DECODE_ONLY",
+                "FULL_AND_PIECEWISE",
+                "FULL",
+            ):
+                raise ValueError(
+                    "SWE_EVAL_GEN_CUDAGRAPH_MODE must be one of FULL_DECODE_ONLY, "
+                    f"FULL_AND_PIECEWISE, FULL; got {_eval_cg_mode!r}"
+                )
+            _eval_cudagraph = (
+                replace(config.generator.cudagraph, mode=_eval_cg_mode)
+                if _eval_cg_mode
+                else config.generator.cudagraph
+            )
             eval_generator_config = replace(
                 config.generator,
                 gpu_memory_limit=float(
                     os.environ.get("SWE_EVAL_GPU_MEMORY_LIMIT", "0.7")
                 ),
                 parallelism=config.eval_generator_parallelism(),
+                cudagraph=_eval_cudagraph,
             )
             eval_generator_dp_degree = max(
                 eval_generator_config.parallelism.data_parallel_degree, 1
