@@ -101,16 +101,17 @@ from torchtitan.experiments.rl.examples.tmax.prepare_tmax_data import (
     selfcheck_env_identities,
 )
 from torchtitan.experiments.rl.examples.tmax.reaudit_snapshot import (
+    fetch_snapshot,
+    file_record,
     HF_PARQUET,
     HF_PEAKS,
     HF_REPO as HF_REPO,
     HF_TAR,
-    RefuseError,
-    fetch_snapshot,
-    file_record,
     publish_sources,
+    RefuseError,
     validate_peaks,
 )
+from torchtitan.experiments.rl.examples.tmax.resource_sizing import load_allocations
 
 HF_REVISION = "main"
 MEMBER_ROOT = "tasks"
@@ -157,7 +158,9 @@ def fetch(
     *, revision: str, token_file: str | None, cache_dir: str | None
 ) -> tuple[str, str]:
     """Compatibility helper for callers needing only the split and tar paths."""
-    snapshot = fetch_snapshot(revision=revision, token=_read_token(token_file), cache_dir=cache_dir)
+    snapshot = fetch_snapshot(
+        revision=revision, token=_read_token(token_file), cache_dir=cache_dir
+    )
     return snapshot["files"][HF_PARQUET]["path"], snapshot["files"][HF_TAR]["path"]
 
 
@@ -185,13 +188,20 @@ def load_split(parquet_path: str) -> list[dict]:
     for name in _NEEDED_COLUMNS:
         kind = table.schema.field(name).type
         nullable = name in (*_HOOK_COLUMNS, _PROTECTED_COLUMN, _PROTECTED_CMDS_COLUMN)
-        if not (pa.types.is_string(kind) or pa.types.is_large_string(kind)
-                or (nullable and pa.types.is_null(kind))):
+        if not (
+            pa.types.is_string(kind)
+            or pa.types.is_large_string(kind)
+            or (nullable and pa.types.is_null(kind))
+        ):
             raise RefuseError(f"split column {name} has incompatible type {kind}")
     for name in ("req_cpus", "req_memory_mb", "est_disk_mb"):
         if name in table.column_names:
             kind = table.schema.field(name).type
-            if not (pa.types.is_integer(kind) or pa.types.is_floating(kind) or pa.types.is_null(kind)):
+            if not (
+                pa.types.is_integer(kind)
+                or pa.types.is_floating(kind)
+                or pa.types.is_null(kind)
+            ):
                 raise RefuseError(f"split column {name} has incompatible type {kind}")
     rows = table.to_pylist()
     ids = [r["task_id"] for r in rows]
@@ -293,7 +303,7 @@ def _package_sha256(
     """The split builder's task_content_sha256: sorted file members, relpath + NUL + content + NUL,
     relpath relative to the PACKAGE prefix ('instruction.md'), never the tar root."""
     h = hashlib.sha256()
-    for m in sorted(members, key=lambda m: m.name):
+    for m in sorted(members, key=lambda member: member.name):
         rel = m.name[len(prefix) + 1 :]
         f = tar.extractfile(m)
         assert f is not None
@@ -339,7 +349,9 @@ def verify_and_extract(tar_path: str, rows: list[dict], out_root: str) -> str:
             )
         extra = set(groups) - {r["member_prefix"] for r in rows}
         if extra:
-            raise RefuseError(f"tar contains packages outside the split: {sorted(extra)[:5]}")
+            raise RefuseError(
+                f"tar contains packages outside the split: {sorted(extra)[:5]}"
+            )
         bad_sha = []
         for r in rows:
             prefix = r["member_prefix"]
@@ -569,6 +581,7 @@ def prepare(
     max_oracle_commands: int | None = None,
     inject_agent_runtime: bool = False,
     smoke_size: int = 0,
+    peaks_path: str | None = None,
 ) -> dict:
     """The whole pipeline on local files; returns the counts the CLI prints. Raises RefuseError."""
     rows = load_split(parquet_path)
@@ -577,6 +590,18 @@ def prepare(
     hooked = assert_hook_pairing(rows)
     tasks_root = verify_and_extract(tar_path, rows, work_dir)
     resource_map = _load_resource_map(parquet_path)
+    if peaks_path is not None:
+        latest = load_allocations(peaks_path)
+        if set(latest) != {r["task_id"] for r in rows}:
+            raise RefuseError("peaks and split must have identical task IDs")
+        resource_map = {
+            tid: {
+                "daytona_cpu": r["cpu"],
+                "daytona_mem_gb": r["mem_gb"],
+                "daytona_disk_gb": r["disk_gb"],
+            }
+            for tid, r in latest.items()
+        }
     built, reasons = build_rows(
         tasks_root,
         rows,
@@ -621,7 +646,11 @@ def prepare(
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     ap.add_argument("--out", required=True, help="output JSONL path")
-    ap.add_argument("--revision", default=HF_REVISION, help="HF ref to resolve once (default: main)")
+    ap.add_argument(
+        "--revision",
+        default=HF_REVISION,
+        help=f"{HF_REPO} ref to resolve once (default: main)",
+    )
     ap.add_argument(
         "--token-file",
         default=os.environ.get("TMAX_HF_TOKEN_FILE"),
@@ -637,16 +666,24 @@ def main() -> None:
         default=None,
         help="local data/tasks-reaudit-00000.tar (skips the fetch)",
     )
-    ap.add_argument("--peaks", default=None, help="local reaudit_full.parquet, with --parquet/--tar")
-    ap.add_argument("--source-dir", default=None,
-                    help="preserve Hub sources under this directory/<commit>/ for breeding")
+    ap.add_argument(
+        "--peaks", default=None, help="local reaudit_full.parquet, with --parquet/--tar"
+    )
+    ap.add_argument(
+        "--source-dir",
+        default=None,
+        help="preserve Hub sources under this directory/<commit>/ for breeding",
+    )
     ap.add_argument(
         "--no-sha-pin",
         action="store_true",
         help="deprecated compatibility flag; release-specific SHA pins no longer exist",
     )
     ap.add_argument(
-        "--expect-rows", type=int, default=None, help="optional assertion on the split row count"
+        "--expect-rows",
+        type=int,
+        default=None,
+        help="optional assertion on the split row count",
     )
     ap.add_argument(
         "--work-dir",
@@ -670,26 +707,49 @@ def main() -> None:
     if args.peaks is not None and args.parquet is None:
         ap.error("--peaks requires local --parquet and --tar")
     if args.source_dir is not None and args.parquet is not None:
-        ap.error("--source-dir requires a Hub-resolved revision; local inputs have no verified HF identity")
+        ap.error(
+            "--source-dir requires a Hub-resolved revision; local inputs have no verified HF identity"
+        )
     if args.no_sha_pin:
-        print("--no-sha-pin is obsolete; Hub digests and package consistency are still checked", file=sys.stderr)
+        print(
+            "--no-sha-pin is obsolete; Hub digests and package consistency are still checked",
+            file=sys.stderr,
+        )
 
     work = None
     try:
         if args.parquet is None:
-            snapshot = fetch_snapshot(revision=args.revision, token=_read_token(args.token_file),
-                                      cache_dir=args.cache_dir)
+            snapshot = fetch_snapshot(
+                revision=args.revision,
+                token=_read_token(args.token_file),
+                cache_dir=args.cache_dir,
+            )
         else:
-            files = {HF_PARQUET: file_record(args.parquet), HF_TAR: file_record(args.tar)}
+            files = {
+                HF_PARQUET: file_record(args.parquet),
+                HF_TAR: file_record(args.tar),
+            }
             if args.peaks is not None:
                 files[HF_PEAKS] = file_record(args.peaks)
-            snapshot = {"repo": None, "requested_revision": None, "revision": None, "files": files}
+            snapshot = {
+                "repo": None,
+                "requested_revision": None,
+                "revision": None,
+                "files": files,
+            }
         files = snapshot["files"]
         parquet_path, tar_path = files[HF_PARQUET]["path"], files[HF_TAR]["path"]
         if HF_PEAKS in files:
-            validate_peaks(files[HF_PEAKS]["path"], {r["task_id"] for r in load_split(parquet_path)})
-        if args.source_dir and os.path.exists(os.path.join(args.source_dir, snapshot["revision"])):
-            raise RefuseError("source snapshot already exists; reuse it without overwriting")
+            validate_peaks(
+                files[HF_PEAKS]["path"],
+                {r["task_id"] for r in load_split(parquet_path)},
+            )
+        if args.source_dir and os.path.exists(
+            os.path.join(args.source_dir, snapshot["revision"])
+        ):
+            raise RefuseError(
+                "source snapshot already exists; reuse it without overwriting"
+            )
         work = args.work_dir or tempfile.mkdtemp(prefix="tmax_reaudit_")
         summary = prepare(
             parquet_path=parquet_path,
@@ -702,13 +762,25 @@ def main() -> None:
             max_oracle_commands=args.max_oracle_commands,
             inject_agent_runtime=args.inject_agent_runtime,
             smoke_size=args.smoke_size,
+            peaks_path=files[HF_PEAKS]["path"] if HF_PEAKS in files else None,
         )
-        sources = (publish_sources(snapshot, os.path.join(work, MEMBER_ROOT), args.source_dir)
-                   if args.source_dir else None)
+        sources = (
+            publish_sources(snapshot, os.path.join(work, MEMBER_ROOT), args.source_dir)
+            if args.source_dir
+            else None
+        )
         manifest_path = os.path.splitext(args.out)[0] + ".manifest.json"
         with open(manifest_path, "w") as f:
-            json.dump({**snapshot, "sources": sources, "output": file_record(args.out),
-                       "preparation": summary}, f, indent=2)
+            json.dump(
+                {
+                    **snapshot,
+                    "sources": sources,
+                    "output": file_record(args.out),
+                    "preparation": summary,
+                },
+                f,
+                indent=2,
+            )
             f.write("\n")
     except RefuseError as e:
         print(f"REFUSING: {e}", file=sys.stderr)
@@ -716,7 +788,9 @@ def main() -> None:
     finally:
         if args.work_dir is None and work is not None:
             shutil.rmtree(work, ignore_errors=True)
-    print(f"dataset revision: {snapshot['revision'] or 'local inputs'}; manifest: {manifest_path}")
+    print(
+        f"dataset revision: {snapshot['revision'] or 'local inputs'}; manifest: {manifest_path}"
+    )
     if sources:
         print(f"TMax sources: {os.path.dirname(sources['tmax-clean'])}")
     print(

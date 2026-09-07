@@ -108,7 +108,9 @@ TRL_BASE="$SEED_SOURCE_ROOT" "$PY" "$TMAX/evolution/build_mix_v2.py" \
   --tmax-parquet "$TMAX_SOURCES/tmax-clean/splits/reaudit.parquet" \
   --tmax-peaks "$TMAX_SOURCES/tmax-clean/splits/reaudit_full.parquet" \
   --out "$SEED_MIX" --apply
-"$PY" "$TMAX/evolution/apply_audit_sizing.py" --sizing "$AUDITED_SIZING" --mix "$SEED_MIX" --include-holdout --apply
+"$PY" "$TMAX/evolution/apply_audit_sizing.py" --sizing "$AUDITED_SIZING" \
+  --tmax-peaks "$TMAX_SOURCES/tmax-clean/splits/reaudit_full.parquet" \
+  --mix "$SEED_MIX" --include-holdout --apply
 "$PY" "$TMAX/new_root.py" --base "$TRL_BASE" --mix "$SEED_MIX" \
   --profile "$TRL_PROFILE" --bin "$AGENT_BIN" \
   --sources "$SEED_SOURCE_ROOT/data/sources/tw-extract" \
@@ -126,6 +128,17 @@ publishes. The output manifest records the commit and file hashes; package
 content hashes, task membership, required columns and hook pairing still have
 to agree. Local `--parquet/--tar [--peaks]` inputs are also supported, with their
 hashes recorded and no claimed Hub identity.
+
+TMax RAM and disk allocations come from that snapshot's current total peaks.
+No environment baseline is subtracted, and older agent/oracle sizing cannot
+override them. The preparer, mix builder, `derive_sizing --peer`, and final apply
+step share `resource_sizing.py`: 1.3 times the measured peak, rounded up to GiB,
+with a 1 GiB floor and 8/10 GiB caps. Censored RAM remains null in the measurement
+table and receives an explicit **6 GiB allocation policy**; disk is sized
+independently. Missing uncensored measurements use the explicit 2 GiB fallback.
+The new full table drops historical resource/baseline columns and carries separate
+`peak_ram_is_measurement` / `peak_disk_is_measurement` flags. Previous HF revisions
+remain available for existing experiments.
 
 An existing `--source-dir/<commit>` is never overwritten. To reuse one, skip
 the download/preparation command and set `TMAX_SOURCES` to that version's

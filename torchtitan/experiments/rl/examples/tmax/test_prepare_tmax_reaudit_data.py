@@ -42,6 +42,7 @@ PREP = _load("prepare_tmax_data")
 RTS = _load("prepare_rts_data")
 _load("integrity_baseline")  # the script imports tmax_protected_fields from it
 SNAPSHOT = _load("reaudit_snapshot")
+_load("resource_sizing")
 R = _load("prepare_tmax_reaudit_data")
 
 _REF = "hamishi740/swerl-tmax-v3:0123456789ab"
@@ -448,7 +449,9 @@ def test_protected_paths_pass_through_on_a_three_row_fixture():
             assert "lacks column(s)" in str(e) and drop[-1] in str(e), e
         else:
             raise AssertionError(f"a split lacking {drop} must refuse")
-    summary, _, _ = _prepare([HOOKED, UNHOOKED], extra_columns=("corpus_revision", "future_column"))
+    summary, _, _ = _prepare(
+        [HOOKED, UNHOOKED], extra_columns=("corpus_revision", "future_column")
+    )
     assert summary["rows"] == 2
     # a cell that is present but not a JSON list of non-empty strings refuses by id
     for bad in ('"not-a-list"', '["ok", ""]', "{oops"):
@@ -552,23 +555,45 @@ def _snapshot_fixture(revision="a" * 40):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    parquet, tar, work = _fixture([HOOKED, UNHOOKED], extra_columns=("corpus_revision",))
+    parquet, tar, work = _fixture(
+        [HOOKED, UNHOOKED], extra_columns=("corpus_revision",)
+    )
     peaks = pathlib.Path(work).parent / "reaudit_full.parquet"
-    pq.write_table(pa.table({
-        "task_id": [HOOKED[0], UNHOOKED[0]], "peak_ram_mb": [300.0, None],
-        "peak_disk_mb": [400.0, 500.0], "ram_at_ceiling": [False, None],
-        "disk_at_ceiling": [False, None],
-    }), peaks)
-    return {"repo": R.HF_REPO, "requested_revision": "main", "revision": revision,
-            "files": {name: SNAPSHOT.file_record(path) for name, path in (
-                (R.HF_PARQUET, parquet), (R.HF_TAR, tar), (R.HF_PEAKS, peaks))}}
+    pq.write_table(
+        pa.table(
+            {
+                "task_id": [HOOKED[0], UNHOOKED[0]],
+                "peak_ram_mb": [300.0, None],
+                "peak_disk_mb": [400.0, 500.0],
+                "peak_ram_mb_censored": [False, True],
+                "peak_ram_is_measurement": [True, False],
+                "peak_disk_is_measurement": [True, True],
+            }
+        ),
+        peaks,
+    )
+    return {
+        "repo": R.HF_REPO,
+        "requested_revision": "main",
+        "revision": revision,
+        "files": {
+            name: SNAPSHOT.file_record(path)
+            for name, path in (
+                (R.HF_PARQUET, parquet),
+                (R.HF_TAR, tar),
+                (R.HF_PEAKS, peaks),
+            )
+        },
+    }
 
 
 def test_main_is_resolved_once_and_all_downloads_are_checked():
     snapshot = _snapshot_fixture()
     calls = []
-    entries = [SimpleNamespace(rfilename=name, lfs=SimpleNamespace(sha256=record["sha256"]))
-               for name, record in snapshot["files"].items()]
+    entries = [
+        SimpleNamespace(rfilename=name, lfs=SimpleNamespace(sha256=record["sha256"]))
+        for name, record in snapshot["files"].items()
+    ]
 
     def info(repo, **kw):
         calls.append(("resolve", kw["revision"]))
@@ -580,12 +605,15 @@ def test_main_is_resolved_once_and_all_downloads_are_checked():
         assert kw["revision"] == "a" * 40
         return snapshot["files"][name]["path"]
 
-    hub = SimpleNamespace(HfApi=lambda **kw: SimpleNamespace(dataset_info=info),
-                          hf_hub_download=download)
+    hub = SimpleNamespace(
+        HfApi=lambda **kw: SimpleNamespace(dataset_info=info), hf_hub_download=download
+    )
     with patch.dict(sys.modules, {"huggingface_hub": hub}):
         got = SNAPSHOT.fetch_snapshot(revision="main", token=None, cache_dir=None)
         assert got == snapshot
-        assert calls == [("resolve", "main")] + [(n, "a" * 40) for n in snapshot["files"]]
+        assert calls == [("resolve", "main")] + [
+            (n, "a" * 40) for n in snapshot["files"]
+        ]
         # Corrupted cached/downloaded content must not pass merely because the ref resolved.
         pathlib.Path(snapshot["files"][R.HF_TAR]["path"]).write_bytes(b"corrupt")
         try:
@@ -612,7 +640,9 @@ def test_schema_types_and_peak_membership_are_checked():
         else:
             raise AssertionError("mismatched peaks membership must refuse")
     table = pq.read_table(parquet)
-    table = table.set_column(table.column_names.index("pre_test_sh"), "pre_test_sh", pa.array([1, 2]))
+    table = table.set_column(
+        table.column_names.index("pre_test_sh"), "pre_test_sh", pa.array([1, 2])
+    )
     pq.write_table(table, parquet)
     try:
         R.load_split(parquet)
@@ -627,8 +657,12 @@ def test_dynamic_count_still_refuses_lost_rows_and_extra_packages():
 
     parquet, tar, work = _fixture([HOOKED, UNHOOKED], binary_fixture=UNHOOKED[0])
     try:
-        R.prepare(parquet_path=parquet, tar_path=tar, work_dir=work,
-                  out=str(pathlib.Path(work).parent / "out.jsonl"))
+        R.prepare(
+            parquet_path=parquet,
+            tar_path=tar,
+            work_dir=work,
+            out=str(pathlib.Path(work).parent / "out.jsonl"),
+        )
     except R.RefuseError as e:
         assert "built 1 rows of 2 expected" in str(e)
     else:
@@ -649,34 +683,58 @@ def test_cli_records_revision_and_preserves_distinct_source_snapshots():
             snapshot = _snapshot_fixture(revision)
             out = root / f"{revision}.jsonl"
             argv = ["prepare", "--out", str(out), "--source-dir", str(root / "sources")]
-            with patch.object(R, "fetch_snapshot", return_value=snapshot), patch.object(sys, "argv", argv):
+            with patch.object(R, "fetch_snapshot", return_value=snapshot), patch.object(
+                sys, "argv", argv
+            ):
                 R.main()
             manifest = json.loads(out.with_suffix(".manifest.json").read_text())
             assert manifest["revision"] == revision
             assert manifest["output"]["sha256"] == SNAPSHOT.sha256_file(out)
             assert manifest["preparation"]["rows"] == 2
+            prepared = {
+                r["label"]: r for r in map(json.loads, out.read_text().splitlines())
+            }
+            assert prepared[UNHOOKED[0]]["metadata"]["daytona_mem_gb"] == 6
             extract = pathlib.Path(manifest["sources"]["tmax-extract"])
-            assert (extract / "tasks" / HOOKED[0] / "solution/solve.sh").read_bytes() == _package(HOOKED[0], True)["solution/solve.sh"]
+            assert (
+                extract / "tasks" / HOOKED[0] / "solution/solve.sh"
+            ).read_bytes() == _package(HOOKED[0], True)["solution/solve.sh"]
             clean = pathlib.Path(manifest["sources"]["tmax-clean"])
             for name, record in snapshot["files"].items():
                 assert SNAPSHOT.sha256_file(clean / name) == record["sha256"]
         old = root / "sources" / ("a" * 40) / "snapshot.json"
         before = old.read_bytes()
-        with patch.object(R, "fetch_snapshot", return_value=_snapshot_fixture("a" * 40)), patch.object(sys, "argv", argv):
+        with patch.object(
+            R, "fetch_snapshot", return_value=_snapshot_fixture("a" * 40)
+        ), patch.object(sys, "argv", argv):
             try:
                 R.main()
             except SystemExit as e:
                 assert e.code == 2
             else:
-                raise AssertionError("an existing source snapshot must not be overwritten")
+                raise AssertionError(
+                    "an existing source snapshot must not be overwritten"
+                )
         assert old.read_bytes() == before
 
 
 def test_offline_cli_records_hashes_without_claiming_a_hub_revision():
     parquet, tar, work = _fixture([HOOKED, UNHOOKED], extra_columns=("new_column",))
     out = pathlib.Path(work).parent / "offline.jsonl"
-    with patch.object(sys, "argv", ["prepare", "--parquet", parquet, "--tar", tar,
-                                    "--out", str(out), "--no-sha-pin"]):
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "prepare",
+            "--parquet",
+            parquet,
+            "--tar",
+            tar,
+            "--out",
+            str(out),
+            "--no-sha-pin",
+        ],
+    ):
         R.main()
     manifest = json.loads(out.with_suffix(".manifest.json").read_text())
     assert manifest["revision"] is None

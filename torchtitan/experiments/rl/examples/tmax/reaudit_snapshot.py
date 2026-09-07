@@ -49,7 +49,7 @@ def fetch_snapshot(*, revision: str, token: str | None, cache_dir: str | None) -
     constants. Non-LFS files still get a recorded SHA256; package validation is
     performed by the preparer independently of these transport checks.
     """
-    from huggingface_hub import HfApi, hf_hub_download
+    from huggingface_hub import hf_hub_download, HfApi
 
     info = HfApi(token=token).dataset_info(
         HF_REPO, revision=revision, files_metadata=True
@@ -98,9 +98,14 @@ def validate_peaks(path: str, task_ids: set[str]) -> None:
         "task_id": pa.types.is_string,
         "peak_ram_mb": None,
         "peak_disk_mb": None,
-        "ram_at_ceiling": pa.types.is_boolean,
-        "disk_at_ceiling": pa.types.is_boolean,
     }
+    for name in (
+        "peak_ram_mb_censored",
+        "peak_ram_is_measurement",
+        "peak_disk_is_measurement",
+    ):
+        if name in table.column_names:
+            needed[name] = pa.types.is_boolean
     for name, predicate in needed.items():
         if name not in table.column_names:
             raise RefuseError(f"peaks file lacks {name}")
