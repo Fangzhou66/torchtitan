@@ -386,8 +386,14 @@ class _RootSandbox:
     to ``root``, so ``run_vanillux_loop`` (and ``grade_tmax``) run entirely as root.
     """
 
-    def __init__(self, inner: Sandbox) -> None:
+    def __init__(self, inner: Sandbox, timing: dict | None = None) -> None:
         self._inner = inner
+        # In-sandbox command wall-clock, accumulated across every exec so a
+        # rollout can report how much of its time was spent running commands in
+        # the sandbox (apt/pip/pytest/tmux round trips) vs generating tokens or
+        # waiting on the shared generator. The caller passes a dict it hoisted
+        # above the sandbox's scope; None self-owns one for standalone use.
+        self._timing = timing if timing is not None else {"exec_secs": 0.0, "exec_n": 0}
 
     @property
     def sandbox_id(self) -> str:
@@ -402,7 +408,14 @@ class _RootSandbox:
         return self._inner.issue_tracker
 
     async def exec(self, cmd: str, *, user: str = "root", **kwargs):
-        return await self._inner.exec(cmd, user="root", **kwargs)
+        _t0 = time.monotonic()
+        try:
+            return await self._inner.exec(cmd, user="root", **kwargs)
+        finally:
+            self._timing["exec_secs"] = (
+                self._timing.get("exec_secs", 0.0) + time.monotonic() - _t0
+            )
+            self._timing["exec_n"] = self._timing.get("exec_n", 0) + 1
 
     async def write_file(self, sandbox_path: str, content, *, user: str = "root"):
         return await self._inner.write_file(sandbox_path, content, user="root")
@@ -1229,6 +1242,10 @@ class TMaxRollouter(Rollouter):
         verifier_sec = self._verifier_budget_sec(sample)
         started_at = time.monotonic()
         started_wall = time.time()
+        # Sandbox exec wall-clock, filled by _RootSandbox as the agent runs;
+        # hoisted here so the completion line can read it whatever path the
+        # rollout takes out of the sandbox scope.
+        exec_timing: dict = {"exec_secs": 0.0, "exec_n": 0}
         # Where this rollout's record goes; None writes nothing (said once).
         run = _run_dir()
         collect_pane = (
@@ -1273,7 +1290,7 @@ class TMaxRollouter(Rollouter):
                     )
                     # Force every tool command to run as root (tmax tasks touch
                     # system paths); the faithful Vanillux loop dispatches bash here.
-                    root_sb = _RootSandbox(sandbox)
+                    root_sb = _RootSandbox(sandbox, exec_timing)
                     # Docker would have run this as PID 1 before anything else; our
                     # backends exec commands directly, so start it here or every
                     # task that depends on it is unsolvable.
@@ -1516,13 +1533,15 @@ class TMaxRollouter(Rollouter):
         # matter" is unanswerable, and the budget gets picked by feel.
         logger.info(
             "[tmax] %s: status=%s reward=%.2f turns=%d oom_suspect=%d "
-            "secs=%.0f budget=%d",
+            "secs=%.0f exec_secs=%.0f exec_n=%d budget=%d",
             rollout_id,
             status,
             reward,
             len(turns),
             int(oom_suspect),
             time.monotonic() - started_at,
+            exec_timing["exec_secs"],
+            exec_timing["exec_n"],
             budget_sec,
         )
         record = None
