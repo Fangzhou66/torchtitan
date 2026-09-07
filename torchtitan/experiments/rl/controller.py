@@ -1013,6 +1013,31 @@ class Controller(Configurable):
                 if _eval_cg_mode
                 else config.generator.cudagraph
             )
+            # Eval-only backend override. The training generators must stay
+            # torchtitan_wrapper so rollouts share the trainer's exact GDN fla
+            # kernels; the eval generator, scored against a fixed benchmark and
+            # reloading weights only per pass, can use vllm_native -- vLLM's own
+            # fused GDN (recurrent decode + chunked prefill) and fuller graph
+            # coverage, which the wrapper lacks. Weights still sync via the
+            # model's state_dict_adapter; the fp32 lm-head patch keeps logits
+            # aligned to the trainer. Empty (default) inherits config.generator's
+            # backend, so nothing changes unless this env is set.
+            _eval_backend = os.environ.get("SWE_EVAL_GEN_BACKEND", "").strip()
+            if _eval_backend and _eval_backend not in (
+                "torchtitan_wrapper",
+                "vllm_native",
+            ):
+                raise ValueError(
+                    "SWE_EVAL_GEN_BACKEND must be torchtitan_wrapper or "
+                    f"vllm_native; got {_eval_backend!r}"
+                )
+            _eval_backend_kwargs: dict = {}
+            if _eval_backend:
+                _eval_backend_kwargs["backend"] = _eval_backend
+                if _eval_backend == "vllm_native" and not config.generator.vllm_additional_config:
+                    _eval_backend_kwargs["vllm_additional_config"] = {
+                        "gdn_prefill_backend": "triton"
+                    }
             eval_generator_config = replace(
                 config.generator,
                 gpu_memory_limit=float(
@@ -1020,6 +1045,7 @@ class Controller(Configurable):
                 ),
                 parallelism=config.eval_generator_parallelism(),
                 cudagraph=_eval_cudagraph,
+                **_eval_backend_kwargs,
             )
             eval_generator_dp_degree = max(
                 eval_generator_config.parallelism.data_parallel_degree, 1
