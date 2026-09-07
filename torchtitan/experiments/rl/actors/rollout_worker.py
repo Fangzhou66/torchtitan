@@ -146,15 +146,21 @@ class RolloutWorker(Actor):
         #     images -- object_storage.py:187 (run_in_executor(None, ...)), :195, :198
         #   * aiohttp's ThreadedResolver, which resolves DNS on the default executor because
         #     aiodns is absent from runbook/requirements.lock.txt (aiohttp 3.14.3)
-        # so at high rollout concurrency the pool saturates and new connections stall in DNS.
+        # These can contend at high concurrency. Increasing this shared pool can
+        # reduce DNS queueing; it does not isolate DNS or guarantee no timeouts.
         loop = asyncio.get_running_loop()
-        stock = min(32, (os.cpu_count() or 1) + 4)
+        cpu_count = os.cpu_count()
+        stock = min(32, (cpu_count or 1) + 4)
         before = getattr(getattr(loop, "_default_executor", None), "_max_workers", None)
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=os.cpu_count()))
+        executor = ThreadPoolExecutor(max_workers=cpu_count)
+        loop.set_default_executor(executor)
         logging.getLogger("torchtitan").info(
             "[rollout_worker] default executor max_workers: installed=%s (was %s; asyncio "
             "would default to %s) cpu_count=%s",
-            os.cpu_count(), before, stock, os.cpu_count(),
+            executor._max_workers,
+            before,
+            stock,
+            cpu_count,
         )
         self._generator_router = self.config.generator_router.build(
             generators=generators
