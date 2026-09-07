@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Agentic retune: change a task with the Codex CLI instead of one chat call.
 
 The chat retune (evolve.simplify) crams the failure traces into a single prompt
@@ -38,9 +44,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import evolve as ev
+import simplify_operators as so
 import synth_client as llm
 import task_size as ts
-import simplify_operators as so
 import verifier_literals as vl
 from torchtitan.experiments.rl.examples.tmax import layout
 
@@ -63,7 +69,7 @@ CYBER_FLAG = "flagged for possible cybersecurity risk"
 CYBER_RETRIES = int(os.environ.get("CODEX_CYBER_RETRIES", "2"))
 
 
-class Blocked(Exception):
+class Blocked(Exception):  # noqa: N818 -- existing exception name used by callers
     """The agent declined the job rather than forcing a pass.
 
     Distinct from a crash: nothing went wrong, the task simply stays as it is.
@@ -88,7 +94,8 @@ MAX_TOOL_CALLS = int(os.environ.get("CODEX_RETUNE_MAX_CALLS", "25"))
 # virtualenv (TRL_SDK_PY) rather than the training one.
 CODEX_DRIVER = os.environ.get("EVOLVE_CODEX_DRIVER", "exec")
 SDK_PY = os.environ.get(
-    "TRL_SDK_PY", "/scratch/gpfs/TRIDAO/al9080/terminal-rl/sdkvenv/bin/python")
+    "TRL_SDK_PY", "/scratch/gpfs/TRIDAO/al9080/terminal-rl/sdkvenv/bin/python"
+)
 SESSION_DRIVER = Path(__file__).resolve().parent / "codex_session.py"
 TIMEOUT_SEC = int(os.environ.get("CODEX_RETUNE_TIMEOUT", "600"))
 # What the harness puts into the package and takes out again before a revision
@@ -115,6 +122,7 @@ def _require_codex() -> None:
 # --------------------------------------------------------------------------
 # One codex invocation, one session directory
 # --------------------------------------------------------------------------
+
 
 @dataclass
 class SessionRun:
@@ -184,8 +192,13 @@ def cyber_filtered(session: layout.SessionDir) -> bool:
 
 
 @contextlib.contextmanager
-def session(rewrite: layout.RewriteDir, kind: str, *, timeout: int,
-            resumes: layout.SessionDir | None = None):
+def session(
+    rewrite: layout.RewriteDir,
+    kind: str,
+    *,
+    timeout: int,
+    resumes: layout.SessionDir | None = None,
+):
     """One codex invocation: create its directory, record it at start and end.
 
     ``kind`` is agent, repair, verifier or oracle (LAYOUT.md). ``session.json``
@@ -206,10 +219,17 @@ def session(rewrite: layout.RewriteDir, kind: str, *, timeout: int,
     sd.path.chmod(0o700)
     sd.codex_home.mkdir(mode=0o700)
     meta = {
-        "kind": kind, "model": CODEX_MODEL, "reasoning_effort": CODEX_EFFORT,
-        "driver": CODEX_DRIVER, "started": layout.stamp(), "finished": None,
-        "status": "running", "exit_code": None, "error": None,
-        "timeout_sec": timeout, "filtered": False,
+        "kind": kind,
+        "model": CODEX_MODEL,
+        "reasoning_effort": CODEX_EFFORT,
+        "driver": CODEX_DRIVER,
+        "started": layout.stamp(),
+        "finished": None,
+        "status": "running",
+        "exit_code": None,
+        "error": None,
+        "timeout_sec": timeout,
+        "filtered": False,
     }
     if resumes is not None:
         meta["resumed"] = f"sessions/{resumes.path.name}"
@@ -243,6 +263,7 @@ def session(rewrite: layout.RewriteDir, kind: str, *, timeout: int,
 # Running the CLI
 # --------------------------------------------------------------------------
 
+
 def _harness_env() -> dict:
     """What ./sandbox needs from the environment, codex or not."""
     env = dict(os.environ)
@@ -275,12 +296,24 @@ def _provider_overrides() -> list[str]:
 
 
 def _session_cmd(run: SessionRun, cwd: Path, *, resume: str | None) -> list[str]:
-    cmd = [SDK_PY, str(SESSION_DRIVER), "--pkg", str(cwd),
-           "--codex-home", str(run.dir.codex_home),
-           "--events", str(run.dir.path / "events.jsonl"),
-           "--prompt-file", str(run.dir.prompt),
-           "--timeout", str(run.meta["timeout_sec"]),
-           "--model", CODEX_MODEL, "--effort", str(CODEX_EFFORT)]
+    cmd = [
+        SDK_PY,
+        str(SESSION_DRIVER),
+        "--pkg",
+        str(cwd),
+        "--codex-home",
+        str(run.dir.codex_home),
+        "--events",
+        str(run.dir.path / "events.jsonl"),
+        "--prompt-file",
+        str(run.dir.prompt),
+        "--timeout",
+        str(run.meta["timeout_sec"]),
+        "--model",
+        CODEX_MODEL,
+        "--effort",
+        str(CODEX_EFFORT),
+    ]
     if resume:
         cmd += ["--resume", resume]
     return cmd
@@ -291,12 +324,18 @@ def _codex_cmd(cwd: Path, resume: str | None = None) -> list[str]:
     if resume:
         cmd += ["resume", resume]
     cmd += [
-        "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check",
-        "-c", "model_providers.oai.name=openai",
-        "-c", f"model_providers.oai.base_url={API_BASE}",
-        "-c", "model_providers.oai.env_key=OPENAI_API_KEY",
-        "-c", "model_provider=oai",
-        "-c", f"model_reasoning_effort={CODEX_EFFORT}",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-c",
+        "model_providers.oai.name=openai",
+        "-c",
+        f"model_providers.oai.base_url={API_BASE}",
+        "-c",
+        "model_providers.oai.env_key=OPENAI_API_KEY",
+        "-c",
+        "model_provider=oai",
+        "-c",
+        f"model_reasoning_effort={CODEX_EFFORT}",
     ]
     # `exec resume` takes no -C (codex-cli 0.149: it continues in the
     # session's recorded cwd); the subprocess is started in the package
@@ -314,8 +353,9 @@ def _read_stream(path: Path) -> str:
         return ""
 
 
-def _run_codex(run: SessionRun, cwd: Path, prompt: str, *,
-               resume: str | None = None) -> subprocess.CompletedProcess:
+def _run_codex(
+    run: SessionRun, cwd: Path, prompt: str, *, resume: str | None = None
+) -> subprocess.CompletedProcess:
     """Run codex over ``cwd`` with the session's private CODEX_HOME.
 
     A stray ChatGPT token in the shared home otherwise wins and 401s, which is
@@ -342,8 +382,13 @@ def _run_codex(run: SessionRun, cwd: Path, prompt: str, *,
     try:
         with sd.stdout.open("w") as out_f, sd.stderr.open("w") as err_f:
             proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=out_f, stderr=err_f,
-                text=True, cwd=str(cwd), env=env,
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=out_f,
+                stderr=err_f,
+                text=True,
+                cwd=str(cwd),
+                env=env,
             )
             try:
                 proc.communicate(input=prompt, timeout=timeout)
@@ -355,11 +400,13 @@ def _run_codex(run: SessionRun, cwd: Path, prompt: str, *,
         run.meta["exit_code"] = proc.returncode
         # The partial streams are on disk; hand them to the caller too, which
         # is where the old in-memory capture put them.
-        raise subprocess.TimeoutExpired(cmd, timeout, output=_read_stream(sd.stdout),
-                                        stderr=_read_stream(sd.stderr)) from exc
+        raise subprocess.TimeoutExpired(
+            cmd, timeout, output=_read_stream(sd.stdout), stderr=_read_stream(sd.stderr)
+        ) from exc
     run.meta["exit_code"] = proc.returncode
-    return subprocess.CompletedProcess(cmd, proc.returncode,
-                                       _read_stream(sd.stdout), _read_stream(sd.stderr))
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode, _read_stream(sd.stdout), _read_stream(sd.stderr)
+    )
 
 
 def _session_id(sd: layout.SessionDir) -> str:
@@ -387,6 +434,7 @@ def _session_id(sd: layout.SessionDir) -> str:
 # The package as the agent sees it
 # --------------------------------------------------------------------------
 
+
 def _write_seed_literals(pkg: Path, verifier_rel: str) -> None:
     """What the seed's verifier already depends on unseen, for `./sandbox
     check`'s names audit to subtract: the agent answers for the names its
@@ -399,7 +447,8 @@ def _write_seed_literals(pkg: Path, verifier_rel: str) -> None:
     path.write_text(json.dumps(vl.audit_package(pkg, verifier_rel)) + "\n")
     # And the seed's size, for the one-rung check the same tool runs.
     (pkg / "run" / "seed_size.json").write_text(
-        json.dumps(ts.size_of_package(pkg, verifier_rel)) + "\n")
+        json.dumps(ts.size_of_package(pkg, verifier_rel)) + "\n"
+    )
 
 
 def _write_resources(pkg: Path, task: dict) -> None:
@@ -434,9 +483,12 @@ def _write_pretest(pkg: Path, task: dict) -> None:
     lists = task.get("_protected") or {}
     if not (hook and hook[0]) and not lists:
         return
-    layout.write_pretest(pkg / "run" / "pretest.json", *(hook or ("", "")),
-                         protected_paths=lists.get("protected_paths"),
-                         protected_cmds=lists.get("protected_cmds"))
+    layout.write_pretest(
+        pkg / "run" / "pretest.json",
+        *(hook or ("", "")),
+        protected_paths=lists.get("protected_paths"),
+        protected_cmds=lists.get("protected_cmds"),
+    )
 
 
 def _prepare_package(pkg: Path, task: dict) -> dict:
@@ -488,8 +540,11 @@ def support_changes(pkg: Path, seed_dir: Path | None) -> list[str]:
     for rel in sorted(set(now) | set(before)):
         if rel in mapped:
             continue
-        if rel not in now or rel not in before or \
-                now[rel].read_bytes() != before[rel].read_bytes():
+        if (
+            rel not in now
+            or rel not in before
+            or now[rel].read_bytes() != before[rel].read_bytes()
+        ):
             changed.append(rel)
     return changed
 
@@ -523,8 +578,10 @@ def _require_checked(pkg: Path) -> None:
     folded sessions had the record anyway, so this bites rarely and keeps the
     promise true."""
     if not _agent_checked(pkg):
-        raise RuntimeError("agent finished without a passing ./sandbox check "
-                           "(run/checks.jsonl); the rewrite is discarded")
+        raise RuntimeError(
+            "agent finished without a passing ./sandbox check "
+            "(run/checks.jsonl); the rewrite is discarded"
+        )
 
 
 def _check_verdict(pkg: Path) -> None:
@@ -589,8 +646,14 @@ def _sandbox_down(pkg: Path) -> None:
     except ValueError:
         pass
     try:
-        subprocess.run([str(pkg / "sandbox"), "down"], cwd=pkg, env=_harness_env(),
-                       capture_output=True, text=True, timeout=300)
+        subprocess.run(
+            [str(pkg / "sandbox"), "down"],
+            cwd=pkg,
+            env=_harness_env(),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
     except Exception:  # noqa: BLE001 -- cleanup must not turn a verdict into a crash
         pass
 
@@ -602,8 +665,14 @@ def _harness_check(pkg: Path, name: str = "check") -> str:
     same one _require_checked reads, and the text is kept as run/<name>.txt
     for whoever reads a rejected rewrite."""
     try:
-        p = subprocess.run([str(pkg / "sandbox"), "check"], cwd=pkg, env=_harness_env(),
-                           capture_output=True, text=True, timeout=AGENT_TIMEOUT)
+        p = subprocess.run(
+            [str(pkg / "sandbox"), "check"],
+            cwd=pkg,
+            env=_harness_env(),
+            capture_output=True,
+            text=True,
+            timeout=AGENT_TIMEOUT,
+        )
         text = (p.stdout or "") + (("\n" + p.stderr) if p.stderr else "")
     except subprocess.TimeoutExpired as exc:
         text = f"./sandbox check timed out after {AGENT_TIMEOUT}s\n{exc.stdout or ''}"
@@ -657,9 +726,11 @@ If the failure is environmental rather than logical — a missing tool, no netwo
 At most {max_calls} tool calls. Save your edits in place; do not print the files.
 """
 
-_ORACLE_PROMPT = ("Read AGENTS.md, then read run/failure.txt and fix the task so "
-                  "the reference solution passes the verifier. Save your edits "
-                  "in place and stop.")
+_ORACLE_PROMPT = (
+    "Read AGENTS.md, then read run/failure.txt and fix the task so "
+    "the reference solution passes the verifier. Save your edits "
+    "in place and stop."
+)
 
 
 _TRACES_SPEC = r"""
@@ -690,18 +761,28 @@ def _traces_spec(traces: Path) -> str:
 # Instruction-only easier rewrite, and the fresh-session oracle repair
 # --------------------------------------------------------------------------
 
-def simplify_codex(rewrite: layout.RewriteDir, task: dict, solved: int = 0,
-                   attempts: int = 16, hint: str = "vague") -> dict:
+
+def simplify_codex(
+    rewrite: layout.RewriteDir,
+    task: dict,
+    solved: int = 0,
+    attempts: int = 16,
+    hint: str = "vague",
+) -> dict:
     """Choose one trace-supported operator and validate the resulting package."""
     so.prompt(hint)
     if not any(rewrite.traces.glob("attempt-*.jsonl")):
         raise Blocked("simplify requires attempt traces")
-    return evolve_agentic(rewrite, {**task, "_solved": solved,
-                          "_attempts": attempts, "_simplify_hint": hint}, "easier")
+    return evolve_agentic(
+        rewrite,
+        {**task, "_solved": solved, "_attempts": attempts, "_simplify_hint": hint},
+        "easier",
+    )
 
 
-def repair_oracle_codex(rewrite: layout.RewriteDir, task: dict, observed: str,
-                        exit_code: int = 1) -> dict:
+def repair_oracle_codex(
+    rewrite: layout.RewriteDir, task: dict, observed: str, exit_code: int = 1
+) -> dict:
     """Fresh-session repair of a task whose reference solution failed the run.
 
     The chat repair reads the two files and guesses which side is wrong. Here the
@@ -717,16 +798,21 @@ def repair_oracle_codex(rewrite: layout.RewriteDir, task: dict, observed: str,
     (pkg / "run").mkdir(exist_ok=True)
     (pkg / "run" / "failure.txt").write_text(observed or "(no output captured)")
     (pkg / "run" / "verdict.txt").unlink(missing_ok=True)
-    (pkg / "AGENTS.md").write_text(_ORACLE_AGENTS_MD.format(
-        verifier=ev._verifier_rel(task), exit_code=exit_code,
-        max_calls=MAX_TOOL_CALLS))
+    (pkg / "AGENTS.md").write_text(
+        _ORACLE_AGENTS_MD.format(
+            verifier=ev._verifier_rel(task),
+            exit_code=exit_code,
+            max_calls=MAX_TOOL_CALLS,
+        )
+    )
     with session(rewrite, "oracle", timeout=TIMEOUT_SEC) as run:
         p = _run_codex(run, pkg, _ORACLE_PROMPT)
     _check_verdict(pkg)
     out = {**task, **{key: (pkg / rel).read_text() for key, rel in fmap.items()}}
     if all(out[key] == task[key] for key in fmap):
-        raise RuntimeError(f"codex changed nothing (exit {p.returncode}): "
-                           f"{p.stdout[-200:]}")
+        raise RuntimeError(
+            f"codex changed nothing (exit {p.returncode}): " f"{p.stdout[-200:]}"
+        )
     out["_repaired"] = "codex_oracle_observed"
     out["_session"] = str(run.dir.path)
     return out
@@ -756,21 +842,30 @@ VERIFIER_AUTHOR = os.environ.get("SWE_VERIFIER_AUTHOR", "blind")
 VERIFIER_SPEC = Path(__file__).resolve().parent / "agents" / "verifier_author.md"
 # What the verifier's author must not see. Everything else in the package is
 # what an agent attempting the task could read.
-HIDDEN_FROM_VERIFIER = ("solution", "traces", "AGENTS.md", "sandbox",
-                        "run/checks.jsonl", "run/verdict.txt", "run/failure.txt",
-                        "run/sandbox.json", "run/sandbox.log")
+HIDDEN_FROM_VERIFIER = (
+    "solution",
+    "traces",
+    "AGENTS.md",
+    "sandbox",
+    "run/checks.jsonl",
+    "run/verdict.txt",
+    "run/failure.txt",
+    "run/sandbox.json",
+    "run/sandbox.log",
+)
 AGENT_TIMEOUT = int(os.environ.get("EVOLVE_AGENT_TIMEOUT", "2400"))
 
-_HARDER_JOB = """This task was solved {solved} of {attempts} attempts, so it is too
-easy to teach anything. Make it one rung harder, along exactly one of these
+_HARDER_JOB = """This task was solved {solved} of {attempts} attempts and met the
+hardening threshold. Make it one rung harder, along exactly one of these
 axes:
 
 {candidates}
 
 One rung, not a new task. Keep everything the seed asks for and add ONE
 requirement that the agent which solved it never had to meet. The attempts
-that solved it are in `traces/`, one file per attempt (format under TRACES at
-the end). What made the task easy is visible there: the guidance the
+are in `traces/`, one file per attempt (format under TRACES at
+the end). Some may have failed; inspect those failures too. What made the
+successful attempts easy is visible there: the guidance the
 instruction handed over, the step the agent never had to work out. Before you
 choose the axis, list the commands of two or three attempts end to end; the
 attempt that solved it in the fewest turns says which step was free.
@@ -803,7 +898,7 @@ pipeline that produced these tasks runs the same sequence for that reason:
      verifier requires discoverable: findable in the workspace, or stated here.
   4. `environment/Dockerfile` — the environment the other three assume.
 
-Add whatever new files the change needs — a fixture the Dockerfile COPYs, a
+Add whatever new files the change needs — a fixture the Dockerfile copies, a
 config, a data file. Anything you write in the package comes back with it.
 
 Constraints on the environment, because step 4 is yours now and these are what
@@ -853,16 +948,17 @@ different counts, and that note is what it reads.
 
 Aim for a task a capable agent lands about half the time."""
 
-_HARDER_JOB_BLIND = """This task was solved {solved} of {attempts} attempts, so it is too
-easy to teach anything. Make it one rung harder, along exactly one of these
+_HARDER_JOB_BLIND = """This task was solved {solved} of {attempts} attempts and met the
+hardening threshold. Make it one rung harder, along exactly one of these
 axes:
 
 {candidates}
 
 One rung, not a new task. Keep everything the seed asks for and add ONE
 requirement that the agent which solved it never had to meet. The attempts
-that solved it are in `traces/`, one file per attempt (format under TRACES at
-the end). What made the task easy is visible there: the guidance the
+are in `traces/`, one file per attempt (format under TRACES at
+the end). Some may have failed; inspect those failures too. What made the
+successful attempts easy is visible there: the guidance the
 instruction handed over, the step the agent never had to work out. Before you
 choose the axis, list the commands of two or three attempts end to end; the
 attempt that solved it in the fewest turns says which step was free.
@@ -904,7 +1000,7 @@ will, from the instruction alone. A name your solution invents and the
 instruction never states will not be checked, so state it, or make the result
 checkable by value.
 
-Add whatever new files the change needs — a fixture the Dockerfile COPYs, a
+Add whatever new files the change needs — a fixture the Dockerfile copies, a
 config, a data file. Anything you write in the package comes back with it.
 
 Constraints on the environment, because step 4 is yours now and these are what
@@ -1044,7 +1140,11 @@ def _blind_layout(pkg: Path, vpkg: Path) -> None:
 
     def ignore(d, names):
         rel = Path(d).relative_to(pkg)
-        return {n for n in names if str(rel / n) in hidden or (str(rel) == "." and n in hidden)}
+        return {
+            n
+            for n in names
+            if str(rel / n) in hidden or (str(rel) == "." and n in hidden)
+        }
 
     shutil.copytree(pkg, vpkg, dirs_exist_ok=True, ignore=ignore)
     vpkg.chmod(0o700)
@@ -1072,8 +1172,9 @@ def _take_verifier(vpkg: Path, pkg: Path, seed_rel: str, seed_text: str) -> str:
     return rel
 
 
-def _blind_verifier(rewrite: layout.RewriteDir, task: dict,
-                    fmap: dict) -> tuple[layout.SessionDir, str]:
+def _blind_verifier(
+    rewrite: layout.RewriteDir, task: dict, fmap: dict
+) -> tuple[layout.SessionDir, str]:
     """Second session: write the verifier without seeing the solution.
 
     Lays the author's package out again under the verifier session's own
@@ -1086,14 +1187,17 @@ def _blind_verifier(rewrite: layout.RewriteDir, task: dict,
     pkg = rewrite.package
     seed_rel = fmap["test_state_py"]
     seed_text = task["test_state_py"]
-    seed_size = ts.size_of(task["solve_sh"], seed_text,
-                           "python" if seed_rel.endswith(".py") else "shell")
+    seed_size = ts.size_of(
+        task["solve_sh"], seed_text, "python" if seed_rel.endswith(".py") else "shell"
+    )
     with session(rewrite, "verifier", timeout=AGENT_TIMEOUT) as run:
         vpkg = run.dir.package
         _blind_layout(pkg, vpkg)
-        prompt = _VERIFIER_JOB.format(verifier_rel=seed_rel,
-                                      seed_asserts=seed_size["verifier_asserts"],
-                                      max_asserts=ts.MAX_ADDED_ASSERTS) + _budget(AGENT_TIMEOUT)
+        prompt = _VERIFIER_JOB.format(
+            verifier_rel=seed_rel,
+            seed_asserts=seed_size["verifier_asserts"],
+            max_asserts=ts.MAX_ADDED_ASSERTS,
+        ) + _budget(AGENT_TIMEOUT)
         try:
             _run_codex(run, vpkg, prompt)
         finally:
@@ -1103,8 +1207,13 @@ def _blind_verifier(rewrite: layout.RewriteDir, task: dict,
     return run.dir, rel
 
 
-def _blind_repair(rewrite: layout.RewriteDir, vsession: layout.SessionDir,
-                  fmap: dict, observed: str, exit_code: int) -> str:
+def _blind_repair(
+    rewrite: layout.RewriteDir,
+    vsession: layout.SessionDir,
+    fmap: dict,
+    observed: str,
+    exit_code: int,
+) -> str:
     """Resume the verifier's session with the failure the hidden solution
     produced against its verifier, and take the repaired verifier back."""
     pkg, vpkg = rewrite.package, vsession.package
@@ -1114,7 +1223,9 @@ def _blind_repair(rewrite: layout.RewriteDir, vsession: layout.SessionDir,
     (vpkg / "run" / "failure.txt").write_text(observed or "(no output captured)")
     (vpkg / "run" / "verdict.txt").unlink(missing_ok=True)
     with session(rewrite, "repair", timeout=AGENT_TIMEOUT, resumes=vsession) as run:
-        prompt = _VERIFIER_REPAIR_JOB.format(exit_code=exit_code) + _budget(AGENT_TIMEOUT)
+        prompt = _VERIFIER_REPAIR_JOB.format(exit_code=exit_code) + _budget(
+            AGENT_TIMEOUT
+        )
         try:
             _run_codex(run, vpkg, prompt, resume=sid)
         finally:
@@ -1124,8 +1235,9 @@ def _blind_repair(rewrite: layout.RewriteDir, vsession: layout.SessionDir,
     return _take_verifier(vpkg, pkg, _verifier_on_disk(pkg, seed_rel), before)
 
 
-def _reconcile_blind(rewrite: layout.RewriteDir, vsession: layout.SessionDir,
-                     fmap: dict) -> None:
+def _reconcile_blind(
+    rewrite: layout.RewriteDir, vsession: layout.SessionDir, fmap: dict
+) -> None:
     """Hidden solution against blind verifier, with one bounded repair.
 
     The two sessions never saw each other's file, so the first time they meet
@@ -1144,13 +1256,21 @@ def _reconcile_blind(rewrite: layout.RewriteDir, vsession: layout.SessionDir,
     _blind_repair(rewrite, vsession, fmap, text[-4000:], code)
     text = _harness_check(pkg, name="check.blind2")
     if not _agent_checked(pkg):
-        raise RuntimeError("blind verifier and reference solution still disagree after "
-                           "one repair: " + text[-300:].replace("\n", " | "))
+        raise RuntimeError(
+            "blind verifier and reference solution still disagree after "
+            "one repair: " + text[-300:].replace("\n", " | ")
+        )
 
 
-def evolve_agentic(rewrite: layout.RewriteDir, task: dict, job: str, *,
-                   observed: str = "", exit_code: int = 1,
-                   operator: list[tuple[str, str, str]] | None = None) -> dict:
+def evolve_agentic(
+    rewrite: layout.RewriteDir,
+    task: dict,
+    job: str,
+    *,
+    observed: str = "",
+    exit_code: int = 1,
+    operator: list[tuple[str, str, str]] | None = None,
+) -> dict:
     """Run one agent session over the rewrite's package, with its container as
     a tool.
 
@@ -1174,28 +1294,42 @@ def evolve_agentic(rewrite: layout.RewriteDir, task: dict, job: str, *,
         (pkg / "run" / "failure.txt").write_text(observed)
 
     solved = task.get("_solved", 0)
-    attempts_n = task.get("_attempts", len(list(rewrite.traces.glob("attempt-*.jsonl"))) or 16)
+    attempts_n = task.get(
+        "_attempts", len(list(rewrite.traces.glob("attempt-*.jsonl"))) or 16
+    )
     # `operator` is the scored shortlist, in score order, each entry
     # (family, operator_id, definition) -- the same order operator_shortlist
     # and pick_operator both return.
     cands = list(operator or [])
     allowed = {op: fam for fam, op, _ in cands}
-    seed_size = ts.size_of(task["solve_sh"], task["test_state_py"],
-                           "python" if ev._verifier_rel(task).endswith(".py") else "shell")
+    seed_size = ts.size_of(
+        task["solve_sh"],
+        task["test_state_py"],
+        "python" if ev._verifier_rel(task).endswith(".py") else "shell",
+    )
     blind = job == "harder" and VERIFIER_AUTHOR == "blind"
-    prompt = {
-        "harder": (_HARDER_JOB_BLIND if blind else _HARDER_JOB).format(
-            solved=solved, attempts=attempts_n,
-            candidates=_candidates(cands),
-            seed_lines=seed_size["solution_lines"],
-            seed_asserts=seed_size["verifier_asserts"],
-            min_added=ts.MIN_ADDED, max_added=ts.MAX_ADDED,
-            max_asserts=ts.MAX_ADDED_ASSERTS),
-        "easier": _EASIER_JOB.format(
-            solved=solved, attempts=attempts_n,
-            cards=so.prompt(task.get("_simplify_hint", "vague"))),
-        "repair": _REPAIR_JOB.format(exit_code=exit_code),
-    }[job] + _traces_spec(rewrite.traces) + _budget(AGENT_TIMEOUT)
+    prompt = (
+        {
+            "harder": (_HARDER_JOB_BLIND if blind else _HARDER_JOB).format(
+                solved=solved,
+                attempts=attempts_n,
+                candidates=_candidates(cands),
+                seed_lines=seed_size["solution_lines"],
+                seed_asserts=seed_size["verifier_asserts"],
+                min_added=ts.MIN_ADDED,
+                max_added=ts.MAX_ADDED,
+                max_asserts=ts.MAX_ADDED_ASSERTS,
+            ),
+            "easier": _EASIER_JOB.format(
+                solved=solved,
+                attempts=attempts_n,
+                cards=so.prompt(task.get("_simplify_hint", "vague")),
+            ),
+            "repair": _REPAIR_JOB.format(exit_code=exit_code),
+        }[job]
+        + _traces_spec(rewrite.traces)
+        + _budget(AGENT_TIMEOUT)
+    )
 
     with session(rewrite, "agent", timeout=AGENT_TIMEOUT) as run:
         try:
@@ -1219,12 +1353,15 @@ def evolve_agentic(rewrite: layout.RewriteDir, task: dict, job: str, *,
         # the rewrite's. Say which it was, so the caller starts a fresh
         # session instead of recording the task as unevolvable.
         if cyber_filtered(run.dir):
-            raise Filtered(f"the provider's cybersecurity classifier stopped the "
-                           f"session ({type(exc).__name__}: {exc})"[:300]) from exc
+            raise Filtered(
+                f"the provider's cybersecurity classifier stopped the "
+                f"session ({type(exc).__name__}: {exc})"[:300]
+            ) from exc
         raise
     if all(out[key] == task[key] for key in fmap) and not out["_support_changed"]:
-        raise RuntimeError(f"agent changed nothing (exit {p.returncode}): "
-                           f"{p.stdout[-200:]}")
+        raise RuntimeError(
+            f"agent changed nothing (exit {p.returncode}): " f"{p.stdout[-200:]}"
+        )
     if not out["instruction"].strip():
         raise RuntimeError("agent emptied the instruction")
     out["_hint"] = f"agent_{job}"
@@ -1246,20 +1383,24 @@ def evolve_agentic(rewrite: layout.RewriteDir, task: dict, job: str, *,
         # declaration fails the session rather than defaulting to the top
         # candidate: a wrong operator on a folded task is worse for the
         # balance than no task, because it is counted.
-        declared = (pkg / "run" / "operator.txt")
-        chosen = (declared.read_text().strip().split()[0]
-                  if declared.exists() and declared.read_text().strip()
-                  else "")
+        declared = pkg / "run" / "operator.txt"
+        chosen = (
+            declared.read_text().strip().split()[0]
+            if declared.exists() and declared.read_text().strip()
+            else ""
+        )
         if chosen not in allowed:
             raise RuntimeError(
                 f"agent did not declare which axis it used "
-                f"(run/operator.txt={chosen!r}, offered={sorted(allowed)})")
+                f"(run/operator.txt={chosen!r}, offered={sorted(allowed)})"
+            )
         out["_operator"], out["_family"] = chosen, allowed[chosen]
     return out
 
 
-def _resume_blind(rewrite: layout.RewriteDir, task: dict, observed: str,
-                  exit_code: int) -> dict:
+def _resume_blind(
+    rewrite: layout.RewriteDir, task: dict, observed: str, exit_code: int
+) -> dict:
     vsession = layout.SessionDir(Path(task.get("_verifier_session") or ""))
     if not vsession.package.is_dir():
         raise RuntimeError(f"no verifier session to resume at {vsession.path}")
@@ -1270,16 +1411,19 @@ def _resume_blind(rewrite: layout.RewriteDir, task: dict, observed: str,
     fmap["test_state_py"] = _blind_repair(rewrite, vsession, fmap, observed, exit_code)
     text = _harness_check(pkg, name=f"check.resume{time.time_ns() % 100000}")
     if not _agent_checked(pkg):
-        raise RuntimeError("blind verifier and reference solution still disagree on resume: "
-                           + text[-300:].replace("\n", " | "))
+        raise RuntimeError(
+            "blind verifier and reference solution still disagree on resume: "
+            + text[-300:].replace("\n", " | ")
+        )
     out = _collect(task, pkg, fmap)
     out["_repaired"] = "codex_resume_verifier"
     out["_agent_validated"] = True
     return out
 
 
-def resume_agentic(rewrite: layout.RewriteDir, task: dict, observed: str,
-                   exit_code: int = 1) -> dict:
+def resume_agentic(
+    rewrite: layout.RewriteDir, task: dict, observed: str, exit_code: int = 1
+) -> dict:
     """Continue the session that wrote this task, with the caller's failure.
 
     The caller rebuilt the package and ran the reference solution against the
@@ -1316,8 +1460,10 @@ def resume_agentic(rewrite: layout.RewriteDir, task: dict, observed: str,
     _require_checked(pkg)
     out = _collect(task, pkg, fmap)
     if all(out[key] == task[key] for key in fmap) and not out["_support_changed"]:
-        raise RuntimeError(f"agent changed nothing on resume "
-                           f"(exit {p.returncode}): {p.stdout[-200:]}")
+        raise RuntimeError(
+            f"agent changed nothing on resume "
+            f"(exit {p.returncode}): {p.stdout[-200:]}"
+        )
     out["_repaired"] = "codex_resume"
     out["_agent_validated"] = _agent_checked(pkg)
     # The repair's codex/ shares the thread's jsonl with the agent's, so a

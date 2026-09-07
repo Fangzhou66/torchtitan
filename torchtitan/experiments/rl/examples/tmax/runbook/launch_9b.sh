@@ -138,6 +138,7 @@ fi
 # launch.json shows the value the run had.
 export SWE_ROLLOUT_RECORDS=${SWE_ROLLOUT_RECORDS:-1}
 export SWE_EVOLUTION_SIGNALS=${SWE_EVOLUTION_SIGNALS:-1}
+export SWE_EVOLUTION_HARDER_RATIO=${SWE_EVOLUTION_HARDER_RATIO:-1.0}
 
 # ---- checkpoints -------------------------------------------------------------
 # Checkpoints go to the host-local disk, not the run directory. The shared GPFS
