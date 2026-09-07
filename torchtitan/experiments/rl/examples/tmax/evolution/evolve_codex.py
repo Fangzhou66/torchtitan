@@ -878,6 +878,9 @@ supports, so that substituting whichever is easiest to write cannot quietly
 collapse the pool onto a few kinds of change. Then write that axis's id, alone
 on one line, to `run/operator.txt`, before you start changing anything.
 
+If none of the listed axes fits this task, write
+`GIVE UP: operator-misfit — <why>` and stop. Say which ones you considered
+and what was missing for each.
 """
 
 
@@ -905,7 +908,8 @@ Preserve the original user goal and a solvable, discoverable specification.
 Aim for a modest reduction in this student's solve rate toward mixed success,
 not universal failure. Describe this as a hypothesis for student re-testing;
 passing the reference solution only establishes validity. If the traces do not
-support a useful change within the size limits, use the existing give-up path.
+support a useful change within the size limits, write
+`GIVE UP: no-supported-hardening — <why>` and stop.
 """
 
 
@@ -926,9 +930,9 @@ Then do the work in this order, one file at a time. The order is not
 arbitrary — each file is written against the one before it, and the synthesis
 pipeline that produced these tasks runs the same sequence for that reason:
 
-  1. `solution/solve.sh` — what the answer now is under this axis: the seed's
-     solution plus the one new step, not a rewrite of it.
-  2. the verifier — written against that answer and against the axis, not
+  1. `solution/solve.sh` — adapt the existing solution to the changed condition.
+     Preserve the parts that still apply.
+  2. the verifier — written against that answer and the requirement, not
      against incidental details of the workspace.
   3. `instruction.md` — what the agent is told. It has to make everything the
      verifier requires discoverable: findable in the workspace, or stated here.
@@ -950,8 +954,8 @@ the pipeline that built these tasks learned the hard way:
   a COPY source under `environment/` or is produced by a RUN; a large reference
   the verifier needs is checked by hash, not shipped.
 - Preserve the seed's base image and installation style; make the smallest change
-  the axis needs. An environment rewritten wholesale is a new task, not a harder
-  one.
+  the changed condition needs. An environment rewritten wholesale is a new task,
+  not a harder one.
 - No internet-only runtime behaviour, no proxies, credentials or external
   services. The sandbox may have none of them and the reference solution will
   fail where an agent would too.
@@ -977,11 +981,6 @@ promised and the workspace never reveals — that one would fail a real agent to
 Do this literally, check by check; an impression that it all hangs together is
 what produces the failure.
 
-If, having read the package, you judge that none of the listed axes fits this
-task, write `GIVE UP: operator-misfit — <why>` and stop. Say which ones you
-considered and what was missing for each; a later round will come back with
-different counts, and that note is what it reads.
-
 Aim for a task a capable agent lands about half the time."""
 
 _HARDER_JOB_BLIND = """This task was solved {solved} of {attempts} attempts and met the
@@ -1001,8 +1000,8 @@ Then do the work in this order, one file at a time. The order is not
 arbitrary — each file is written against the one before it, and the synthesis
 pipeline that produced these tasks runs the same sequence for that reason:
 
-  1. `solution/solve.sh` — what the answer now is under this axis: the seed's
-     solution plus the one new step, not a rewrite of it.
+  1. `solution/solve.sh` — adapt the existing solution to the changed condition.
+     Preserve the parts that still apply.
   2. `instruction.md` — what the agent is told. Everything the new requirement
      needs checked has to be discoverable from it and from the files the image
      ships, because that is all the verifier's author will see (below).
@@ -1034,8 +1033,8 @@ the pipeline that built these tasks learned the hard way:
   a COPY source under `environment/` or is produced by a RUN; a large reference
   the verifier needs is checked by hash, not shipped.
 - Preserve the seed's base image and installation style; make the smallest change
-  the axis needs. An environment rewritten wholesale is a new task, not a harder
-  one.
+  the changed condition needs. An environment rewritten wholesale is a new task,
+  not a harder one.
 - No internet-only runtime behaviour, no proxies, credentials or external
   services. The sandbox may have none of them and the reference solution will
   fail where an agent would too.
@@ -1050,11 +1049,6 @@ the pipeline that built these tasks learned the hard way:
   so it is unrunnable rather than hard.
 - Guard edits against paths you did not create (`test -f` first); prefer adding a
   local fixture over patching something the image cloned.
-
-If, having read the package, you judge that none of the listed axes fits this
-task, write `GIVE UP: operator-misfit — <why>` and stop. Say which ones you
-considered and what was missing for each; a later round will come back with
-different counts, and that note is what it reads.
 
 Aim for a task a capable agent lands about half the time."""
 
