@@ -219,11 +219,16 @@ def test_harder_menu_is_opt_in(tmp_path, monkeypatch, mode):
     prompt = sessions[0]["prompt"]
     if mode == "1":
         assert "test_definition" in prompt and "Pick from that list" in prompt
+        assert "operator-misfit" in prompt
         assert out["_operator"] == "test_operator"
     else:
         assert "test_definition" not in prompt and "Pick from that list" not in prompt
         assert "run/hardening.md" in prompt
         assert "new inference or decision" in prompt
+        assert "listed axes" not in prompt
+        assert "operator-misfit" not in prompt
+        assert "under this axis" not in prompt
+        assert "no-supported-hardening" in prompt
         assert "_operator" not in out
         assert out["_harder_mode"] == "student"
 
