@@ -755,6 +755,13 @@ class TMaxRollouter(Rollouter):
         time_budget_sec: int = 2400
         """Per-rollout agent wall-clock budget (the vanillux loop stops after this)."""
 
+        agent_budget_floor_sec: int = _DECLARED_AGENT_BUDGET_FLOOR_SEC
+        """Floor on a task's OWN declared budget: ``max(declared, floor)``, so it
+        only ever raises a too-small declared budget, never lowers one. Governs the
+        TB-2.0 eval (those rows declare 900-12000s); tasks that declare nothing use
+        ``time_budget_sec`` instead. Defaults to SWE_AGENT_TIMEOUT_FLOOR_SEC (7200);
+        the eval recipe pins it so a stray launcher env cannot cap eval budgets."""
+
         eval_timeout_sec: int = 600
         """Verifier (test.sh) run timeout."""
 
@@ -801,6 +808,7 @@ class TMaxRollouter(Rollouter):
             # in by the tmax module itself.
             import torchtitan.experiments.rl.harness.agents.terminus  # noqa: F401
         self._time_budget_sec = config.time_budget_sec
+        self._agent_budget_floor_sec = config.agent_budget_floor_sec
         self._eval_timeout_sec = config.eval_timeout_sec
         self._max_context_tokens = config.max_context_tokens
         self._reward_mode = config.reward_mode
@@ -1039,7 +1047,7 @@ class TMaxRollouter(Rollouter):
         declared = sample.agent_timeout_sec
         if declared is None:
             return self._time_budget_sec
-        return max(int(declared), _DECLARED_AGENT_BUDGET_FLOOR_SEC)
+        return max(int(declared), self._agent_budget_floor_sec)
 
     def _verifier_budget_sec(self, sample: TMaxSample) -> int:
         """Wall-clock budget for this task's GRADER, in seconds.
