@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -132,6 +133,29 @@ class RolloutWorker(Actor):
     @endpoint
     async def setup(self, generators: list) -> None:
         """Build this worker's generate-only router over the shared generator actors."""
+        # Renderer thread pool: render work is CPU-bound, so size to CPU count (decoupled from rollout concurrency).
+        #
+        # ``Controller.setup_async`` installs exactly this (controller.py:906-908), but on the
+        # CONTROLLER's loop. Rollouts do not run there: this actor moves ``run_group_rollouts``
+        # into a pool of CPU worker processes (module docstring above), and a worker never runs
+        # ``setup_async``, so without this line it keeps asyncio's stock ``min(32, cpu+4)``.
+        #
+        # Three things in THIS process post to that one executor:
+        #   * the renderer, per turn -- environment/token.py:125, :161, :258, :266
+        #   * the Daytona SDK's build-context upload on the create path for Dockerfile-based
+        #     images -- object_storage.py:187 (run_in_executor(None, ...)), :195, :198
+        #   * aiohttp's ThreadedResolver, which resolves DNS on the default executor because
+        #     aiodns is absent from runbook/requirements.lock.txt (aiohttp 3.14.3)
+        # so at high rollout concurrency the pool saturates and new connections stall in DNS.
+        loop = asyncio.get_running_loop()
+        stock = min(32, (os.cpu_count() or 1) + 4)
+        before = getattr(getattr(loop, "_default_executor", None), "_max_workers", None)
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=os.cpu_count()))
+        logging.getLogger("torchtitan").info(
+            "[rollout_worker] default executor max_workers: installed=%s (was %s; asyncio "
+            "would default to %s) cpu_count=%s",
+            os.cpu_count(), before, stock, os.cpu_count(),
+        )
         self._generator_router = self.config.generator_router.build(
             generators=generators
         )
