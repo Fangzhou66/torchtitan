@@ -57,7 +57,7 @@ Knobs read from env (the launcher sets these; see ``submit_swe_tmax_9b.sh``):
                                       reward meant.
   ``SWE_ROLLOUT_RECORDS``             write every training rollout to the run's
                                       ``rollouts/`` (default 1)
-  ``SWE_EVOLUTION_SIGNALS``           write a zero-variance training group to the
+  ``SWE_EVOLUTION_SIGNALS``           write an eligible training group to the
                                       run's ``signals/`` (default 1)
   ``TMAX_PANE_DUMP``                  =1 files the Terminus terminal transcript
                                       beside the rollout record (default off:
@@ -758,6 +758,11 @@ class TMaxRollouter(Rollouter):
         (larger) set of prompts -- a training-dynamics change, not just a rescale.
         """
 
+        evolution_harder_ratio: float = 1.0
+        """Minimum solved fraction for sparse-reward hardening; dense keeps its
+        existing zero-variance rule. Must be in (0, 1]. Mixed groups still train.
+        """
+
         max_context_tokens: int = 32768
         """Model context budget for the adapter session."""
 
@@ -769,6 +774,8 @@ class TMaxRollouter(Rollouter):
                 f"reward_mode must be one of {sorted(_REWARD_MODES)}, got "
                 f"{config.reward_mode!r}"
             )
+        if not 0 < config.evolution_harder_ratio <= 1:
+            raise ValueError("evolution_harder_ratio must be in (0, 1]")
         super().__init__(config)
         # Which agent scaffold drives the rollout. Defaults to the vanillux loop the
         # tmax models are SFT'd under; TMAX_AGENT=terminus swaps in Terminus-2 (a
@@ -782,6 +789,7 @@ class TMaxRollouter(Rollouter):
         self._eval_timeout_sec = config.eval_timeout_sec
         self._max_context_tokens = config.max_context_tokens
         self._reward_mode = config.reward_mode
+        self._evolution_harder_ratio = config.evolution_harder_ratio
         # The CTRF read is one extra sandbox exec per graded rollout, and the Daytona
         # API rate limit is the throughput ceiling at high rollout concurrency -- so
         # it is opt-in for metrics, and mandatory when it feeds the reward.
@@ -949,7 +957,9 @@ class TMaxRollouter(Rollouter):
                 f"infrastructure failures excluded from the advantage baseline"
             )
 
-        # Group reward-shape metrics -- also exactly what online evolution acts on: a
+        # Group reward-shape metrics. With evolution_harder_ratio < 1, evolution
+        # additionally hardens high-success mixed groups; these metrics retain
+        # their zero-variance meaning. A
         # zero-variance group produces no gradient and is the one re-tuned, 0/k ("too
         # hard") made easier and k/k ("too easy") made harder. Logging the split here
         # puts the evolve loop's input rate on the training wandb (frac of groups per
@@ -1043,12 +1053,11 @@ class TMaxRollouter(Rollouter):
     def _maybe_emit_evolution_signal(
         self, sample: TMaxSample, rollouts: list[Rollout]
     ) -> None:
-        """Hand a no-signal group to the evolve loop to be re-tuned to the policy,
-        instead of shed. This is the online half of recursive task synthesis:
-        every group the policy has moved past -- all-fail (0/k) or all-pass
-        (k/k) -- is evolved, 0/k made easier and k/k made harder, and returned to
-        the pool. Both directions always; a group with any reward variance is
-        already producing signal and is left untouched.
+        """Request easier all-fail tasks and harder high-success tasks.
+
+        Sparse rewards use the configured solved fraction over scored attempts,
+        with at least two scores. Dense rewards retain the zero-variance rule.
+        Emitting a signal does not remove the group or change its advantages.
 
         The signal is one small JSON under the run's ``signals/`` that names the
         scored siblings' rollout records; those are already on disk, each
@@ -1072,10 +1081,19 @@ class TMaxRollouter(Rollouter):
             # reward, and statistics.pstdev raises on NaN under Python 3.12.
             scored = [r for r in rollouts if is_scored(r)]
             rewards = [r.reward for r in scored]
-            if len(rewards) < 2 or statistics.pstdev(rewards) != 0.0:
+            if len(rewards) < 2:
+                return
+            solved = sum(reward > 0 for reward in rewards)
+            all_failed = all(reward == 0 for reward in rewards)
+            if self._reward_mode == "dense":
+                # Positive partial credit is not a solve rate; preserve the dense
+                # policy rather than applying a binary-success knob to it.
+                if statistics.pstdev(rewards) != 0.0:
+                    return
+            elif not all_failed and solved / len(rewards) < self._evolution_harder_ratio:
                 return
             group_id = rollouts[0].group_id
-            if rewards[0] == 0 and not any(len(r.turns) for r in rollouts):
+            if all_failed and not any(len(r.turns) for r in rollouts):
                 # An all-fail group in which no attempt ever took a turn measured
                 # the infrastructure (agent import error, sandbox never up), not
                 # the task; a signal would drive an unearned simplify. One real
@@ -1103,7 +1121,7 @@ class TMaxRollouter(Rollouter):
                 return
             if os.environ.get("SWE_EVOLUTION_SIGNALS", "1") != "1":
                 return
-            passed = rewards[0] > 0
+            passed = not all_failed
             layout.write_json_atomic(
                 run.signal(sample.instance_id, group_id),
                 {
@@ -1112,7 +1130,7 @@ class TMaxRollouter(Rollouter):
                     "run": run.name,
                     "group": group_id,
                     "direction": "harder" if passed else "easier",
-                    "solved": len(rewards) if passed else 0,
+                    "solved": solved,
                     "total": len(rewards),
                     "created": layout.stamp(),
                     # The scored siblings' records in rollout order: the attempts

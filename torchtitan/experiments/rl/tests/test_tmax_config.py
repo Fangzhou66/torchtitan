@@ -18,6 +18,15 @@ from torchtitan.experiments.rl.examples.tmax.config_registry import (
 from torchtitan.experiments.rl.rollout.types import Rollout, RolloutStatus
 
 
+@pytest.mark.parametrize("override,expected", [(None, 1.0), ("0.9", 0.9)])
+def test_evolution_harder_ratio_env(monkeypatch, override, expected):
+    if override is None:
+        monkeypatch.delenv("SWE_EVOLUTION_HARDER_RATIO", raising=False)
+    else:
+        monkeypatch.setenv("SWE_EVOLUTION_HARDER_RATIO", override)
+    assert tmax_config_registry._tmax_rollouter().evolution_harder_ratio == expected
+
+
 @pytest.mark.parametrize(
     ("lr_override", "expected_lr"),
     [(None, 1e-6), ("2e-7", 2e-7)],

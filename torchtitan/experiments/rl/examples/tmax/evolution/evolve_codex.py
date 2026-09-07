@@ -761,16 +761,17 @@ HIDDEN_FROM_VERIFIER = ("solution", "traces", "AGENTS.md", "sandbox",
                         "run/sandbox.json", "run/sandbox.log")
 AGENT_TIMEOUT = int(os.environ.get("EVOLVE_AGENT_TIMEOUT", "2400"))
 
-_HARDER_JOB = """This task was solved {solved} of {attempts} attempts, so it is too
-easy to teach anything. Make it one rung harder, along exactly one of these
+_HARDER_JOB = """This task was solved {solved} of {attempts} attempts and met the
+hardening threshold. Make it one rung harder, along exactly one of these
 axes:
 
 {candidates}
 
 One rung, not a new task. Keep everything the seed asks for and add ONE
 requirement that the agent which solved it never had to meet. The attempts
-that solved it are in `traces/`, one file per attempt (format under TRACES at
-the end). What made the task easy is visible there: the guidance the
+are in `traces/`, one file per attempt (format under TRACES at
+the end). Some may have failed; inspect those failures too. What made the
+successful attempts easy is visible there: the guidance the
 instruction handed over, the step the agent never had to work out. Before you
 choose the axis, list the commands of two or three attempts end to end; the
 attempt that solved it in the fewest turns says which step was free.
@@ -853,16 +854,17 @@ different counts, and that note is what it reads.
 
 Aim for a task a capable agent lands about half the time."""
 
-_HARDER_JOB_BLIND = """This task was solved {solved} of {attempts} attempts, so it is too
-easy to teach anything. Make it one rung harder, along exactly one of these
+_HARDER_JOB_BLIND = """This task was solved {solved} of {attempts} attempts and met the
+hardening threshold. Make it one rung harder, along exactly one of these
 axes:
 
 {candidates}
 
 One rung, not a new task. Keep everything the seed asks for and add ONE
 requirement that the agent which solved it never had to meet. The attempts
-that solved it are in `traces/`, one file per attempt (format under TRACES at
-the end). What made the task easy is visible there: the guidance the
+are in `traces/`, one file per attempt (format under TRACES at
+the end). Some may have failed; inspect those failures too. What made the
+successful attempts easy is visible there: the guidance the
 instruction handed over, the step the agent never had to work out. Before you
 choose the axis, list the commands of two or three attempts end to end; the
 attempt that solved it in the fewest turns says which step was free.
