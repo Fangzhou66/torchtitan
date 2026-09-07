@@ -6,12 +6,13 @@
 
 """Build a training JSONL from the ``Fzz1/Tmax-Tasks-Clean`` ``reaudit`` split.
 
-The reaudit split is the tmax corpus after the 2026-09 re-audit: 456 tasks published as a
-seeds-layout package tar plus a 26-column parquet, at a PINNED dataset revision::
+The reaudit split is the tmax corpus after the 2026-09 re-audit: 452 tasks published as a
+seeds-layout package tar plus a 27-column parquet, at a PINNED dataset revision::
 
-    splits/reaudit.parquet            456 x 26   (the split; hook columns 22-23; protected_paths and
-                                                  protected_cmds, the 2026-09-06 columns)
-    data/tasks-reaudit-00000.tar      456 packages, 2366 members, all files, under tasks/<task_id>/
+    splits/reaudit.parquet            452 x 27   (the split; hook columns 22-23; protected_paths and
+                                                  protected_cmds, the 2026-09-06 columns;
+                                                  corpus_revision, appended by the 452 publish)
+    data/tasks-reaudit-00000.tar      452 packages, all files, under tasks/<task_id>/
 
     tasks/<task_id>/instruction.md
     tasks/<task_id>/environment/Dockerfile   # a bare single FROM <ref> for every task
@@ -95,15 +96,19 @@ from torchtitan.experiments.rl.examples.tmax.prepare_tmax_data import (
 )
 
 HF_REPO = "Fzz1/Tmax-Tasks-Clean"
-HF_REVISION = "6a48f98d22874299836a6dc5c85ce8ac89fc1323"  # main moves; the split does not. The 26-column publish on top of 0153e06a4e85
+HF_REVISION = "45679f3229d8799c275a8aa1ae360cdc1efebe4d"  # main moves; the split does not. The 27-column publish on top of 6a48f98d
 HF_PARQUET = "splits/reaudit.parquet"
 HF_TAR = "data/tasks-reaudit-00000.tar"
-# sha256 of the published bytes at HF_REVISION (the split builder's own publish record). Both moved again
-# in this publish: 451 packages, two further ids dropped (five cumulative) on the user's choice A.
-PARQUET_SHA256 = "af62a8954eeed152b2d543364c8ecb0e07fecd90278f1111ac244a7b9f7aa10f"
-TAR_SHA256 = "75e290b6e869cc78e0584811d4c5157cd7ae8b36c4cca1ad460742dec38d6242"
-EXPECT_ROWS = 451
-EXPECT_COLUMNS = 26
+# sha256 of the published bytes at HF_REVISION (the split builder's own publish record). This publish:
+# 452 packages, one id added back. The split gains ONE column, `corpus_revision`, appended last and
+# nothing removed -- the 452 spans two corpus revisions (450 rows at 6a48f98d, 2 at 0153e06a) and no
+# column recorded that before. Across the 450 rows common to both revisions every previously published
+# column of THIS file is unchanged; the peak columns that moved live in reaudit_full.parquet, which this
+# module does not fetch.
+PARQUET_SHA256 = "3b4dcd326a4cad71f6f2b02f9ed95486ed73a6e7f189d5756d204df19a65edc8"
+TAR_SHA256 = "b00f88ea9054a88f9c02eb49149ca49e79ffd7cc8f9ae2b394d0baded0eec92b"
+EXPECT_ROWS = 452
+EXPECT_COLUMNS = 27
 MEMBER_ROOT = "tasks"
 
 _HOOK_COLUMNS = ("pre_test_sh", "pre_test_env_identity")
