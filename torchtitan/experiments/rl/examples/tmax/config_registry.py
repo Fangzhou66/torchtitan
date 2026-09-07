@@ -958,12 +958,17 @@ def rl_grpo_qwen3_5_9b_tmax() -> Controller.Config:
             cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_DECODE_ONLY"),
         )
     # torch.compile the torchtitan model (trainer + the wrapper generator, which
-    # register_to_vllm compiles via compile_config). Off by default. At TP=1 the
-    # inductor allreduce-fusion landmine does not apply, so "inductor" is viable;
-    # "aot_eager" is the safe, no-codegen fallback (AOT trace, eager exec). Handy
-    # for the single-GPU eval where a faster forward means more agent turns fit
-    # inside the per-task budget before it times out.
-    if os.environ.get("SWE_GEN_COMPILE", "0") == "1":
+    # register_to_vllm compiles via compile_config). At TP=1 the inductor
+    # allreduce-fusion landmine that gates vLLM's own compile does not apply, and
+    # "aot_eager" is a safe, no-codegen backend (AOT trace, eager exec) whose
+    # faster forward lets more agent turns finish inside the per-task budget. So
+    # it defaults ON when TP==1. This recipe is FSDP/DP (always TP=1), so the
+    # default reaches the training trainer too; SWE_GEN_COMPILE=0 turns it off,
+    # =1 forces it on regardless of TP. SWE_GEN_COMPILE_BACKEND picks the backend
+    # (aot_eager default; "inductor" for more speedup at TP=1).
+    _tp1 = config.generator.parallelism.tensor_parallel_degree == 1
+    _compile_env = os.environ.get("SWE_GEN_COMPILE", "").strip()
+    if _compile_env == "1" or (_compile_env == "" and _tp1):
         config.compile = dataclasses.replace(
             config.compile,
             enable=True,
