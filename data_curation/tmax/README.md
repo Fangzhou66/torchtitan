@@ -21,6 +21,7 @@ is unreachable without doing the work.
 | what each gate checks + how to run it | [`gates/README.md`](gates/README.md) |
 | the judge rubric (current) | [`rubrics/v7_prompt.md`](rubrics/v7_prompt.md) + [`rubrics/v7_rubric_delta.md`](rubrics/v7_rubric_delta.md) |
 | the rubric's full version history + measured effect per version | [`rubrics/CHANGELOG.md`](rubrics/CHANGELOG.md) |
+| V1's story (the River-rubric start) + the full V2 prompt | [`docs/AUDIT_PROMPT.md`](docs/AUDIT_PROMPT.md) |
 
 ## The pipeline in one picture
 

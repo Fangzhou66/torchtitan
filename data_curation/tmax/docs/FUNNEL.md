@@ -19,8 +19,12 @@ genuinely invalid artifact (runtime-derived filenames baked in).
 
 ## Per-rubric-version filtering
 
-Every version's prompt is kept (`rubrics/` + `rubrics/reference/`); each version's
-measured effect is the "Measured effect" line in `rubrics/CHANGELOG.md`.
+Every version **from V2 on** has its prompt kept (`rubrics/` + `rubrics/reference/`);
+each version's measured effect is the "Measured effect" line in
+`rubrics/CHANGELOG.md`. **V1 has no prompt file** — it implemented the River rubric
+(App. C) directly, and survives only as the paper itself plus the narrative in
+`docs/AUDIT_PROMPT.md` §"What went wrong with v1" (that file also reproduces the
+full V2 prompt). See the V1–V3 note below.
 
 | version | prompt / launch script | pool | result → filtered | changelog |
 |---|---|---:|---|---|

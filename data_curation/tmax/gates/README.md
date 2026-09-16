@@ -15,11 +15,15 @@ against sandboxes; gates 2–3 are the LLM judge workflow (see
 | 7 | independent re-gate, separate harness | pass 6 was not a harness artifact (350/351) | re-gate driver |
 | 8 | mutation test | the verifier reads the answer, not just its shape | `c2a_mutate.py`, `test_mutate.py` |
 
-> **Status:** the source scripts above live in the audit harness
-> (`swe-rebench` / `tmax` recovery tree) and are **not yet extracted into clean,
-> runnable, sanitized form** in this package. That extraction is the remaining
-> work before this is a one-command reproducible pipeline — see the checklist
-> below. Until then, this directory is the gate *spec* + source pointers.
+> **Status:** the gate scripts are now included in this directory **as-is from
+> the audit harness** (`swe-rebench` / `tmax` recovery tree): `gold_rollout.py`
+> (gate 4), `rebuild_gold.py` + `oracle_census.py` (gate 6), `c2a_mutate.py` +
+> `test_mutate.py` (gate 8), `c2b_gate.py` / `c2b_envgate.py` + `tmax_gate2.py.bak`
+> (gate 1), `capture_oracle.py.bak` (gate 5), and `archive_audits.py` (round
+> archiver). Two of them survive **only as `.bak`** — that is the only copy that
+> exists. They still carry harness-internal paths and are not yet a one-command
+> pipeline; cleaning them into clean, parameterized, runnable form (+ a smoke
+> test) is the remaining work — see the checklist below.
 
 ## Shared-Daytona-key hazard (read before running gates 1, 4–8)
 
