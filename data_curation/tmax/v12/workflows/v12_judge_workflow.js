@@ -41,7 +41,7 @@ const judgePrompt = (set, batchNo) => `You are a TMAX audit judge applying the v
 
 SETUP FIRST:
 1. Read the v12 judge prompt IN FULL: ${A.promptPath}. Compute its sha256 (sha256sum); confirm it equals ${A.promptSha}. On mismatch, STOP and return {"results":[]}. Use that prompt EXACTLY as your rubric. Wherever it says {TASK_ROOT}, the directory is ${A.tasksDir}; wherever it says {OUTPUT_PATH}, the file for a task is ${set.rowsDir}/<task_id>.jsonl; wherever it says {CANDIDATES_PATH}, the file for a task is ${A.candidatesDir}/<task_id>.json (the runner's candidate list: programs to dispose of, failing statements to cover, third-party imports).
-2. Read the output schema: ${A.schemaPath} (sha256 ${A.schemaSha}). Every row you write must validate against it (rubric_version "v12"; the allOf entries are hard constraints). Validate with: ${A.python} -c 'import json,jsonschema,sys; s=json.load(open("${A.schemaPath}")); r=json.loads(open(sys.argv[1]).readline()); jsonschema.Draft202012Validator(s).validate(r); print("valid")' <rowfile>  — before you consider the task finished; fix the row if it fails.
+2. Read the output schema: ${A.schemaPath} (sha256 ${A.schemaSha}). Every row you write must validate against it (rubric_version "v12"; the allOf entries are hard constraints). Validate with: ${A.python} -c 'import json,jsonschema,sys; s=json.load(open("${A.schemaPath}")); r=json.loads(open(sys.argv[1]).readline()); jsonschema.Draft202012Validator(s).validate(r); print("valid")' <rowfile>  -- before you consider the task finished; fix the row if it fails.
 3. Read your batch id list: ${set.batchDir}/batch_${pad(batchNo)}.json (a JSON array of up to ${BS} task_ids).
 
 FOR EACH task_id in your batch, in order:

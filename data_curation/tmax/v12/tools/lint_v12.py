@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-hoc row lints L1-L15 of DESIGN.md §h (rubric v12), implemented exactly as stated there.
+"""Post-hoc row lints L1-L15 of DESIGN.md section h (rubric v12), implemented exactly as stated there.
 
 lint(task_files, row, candidates=None) -> sorted list of lint ids that fired. task_files is {"instruction.md": str,
 "setup.sh": str, "tests/test.sh": str}; candidates is the parsed {CANDIDATES_PATH} inventory for the task (L13, L14
@@ -23,7 +23,7 @@ FAIL_STMT_RE = re.compile(r"^\s*assert\b|\bexit 1\b|pytest\.fail|sys\.exit\(1\)|
 TIMING_TOKENS = ("time.time", "perf_counter", "monotonic", "elapsed", "execution_time", "duration", "wall_clock", "wallclock", " seconds", "threshold")
 ASSERT_TOKENS = ("assert", "exit 1", "fail", "raise", "==", "!=", "<", ">", " in ")
 
-# The lint's half of the one-line switch of rule B2 / prompt §3 fact 8: modules the base image provides beyond the
+# The lint's half of the one-line switch of rule B2 / prompt section 3 fact 8: modules the base image provides beyond the
 # Python standard library and pytest. Empty until the base-image probe answers; adding a name here removes it from
 # the dependency inventory D, so a row that omits it is clean and a row that still holds it fires L8.
 BASE_IMAGE_MODULES: set[str] = set()
@@ -179,7 +179,7 @@ def lint(task_files, r, candidates=None):
 
     built = built_paths(t["setup.sh"])
 
-    # L1 — paths named by the floor fields and the exclusions occur in the three files; the toolchain exemption does
+    # L1 -- paths named by the floor fields and the exclusions occur in the three files; the toolchain exemption does
     # not cover a path setup.sh builds or instruction.md names (L3 rejects that entry)
     for k in ("oracle_reachable", "expectation_revealed", "expectation_movable"):
         if r.get(k):
@@ -199,7 +199,7 @@ def lint(task_files, r, candidates=None):
         if not any(in_files(p) for p in toks):
             v.add("L1")
 
-    # L2 / L2b — the assertion census
+    # L2 / L2b -- the assertion census
     inv = inventory(test_lines)
     lal = r.get("last_assert_line")
     spans = spans_of(r.get("assertions"))
@@ -210,7 +210,7 @@ def lint(task_files, r, candidates=None):
     if any(not covered(x, spans) for x in inv):
         v.add("L2b")
 
-    # L3 — excluded paths disjoint from A1/A2/A3 paths; no mislabelled `toolchain` entry
+    # L3 -- excluded paths disjoint from A1/A2/A3 paths; no mislabelled `toolchain` entry
     ex = set()
     for e in r.get("excluded_material") or []:
         ex.update(paths_in(str(e.get("path", ""))) or [str(e.get("path", ""))])
@@ -220,18 +220,18 @@ def lint(task_files, r, candidates=None):
         if any(p in ex for p in paths_in(r.get(k)) if p.startswith("/")):
             v.add("L3")
 
-    # L4 — no secondary clause names an A-field path
+    # L4 -- no secondary clause names an A-field path
     floor_paths = [p for k in A_FIELDS for p in paths_in(r.get(k)) if p.startswith("/")]
     for s in r.get("secondary_clauses_unenforced") or []:
         if any(p in str(s) for p in floor_paths):
             v.add("L4")
 
-    # L5 — no backslash-n inside a quoted python -c
+    # L5 -- no backslash-n inside a quoted python -c
     rc = r.get("repro_cmd") or ""
     if re.search(r'python3? -c "[^"]*\\n', rc):
         v.add("L5")
 
-    # L6 — an A5 'no:' cites a non-timing tests/test.sh line
+    # L6 -- an A5 'no:' cites a non-timing tests/test.sh line
     uip = str(r.get("untouched_image_passes") or "")
     if uip.startswith("no:"):
         m = UIP_RE.match(uip)
@@ -240,7 +240,7 @@ def lint(task_files, r, candidates=None):
             if 1 <= ln <= len(test_lines) and any(tok in test_lines[ln - 1].lower() for tok in TIMING_TOKENS):
                 v.add("L6")
 
-    # L7 — evidence_line in range; an assertion line when an A rule (not A7-only), B1 or B3 fired
+    # L7 -- evidence_line in range; an assertion line when an A rule (not A7-only), B1 or B3 fired
     ef, el = r.get("evidence_file"), r.get("evidence_line")
     src_lines = t.get(ef, "").splitlines()
     if not isinstance(el, int) or el < 1 or el > max(len(src_lines), 1):
@@ -252,7 +252,7 @@ def lint(task_files, r, candidates=None):
             if not any(tok in line for tok in ASSERT_TOKENS):
                 v.add("L7")
 
-    # L8 — the dependency inventory
+    # L8 -- the dependency inventory
     D = dependency_set(t)
     imported = imported_modules(test)
     held_text = " ".join(str(r.get(k) or "") for k in ("unconfirmed_dependency", "env_mismatch"))
@@ -264,7 +264,7 @@ def lint(task_files, r, candidates=None):
         if not named or any(m not in D for m in named):
             v.add("L8")
 
-    # L9 — the trace and the single-rule binding of repro_expected
+    # L9 -- the trace and the single-rule binding of repro_expected
     outcomes = []
     for a in r.get("assertions") or []:
         m = OUTCOME_RE.search(str(a))
@@ -293,13 +293,13 @@ def lint(task_files, r, candidates=None):
         if exp not in want:
             v.add("L9")
 
-    # L10 — programs setup.sh builds or marks executable that instruction.md names are inventoried
+    # L10 -- programs setup.sh builds or marks executable that instruction.md names are inventoried
     recorded = set(ex) | {p for k in RULE_FIELDS for p in paths_in(r.get(k))}
     for p in built:
         if p in t["instruction.md"] and p not in recorded and not any(p == q or p.startswith(q.rstrip("/") + "/") for q in recorded):
             v.add("L10")
 
-    # L11 — anchors in range; buggy_premise cites tests/test.sh
+    # L11 -- anchors in range; buggy_premise cites tests/test.sh
     def in_range(a):
         f, s, e = a
         return 1 <= s <= lens.get(f, 0) and (e is None or s <= e <= lens.get(f, 0))
@@ -323,7 +323,7 @@ def lint(task_files, r, candidates=None):
         elif e.get("exclusion") == "buggy_premise" and a[0] != "tests/test.sh":
             v.add("L11")
 
-    # L12 — the hold is the only channel: a held module may not reappear in uncertain_fact or in an A5 `unknown:`
+    # L12 -- the hold is the only channel: a held module may not reappear in uncertain_fact or in an A5 `unknown:`
     reroute = str(r.get("uncertain_fact") or "")
     if uip.startswith("unknown:"):
         reroute += " " + uip
@@ -331,7 +331,7 @@ def lint(task_files, r, candidates=None):
         if re.search(r"\b" + re.escape(m) + r"\b", reroute):
             v.add("L12")
 
-    # L13 / L14 — the runner's candidate inventory is disposed of and its failing lines are covered
+    # L13 / L14 -- the runner's candidate inventory is disposed of and its failing lines are covered
     if candidates:
         disposed = set(ex) | {p for k in RULE_FIELDS for p in paths_in(r.get(k))}
         for c in candidates.get("programs") or []:
@@ -347,7 +347,7 @@ def lint(task_files, r, candidates=None):
             if not covered(int(f.get("line", 0)), spans):
                 v.add("L14")
 
-    # L15 — a `derivation_is_core_step` exclusion cites the core step it performs
+    # L15 -- a `derivation_is_core_step` exclusion cites the core step it performs
     core_words = words(r.get("core_step"))
     for e in r.get("excluded_material") or []:
         if str(e.get("exclusion")) != "derivation_is_core_step":

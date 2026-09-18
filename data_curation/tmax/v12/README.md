@@ -76,8 +76,14 @@ deliberate policy choice recorded in `DESIGN.md`.
 The validation is 70 judgments (20 tasks × 2 repeats plus 30 single judgments chosen for being hard or previously
 contested), not a population estimate. It does not measure the corpus-wide rate of anything. Three lenient misses
 are listed in `results/validation70.RESULTS.md`; two discards reached through a named shape on tasks outside the
-verified set are unverified. A 600-task run over tasks v8 already judged is in progress and will be added here; its
-headline is the direct comparison on v8's PASS rows.
+verified set are unverified.
+
+`results/run600.*` is the production run: 600 tasks v8 already judged, stratified to oversample v8's PASS set,
+with the twenty acceptance ids embedded as a live instrument — every clause of it passed. Headline: **of the 307
+tasks v8 called PASS, v12 keeps 169 and moves 138 off** — 22 of those carry an outright leak field, 49 a core
+clause the grader never checks, 29 a check that rejects faithful work, 20 a movable ground truth. In the other
+direction v12 admits 19 of the 293 tasks v8 did not pass. No row in that run is independently verified; the
+limits are in `results/run600.RESULTS.md` section 6.
 
 Nothing in `results/` is a runtime receipt: every judgment is static, and a `verifier_fix` is a proposed change, not
 a validated patch.

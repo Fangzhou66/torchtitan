@@ -2,12 +2,12 @@
 """Runner-side candidate inventory for the V12 judge (paths and line numbers only; no task prose is emitted).
 
 For each task directory:
-  programs  — absolute paths the three files mention that look like files (not directories, not toolchain):
+  programs  -- absolute paths the three files mention that look like files (not directories, not toolchain):
               instruction.md mentions, setup.sh build/copy/chmod targets and heredoc-created files, tests/test.sh
               reads/executes. Each entry: {path, seen_in:[file:line,...]}.
-  failing_statements — tests/test.sh lines that can fail the run: def test_, assert, pytest.fail, sys.exit(1),
+  failing_statements -- tests/test.sh lines that can fail the run: def test_, assert, pytest.fail, sys.exit(1),
               exit 1, raise. Each entry: {line, kind}.
-  imports   — third-party Python modules tests/test.sh imports (not stdlib, not pytest) and whether setup.sh has an
+  imports   -- third-party Python modules tests/test.sh imports (not stdlib, not pytest) and whether setup.sh has an
               install line naming them: {module, line, installed_by_setup: bool}.
 The judge must dispose of every `programs` entry (excluded_material / a Step-3 field / benign) and cover every
 `failing_statements` line in `assertions`; it may add items the extractor missed. This is a superset of leads, not a

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-hoc scoring of the V12 half-scale run (ACCEPTANCE.md §1, §3, §4, §6).
+"""Post-hoc scoring of the V12 half-scale run (ACCEPTANCE.md section 1, section 3, section 4, section 6).
 
 Sets: acc_r1, acc_r2 (the 20 acceptance ids x2), movers (18 verified), flip (12 stratified flippers).
 Checks: schema validity; lints L1-L15 via lint_v12.lint(task_files, row, candidates); guards (non-PASS, required
@@ -30,11 +30,11 @@ B_FIELDS = ("overspecific_check", "env_mismatch", "unstable_reward")
 RULE_FIELDS = A_FIELDS + B_FIELDS + ("ambiguity", "trivial")
 FLOOR_FIELDS = LEAK + ("expectation_movable", "core_clause_unenforced", "overspecific_check", "env_mismatch", "unstable_reward")
 
-# ACCEPTANCE §1: required floor field(s) (any of) + pre-registered tier class (+ reject_shape for REJECT-PROVEN)
+# ACCEPTANCE section 1: required floor field(s) (any of) + pre-registered tier class (+ reject_shape for REJECT-PROVEN)
 GUARDS = {
     "task_000156_2f395118": (["oracle_reachable"], "REPAIR", None),
     "task_000241_547763df": (["value_derivable"], "REJECT-PROVEN", "deliverable_is_leaked_material"),
-    "task_000311_9e22fec5": (["value_derivable"], "EITHER", "deliverable_is_leaked_material"),  # ACCEPTANCE §0 (finishing pass): REPAIR or REJECT-PROVEN-with-shape both accepted
+    "task_000311_9e22fec5": (["value_derivable"], "EITHER", "deliverable_is_leaked_material"),  # ACCEPTANCE section 0 (finishing pass): REPAIR or REJECT-PROVEN-with-shape both accepted
     "task_004863_67089cd4": (["expectation_revealed", "oracle_reachable"], "REPAIR", None),
     "task_004886_10504160": (["expectation_revealed", "value_derivable"], "REPAIR", None),
     "task_000221_fb2fd737": (["oracle_reachable"], "REPAIR", None),
@@ -48,7 +48,7 @@ CONTROLS_A4 = ["task_000681_6f824421", "task_000927_43407097", "task_000056_f726
 CONTROLS_B1 = ["task_007102_d981ab89", "task_000220_ab2204ea", "task_002378_139ea7d2"]
 CONTROLS = CONTROLS_PASS + CONTROLS_A4 + CONTROLS_B1
 
-# ACCEPTANCE §6: expected tiers (set) and required fields per mover
+# ACCEPTANCE section 6: expected tiers (set) and required fields per mover
 MOVERS = {
     "task_000092_a7e4987d": ({"PASS"}, [], None),
     "task_006700_8f3aa427": ({"PASS"}, [], None),
@@ -195,7 +195,7 @@ def main():
         mv[tid] = {"tier": r.get("tier"), "fired": fired(r), "shape": r.get("reject_shape"), "expected": sorted(exp_tiers), "ok": ok, "held": held(r), "leak": leak(r)}
     out["movers"] = mv
 
-    # over-rejection instrument (ACCEPTANCE §4)
+    # over-rejection instrument (ACCEPTANCE section 4)
     all_rows = [(s, tid, r) for s, rows in sets.items() for tid, r in rows.items() if r]
     bad_shape = [f"{s}/{tid}" for s, tid, r in all_rows if r.get("tier") == "REJECT-PROVEN" and r.get("reject_shape") not in ("instruction_prints_answer", "deliverable_is_leaked_material", "broken_premise", "pre_solved")]
     instrument = {
