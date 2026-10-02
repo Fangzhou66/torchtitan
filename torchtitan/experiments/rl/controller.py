@@ -1725,6 +1725,15 @@ class Controller(Configurable):
                 *background_tasks, trainer_task, return_exceptions=True
             )
 
+        # The process remains alive for post-training validation, so process lifecycle
+        # cannot tell external consumers when optimization has ended. Publish this
+        # marker after the finite trainer loop returns successfully and before any final
+        # validation begins.
+        self.training_lineage.record_optimization_complete(
+            policy_version=self._trainer_policy_version,
+            requested_training_steps=num_training_steps,
+        )
+
         # Drain any background pass first: it holds the eval generators, and its
         # curve point would otherwise be lost when the controller exits.
         await self._await_pending_validation()
