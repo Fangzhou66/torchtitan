@@ -779,6 +779,7 @@ these are the variables that touch them.
 | `TMAX_TURN_MAX_TOKENS` | `16384` | `16384` (terminus) | per-turn generation cap. 32768 lets one turn overrun the context warning into the wall. |
 | `SWE_CKPT_INTERVAL` | `5` | `20` | steps between saves. |
 | `SWE_CKPT_KEEP` | `3` | `3` | checkpoints retained, at ~98 GiB each. |
+| `SWE_LAST_SAVE_MODEL_ONLY` | `0` | `0` | `1` writes the final step as model only (~20 GiB). That step can then be continued only with a fresh AdamW (`SWE_INITIAL_DCP_CHECKPOINT`), which spiked grad_norm and logprob_diff for ~10 steps on 7csl6c0j. |
 | `SWE_LMHEAD_TF32` | `1` | `0` | TF32 tensor cores for the fp32 lm_head matmuls (loss). Measured 08-30 (B300, 65536-token rows): with `SWE_LOSS_CHUNKS=8`, loss_fn 6.60 -> 0.82 s/mb, whole fwd_bwd 14.10 -> ~5.9 s/mb; grad_norm unchanged. |
 | `SWE_AC` | `selective` | FullAC | per-op selective activation checkpointing. Safe only with the packed-row cu_seqlens hoisted out of AC (4380eaab); before that fix, both AC modes could deadlock in recompute. Measured 08-30 on top of TF32+chunks: fwd_bwd ~5.9 -> 5.65 s/mb median (117 mb), backward 3.99 -> 3.72 s/mb; trainer GPUs 238/275 GiB. |
 | `SWE_LOSS_CHUNKS` | `8` | `32` | chunked-loss width; fewer = larger lm_head GEMMs. Validated with TF32 above. |

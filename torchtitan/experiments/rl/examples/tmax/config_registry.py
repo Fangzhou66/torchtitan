@@ -868,9 +868,13 @@ def rl_grpo_qwen3_5_9b_tmax(
     # (16 chunks -> ~2.3 GiB, an OOM risk); 65536 % 32 == 0 for the chunk split.
     # Save a full training-state checkpoint every 20 steps (matches the paper's
     # save_freq 20) so the run is resumable after a crash and each snapshot is
-    # eval-able; keep last_save_model_only so the final step-100 save is a clean
-    # model-only export for serving. The swe base uses interval=10000 (final save
-    # only), which risks losing the whole ~20h run to any mid-run crash.
+    # eval-able. The final save is a full checkpoint too (SWE_LAST_SAVE_MODEL_ONLY=1
+    # restores the model-only export): a model-only final step can only be
+    # continued with a fresh AdamW, and 7csl6c0j, resuming ivuaqcol's step 200
+    # that way, spiked grad_norm and logprob_diff for ~10 steps. ckpt_export.py
+    # already skips optimizer shards for serving. The swe base uses
+    # interval=10000 (final save only), which risks losing the whole ~20h run to
+    # any mid-run crash.
     # Loss: the tmax recipe's DPPO is the DEFAULT (SWE_LOSS=dapo reverts). See
     # _tmax_recipe_loss. num_chunks=32 (chunked lm-head loss) is preserved.
     _loss = _tmax_recipe_loss(dataclasses.replace(config.trainer.loss, num_chunks=32))
@@ -895,7 +899,7 @@ def rl_grpo_qwen3_5_9b_tmax(
             initial_load_model_only=True
             if os.environ.get("SWE_INITIAL_DCP_CHECKPOINT")
             else config.trainer.checkpoint.initial_load_model_only,
-            last_save_model_only=os.environ.get("SWE_LAST_SAVE_MODEL_ONLY", "1") == "1",
+            last_save_model_only=os.environ.get("SWE_LAST_SAVE_MODEL_ONLY", "0") == "1",
             # Cap disk the way the sibling recipes do (dapo_math, search_r1 both
             # pin 3). Left at the framework default of 10, a 9B run parks
             # 10 x 102 GiB = 1 TiB of checkpoints and eventually takes the whole

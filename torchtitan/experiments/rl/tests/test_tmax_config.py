@@ -25,6 +25,16 @@ def test_model_only_continuation_and_train_stream_offset(monkeypatch):
     assert config.rollouter.train_dataset.initial_skip_samples == 7926
     assert config.rollouter.validation_dataset.initial_skip_samples == 0
 
+@pytest.mark.parametrize("override,expected", [(None, False), ("1", True)])
+def test_final_save_keeps_optimizer_by_default(monkeypatch, override, expected):
+    if override is None:
+        monkeypatch.delenv("SWE_LAST_SAVE_MODEL_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("SWE_LAST_SAVE_MODEL_ONLY", override)
+    config = rl_grpo_qwen3_5_9b_tmax()
+    assert config.trainer.checkpoint.last_save_model_only is expected
+
+
 from torchtitan.experiments.rl.examples.tmax import (
     config_registry as tmax_config_registry,
 )
