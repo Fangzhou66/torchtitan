@@ -42,6 +42,14 @@ def test_one_rung_is_a_band_above_the_seed() -> None:
     assert len(asserts) == 1 and "at most 5 more" in asserts[0]
 
 
+def test_a_seed_without_a_solution_bounds_only_the_assertions() -> None:
+    seed = {"solution_lines": None, "verifier_asserts": 6}
+    for lines in (0, 9, 125):
+        assert ts.violations(seed, {"solution_lines": lines, "verifier_asserts": 8}) == []
+    asserts = ts.violations(seed, {"solution_lines": 9, "verifier_asserts": 20})
+    assert len(asserts) == 1 and "at most 5 more" in asserts[0]
+
+
 def test_a_large_seed_keeps_its_own_band() -> None:
     # A 17-line seed that scored 16/16 proves the policy handles 17; one rung
     # above it is 20 to 25, not "under 20".

@@ -723,6 +723,46 @@ def test_spec_defect_keeps_the_input_revision_without_starting_repair(
     assert (rw.traces / "attempt-01.jsonl").read_text() == '{"reward": 0}\n'
 
 
+def test_an_unsolved_task_is_hardened_by_the_agent(tmp_path, monkeypatch):
+    rw, r0 = _rewrite(tmp_path, monkeypatch)
+    for package in (r0, rw.package):
+        (package / "solution/solve.sh").unlink()
+    seen = []
+
+    def evolve(rewrite, task, job, **kwargs):
+        seen.append(task)
+        return {
+            **task,
+            "solve_sh": "#!/bin/sh\necho done > /app/report.txt\n",
+            "_agent_validated": True,
+        }
+
+    monkeypatch.setitem(sys.modules, "evolve_codex", _fake_ec(evolve_agentic=evolve))
+    monkeypatch.setattr(fb, "revalidate", lambda *a, **k: {"ok": True, "reward": 1.0})
+    rec = fb.process_one(rw, SIGNAL, job="harder", seed_dir=r0)
+    assert seen and seen[0]["_unsolved"] and seen[0]["solve_sh"] == ""
+    assert rec["status"] == "accepted" and rec["unsolved"] is True
+
+
+def test_an_unsolved_seed_does_not_bound_the_solution_length(tmp_path, monkeypatch):
+    work, task = _pkg(tmp_path, SEED["instruction"], SEED["test_state_py"])
+    task.update(
+        solve_sh="#!/bin/sh\n" + "echo step\n" * (fb.ts.MAX_ADDED + 10),
+        _direction="harder",
+        _harder_mode="student",
+    )
+    monkeypatch.setattr(
+        fb,
+        "daytona_probe",
+        lambda *a, **k: {"ok": True, "passed": False, "reward": 1, "solve_exit": 0},
+    )
+    unsolved = {**SEED, "solve_sh": "", "_unsolved": True}
+    assert fb.revalidate(work, task, orig=unsolved, changed=["solve_sh"])["ok"]
+    solved = {**SEED, "solve_sh": "#!/bin/sh\necho one\n"}
+    verdict = fb.revalidate(work, task, orig=solved, changed=["solve_sh"])
+    assert not verdict["ok"] and verdict["stage"] == "step_size"
+
+
 def test_final_size_gate_uses_student_mode(tmp_path, monkeypatch):
     work, task = _pkg(tmp_path, SEED["instruction"], SEED["test_state_py"])
     task.update(solve_sh=SEED["solve_sh"], _direction="harder", _harder_mode="student")

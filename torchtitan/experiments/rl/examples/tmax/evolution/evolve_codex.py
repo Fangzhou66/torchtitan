@@ -876,8 +876,13 @@ def _write_seed_literals(
         return
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(vl.audit_package(pkg, verifier_rel)) + "\n")
-    # And the seed's size, for the one-rung check the same tool runs.
+    # And the seed's size, for the one-rung check the same tool runs. A seed
+    # with no reference solution has no length to count a rung from.
     size = ts.size_of_package(pkg, verifier_rel)
+    try:
+        ev.solution_path(pkg)
+    except FileNotFoundError:
+        size["solution_lines"] = None
     if not require_growth:
         size["require_growth"] = False
     (pkg / "run" / "seed_size.json").write_text(json.dumps(size) + "\n")
@@ -1765,6 +1770,16 @@ This task has no reference solution: no model has solved it yet. Write
 `solution/solve.sh` first, a script that does the work the instruction asks for
 in this environment, and get `./sandbox oracle` to pass with it before you
 simplify anything. The simplified task must still pass with it."""
+
+_UNSOLVED_HARDER_NOTE = """
+
+This task has no reference solution yet, which is why the seed counts 0
+solution lines above; the solution's length is therefore not checked, only the
+verifier's assertions. The attempts in `traces/` that reached reward 1 are your
+oracle. Before you change anything, write `solution/solve.sh` for the task as it
+stands, working from what those attempts did, and get `./sandbox oracle` to pass
+with it. Then harden: step 1 adapts that solution, and the change is one rung
+above it."""
 
 _REPAIR_JOB = """Your rewrite did not survive the caller's check. It rebuilt the
 package from scratch, ran `solution/solve.sh` against the verifier (exit
@@ -2751,7 +2766,8 @@ def evolve_agentic(
                     "Do not add code to meet a minimum length."
                 ),
                 max_asserts=ts.MAX_ADDED_ASSERTS,
-            ),
+            )
+            + (_UNSOLVED_HARDER_NOTE if task.get("_unsolved") else ""),
             "easier": _EASIER_JOB.format(
                 solved=solved,
                 attempts=attempts_n,
