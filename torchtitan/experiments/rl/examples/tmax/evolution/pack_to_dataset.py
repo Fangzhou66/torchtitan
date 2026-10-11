@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -236,6 +237,72 @@ def fixture_ceiling() -> int:
     return _rts_module()._MAX_CONTEXT_BYTES
 
 
+# Fzz1/SWE-Rebench-Tasks-Clean's grader locates the repo by HEAD == base commit,
+# so an agent that commits a correct fix on top of base scores 0 without a test
+# run (5 of 344 Rebench rollouts on della, 2026-10-10). Grade any repo whose
+# HEAD descends from base, and restore / prune the test surface against base
+# rather than HEAD so committing a tampered or added test still cannot survive.
+# Each edit must match exactly once; a grader that changed upstream fails the
+# build instead of being half-patched. Once upstream ships the fix the
+# signature is gone and this is a no-op.
+REBENCH_TEST_SH_PATCH = "rebench-base-ancestry-v1"
+_REBENCH_SIGNATURE = (
+    'if [ "$(git -C "$r" rev-parse HEAD 2>/dev/null)" = "$want" ]; then'
+)
+_TEST_SURFACE_RE = (
+    "'(^|/)(tests?|testing)/|(^|/)conftest\\.py$|(^|/)pytest\\.ini$'"
+)
+_REBENCH_EDITS = (
+    (
+        _REBENCH_SIGNATURE,
+        'if git -C "$r" merge-base --is-ancestor "$want" HEAD 2>/dev/null; then',
+    ),
+    (
+        'git checkout -q HEAD -- "$f" 2>/dev/null || rm -f -- "$f"',
+        'git checkout -q "$BASE" -- "$f" 2>/dev/null || rm -f -- "$f"',
+    ),
+    (
+        "git ls-tree -r -z --name-only HEAD \\\n",
+        'git ls-tree -r -z --name-only "$BASE" \\\n',
+    ),
+    (
+        "xargs -0 -r git checkout -q HEAD -- 2>/dev/null",
+        'xargs -0 -r git checkout -q "$BASE" -- 2>/dev/null',
+    ),
+    (
+        "git ls-files -z --others --exclude-standard \\\n"
+        f"  | grep -zE {_TEST_SURFACE_RE} \\\n"
+        "  | xargs -0 -r rm -f -- 2>/dev/null",
+        "{ git ls-files -z; git ls-files -z --others --exclude-standard; } \\\n"
+        f"  | grep -zE {_TEST_SURFACE_RE} \\\n"
+        "  | while IFS= read -r -d '' f; do "
+        'git cat-file -e "$BASE:$f" 2>/dev/null || rm -f -- "$f"; done',
+    ),
+    (
+        'touched="$(git diff --name-only HEAD -- ',
+        'touched="$(git diff --name-only "$BASE" -- ',
+    ),
+)
+_FIND_REPO_CALL = re.compile(r'R="\$\(find_repo ([0-9a-f]{40})\)"')
+
+
+def patch_rebench_test_sh(test_sh: str) -> str:
+    if _REBENCH_SIGNATURE not in test_sh:
+        return test_sh
+    calls = _FIND_REPO_CALL.findall(test_sh)
+    if len(calls) != 1:
+        raise ValueError(f"rebench test.sh: {len(calls)} find_repo calls, want 1")
+    out = _FIND_REPO_CALL.sub(
+        lambda m: f'BASE={m.group(1)}\nR="$(find_repo "$BASE")"', test_sh
+    )
+    for old, new in _REBENCH_EDITS:
+        n = out.count(old)
+        if n != 1:
+            raise ValueError(f"rebench test.sh: {old!r} occurs {n} times, want 1")
+        out = out.replace(old, new)
+    return out
+
+
 def to_row(
     task_dir: str,
     *,
@@ -263,6 +330,14 @@ def to_row(
     if row is None:
         raise ValueError(f"{task_dir}: {reason}")
     ident = task_id or os.path.basename(task_dir.rstrip("/"))
+    tmax = row["metadata"]["tmax"]
+    try:
+        patched = patch_rebench_test_sh(tmax["test_sh"])
+    except ValueError as e:
+        raise ValueError(f"{ident}: {e}") from None
+    if patched != tmax["test_sh"]:
+        tmax["test_sh"] = patched
+        tmax["test_sh_patch"] = REBENCH_TEST_SH_PATCH
     try:
         lists = effective_protected(protected, task_dir)
         if lists is not None:
