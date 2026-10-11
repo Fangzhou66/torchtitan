@@ -139,7 +139,11 @@ from torchtitan.experiments.rl.routing.inter_generator_router import (
 )
 from torchtitan.experiments.rl.routing.types import RoutingContext
 from torchtitan.experiments.rl.training_lineage import TrainingLineageRecorder
-from torchtitan.experiments.rl.types import Completion, TrainingBatch
+from torchtitan.experiments.rl.types import (
+    Completion,
+    TrainingBatch,
+    TrainingSampleGroup,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -2175,6 +2179,21 @@ class Controller(Configurable):
                         lineage=rollout_group.lineage,
                         reason="stale",
                         target_policy_version=target_policy_version,
+                    )
+                    # A metric-only group: carried into the next step's metrics the
+                    # way zero-std and untrainable drops are, so the count reaches
+                    # wandb. It cannot complete a batch, having no samples.
+                    batcher.add_training_samples(
+                        training_sample_group=TrainingSampleGroup(
+                            group_id=rollout_group.group_id,
+                            training_samples=[],
+                            metrics=[
+                                m.Metric(
+                                    "rollout_buffer/num_groups_dropped_stale",
+                                    m.Sum(1.0),
+                                )
+                            ],
+                        )
                     )
                     continue
 

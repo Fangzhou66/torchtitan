@@ -6,6 +6,7 @@
 
 import contextlib
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field, replace
@@ -685,8 +686,23 @@ class PolicyTrainer(Actor, Configurable):
                 ep_enabled=self.parallel_dims.ep_enabled,
             )
 
+        # The controller only stops on a non-finite loss; a finite loss can still
+        # backprop inf/NaN, and stepping on it writes NaN into the weights the
+        # generators pull. grad_norm is the all-reduced total, so every rank takes
+        # the same branch. The step is skipped, not the version, so the loop's
+        # bookkeeping is unchanged and the generators re-pull identical weights.
+        grad_norm_value = float(grad_norm.item())
+        skipped_nonfinite = not math.isfinite(grad_norm_value)
         with sl.log_trace_span("optim"):
-            self.optimizers.step()
+            if skipped_nonfinite:
+                logger.warning(
+                    "optim_step: grad_norm=%s is not finite; skipping the "
+                    "optimizer step for policy_version %d",
+                    grad_norm_value,
+                    self.policy_version + 1,
+                )
+            else:
+                self.optimizers.step()
             self.lr_schedulers.step()
             self.optimizers.zero_grad()
 
@@ -700,7 +716,8 @@ class PolicyTrainer(Actor, Configurable):
         return OptimStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "train/grad_norm/mean": float(grad_norm.item()),
+                "train/grad_norm/mean": grad_norm_value,
+                "train/skipped_nonfinite_grad": float(skipped_nonfinite),
                 "train/lr": current_lr,
                 "train/policy_version": float(self.policy_version),
             },

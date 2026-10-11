@@ -684,6 +684,12 @@ def test_batcher_loop_replenishes_each_group_exactly_once() -> None:
         packed = await training_batch_queue.get()
         assert packed is not None
         assert packed.target_policy_version == 6
+        stale = [
+            metric.value.value
+            for metric in packed.metrics
+            if metric.key == "rollout_buffer/num_groups_dropped_stale"
+        ]
+        assert stale == [1.0]
         assert await training_batch_queue.get() is None
 
     asyncio.run(run())
