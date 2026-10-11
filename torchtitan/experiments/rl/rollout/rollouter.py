@@ -109,6 +109,26 @@ class Rollouter(Configurable):
         drain = getattr(self._train_dataset, "drain_lineage_events", None)
         return drain() if drain is not None else []
 
+    def training_data_state_dict(self) -> dict:
+        """Checkpoint the dataset cursor when controller data recovery is enabled."""
+        state_dict = getattr(self._train_dataset, "state_dict", None)
+        if not callable(state_dict):
+            raise ValueError(
+                "checkpoint_training_data requires a stateful training dataset"
+            )
+        state = state_dict()
+        if not isinstance(state, dict):
+            raise ValueError("training dataset state_dict must return a dictionary")
+        return state
+
+    def load_training_data_state_dict(self, state: dict) -> None:
+        load = getattr(self._train_dataset, "load_state_dict", None)
+        if not callable(load):
+            raise ValueError(
+                "checkpoint_training_data requires a stateful training dataset"
+            )
+        load(state)
+
     def get_validation_sample(self) -> object:
         """Get one validation sample (the env input) from the validation dataset."""
         return next(self._validation_dataset)

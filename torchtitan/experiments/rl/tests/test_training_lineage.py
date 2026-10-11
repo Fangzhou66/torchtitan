@@ -69,6 +69,13 @@ def test_recorder_atomically_marks_optimization_complete(tmp_path) -> None:
     assert not list(recorder.root.glob(".optimization_complete.json.*.tmp"))
 
 
+def test_disabled_pending_tracking_preserves_generic_lineage_contract(tmp_path):
+    recorder = TrainingLineageRecorder(dump_dir=str(tmp_path))
+    recorder.record_event("dropped", lineage={"task_id": "task"})
+    assert _jsonl(recorder.events_path)[-1]["task_id"] == "task"
+    assert not recorder.pending_inputs
+
+
 @pytest.mark.parametrize("crash", [False, True])
 def test_controller_heartbeat_closes_on_success_or_interruption(tmp_path, crash):
     async def run():

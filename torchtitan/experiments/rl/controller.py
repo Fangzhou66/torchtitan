@@ -91,7 +91,9 @@ import asyncio
 import logging
 import math
 import os
+import pickle
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -744,7 +746,13 @@ class Controller(Configurable):
         # once `renderers` supports bring-your-own-tokenizer
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
         # Until then, reach into the renderer's tokenizer for the pad id (eos doubles as pad).
-        self.training_lineage = TrainingLineageRecorder(dump_dir=config.dump_folder)
+        self.training_lineage = TrainingLineageRecorder(
+            dump_dir=config.dump_folder,
+            track_pending_inputs=config.trainer.checkpoint_training_data,
+        )
+        self._training_data_lock = asyncio.Lock()
+        self._next_training_group_id = 0
+        self._replay_training_inputs: deque[tuple[int, object]] = deque()
         self._rollout_attempt_id = ""
         if config.isolate_rollout_artifacts:
             self._rollout_attempt_id = (
@@ -1234,12 +1242,19 @@ class Controller(Configurable):
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
         # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
-        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot rollout
-        #   buffer (in-flight rollouts) and the dataset stream position are NOT restored -- a resumed
-        #   run refills the buffer and re-reads data from the start. Need to recycle prompts.
         self.start_step = self._get_rank_0_value(
             await self.trainer.get_policy_version.call()
         )
+        if config.trainer.checkpoint_training_data:
+            state = self._get_rank_0_value(
+                await self.trainer.get_training_data_state.call()
+            )
+            if state:
+                self._restore_training_data_state(state)
+            elif self.start_step:
+                raise ValueError(
+                    "resumed checkpoint is missing controller training data"
+                )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
 
@@ -2021,39 +2036,74 @@ class Controller(Configurable):
         Separate from `_rollout_loop`, so slow data prep (e.g. on-the-fly question generation) overlaps
         generation instead of serializing in front of it.
         """
-        # TODO(resume): persist dataset position so a restarted job continues the data stream, not from scratch.
-        group_index = 0
-
         # TODO(perf): Slots are current released in batches, while this loop is a single producer.
         # we could a) increase the number of threads; b) revisit how we release slots and see if
         # we can release them on the batcher while still preserving max off-policy steps.
         # finally, c) we need to check how will this data input loop truly overlaps with the rollout loop.
         while await group_buffer.wait_for_slot():
-            with sl.log_trace_span("get_training_sample"):
-                # to_thread: Dont block on dataset reads
-                sample = await asyncio.to_thread(self._rollouter.get_training_sample)
-                dataset_events = self._rollouter.drain_training_data_events()
-            for event in dataset_events:
-                self.training_lineage.record_dataset_event(event)
-            lineage = self.training_lineage.describe_sample(
-                sample=sample, group_id=group_index
-            )
-            self.training_lineage.record_sample(lineage=lineage, sample=sample)
-            work = RolloutGroupWork(
-                group_id=group_index,
-                sample=sample,
-                lineage=lineage,
-            )
-            await group_buffer.add_work(work)
-            if work.admitted_ts is not None:
-                self._record_training_event(
-                    "admitted",
-                    lineage=lineage,
-                    trainer_policy_version=self._trainer_policy_version,
-                    generator_policy_version=self._generator_policy_version,
+            # Cursor advancement and prompt registration form one checkpoint
+            # transaction, including a dataset read delegated to another thread.
+            async with self._training_data_lock:
+                replayed = bool(self._replay_training_inputs)
+                if replayed:
+                    group_index, sample = self._replay_training_inputs.popleft()
+                else:
+                    group_index = self._next_training_group_id
+                    self._next_training_group_id += 1
+                    with sl.log_trace_span("get_training_sample"):
+                        sample = await asyncio.to_thread(
+                            self._rollouter.get_training_sample
+                        )
+                        dataset_events = self._rollouter.drain_training_data_events()
+                    for event in dataset_events:
+                        self.training_lineage.record_dataset_event(event)
+                lineage = self.training_lineage.describe_sample(
+                    sample=sample, group_id=group_index
                 )
-            group_index += 1
+                self.training_lineage.record_sample(lineage=lineage, sample=sample)
+                work = RolloutGroupWork(
+                    group_id=group_index, sample=sample, lineage=lineage
+                )
+                await group_buffer.add_work(work)
+                if work.admitted_ts is not None:
+                    self._record_training_event(
+                        "replayed" if replayed else "admitted",
+                        lineage=lineage,
+                        trainer_policy_version=self._trainer_policy_version,
+                        generator_policy_version=self._generator_policy_version,
+                    )
         logger.info("Buffer closed; data input loop stopping")
+
+    async def _snapshot_training_data_state(self) -> bytes:
+        async with self._training_data_lock:
+            return pickle.dumps(
+                {
+                    "schema_version": 1,
+                    "policy_version": self._trainer_policy_version,
+                    "dataset": self._rollouter.training_data_state_dict(),
+                    "next_group_id": self._next_training_group_id,
+                    "pending_inputs": sorted(
+                        self.training_lineage.pending_inputs.items()
+                    ),
+                }
+            )
+
+    def _restore_training_data_state(self, payload: bytes) -> None:
+        state = pickle.loads(payload)
+        if state["schema_version"] != 1 or state["policy_version"] != self.start_step:
+            raise ValueError(
+                "controller training data does not match the loaded checkpoint"
+            )
+        self._rollouter.load_training_data_state_dict(state["dataset"])
+        self._next_training_group_id = state["next_group_id"]
+        self.training_lineage.pending_inputs = dict(state["pending_inputs"])
+        self._replay_training_inputs = deque(state["pending_inputs"])
+        self._record_training_event(
+            "training_data_restored",
+            policy_version=self.start_step,
+            pending_inputs=len(self._replay_training_inputs),
+            next_group_id=self._next_training_group_id,
+        )
 
     async def _rollout_loop(
         self,
@@ -2553,8 +2603,20 @@ class Controller(Configurable):
             # Save full training state for resume; CheckpointManager writes only on its interval
             # and the final step. After the divergence guard so a NaN step isn't checkpointed.
             with sl.log_trace_span("trainer_save_checkpoint"):
+                checkpoint_args = {}
+                if self.config.trainer.checkpoint_training_data:
+                    assert self.trainer is not None
+                    should_save = self._get_rank_0_value(
+                        await self.trainer.should_save_checkpoint.call(
+                            step, last_step=(step == num_training_steps)
+                        )
+                    )
+                    if should_save:
+                        checkpoint_args[
+                            "training_data_state"
+                        ] = await self._snapshot_training_data_state()
                 await self.trainer.save_checkpoint.call(
-                    step, last_step=(step == num_training_steps)
+                    step, last_step=(step == num_training_steps), **checkpoint_args
                 )
 
             # Periodic held-out validation. Skip the final step -- run() does a post-training

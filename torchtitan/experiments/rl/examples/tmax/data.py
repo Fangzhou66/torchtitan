@@ -593,6 +593,7 @@ class TMaxDataset(Configurable):
         return {
             "rng_state": self._rng.getstate(),
             "order": list(self._order),
+            "ordered_task_ids": [self._samples[i].instance_id for i in self._order],
             "pos": self._pos,
             "epoch": self._epoch,
             "stream_position": self._stream_position,
@@ -601,8 +602,24 @@ class TMaxDataset(Configurable):
 
     def load_state_dict(self, state_dict: dict) -> None:
         self._rng.setstate(state_dict["rng_state"])
-        self._order = list(state_dict["order"])
-        self._pos = state_dict["pos"]
+        task_ids = state_dict.get("ordered_task_ids")
+        if task_ids is None:
+            # Legacy snapshots were tied to row order and retain that contract.
+            self._order = list(state_dict["order"])
+            self._pos = state_dict["pos"]
+        else:
+            position = state_dict["pos"]
+            if not 0 <= position <= len(task_ids):
+                raise ValueError(
+                    "checkpoint dataset position is outside its saved order"
+                )
+            current = {self._samples[i].instance_id: i for i in self._order}
+            consumed = [task for task in task_ids[:position] if task in current]
+            remaining = [task for task in task_ids[position:] if task in current]
+            saved_ids = set(task_ids)
+            appended = [task for task in current if task not in saved_ids]
+            self._order = [current[task] for task in consumed + remaining + appended]
+            self._pos = len(consumed)
         self._epoch = state_dict.get("epoch", 0)
         self._stream_position = int(state_dict.get("stream_position", self._pos))
         self._stream_id = state_dict.get("stream_id", self._stream_id)

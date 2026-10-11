@@ -8,6 +8,7 @@ import contextlib
 import logging
 import math
 import os
+import pickle
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -207,6 +208,9 @@ class PolicyTrainer(Actor, Configurable):
         initial_policy_version: int = 0
         """Starting version for an explicit model-only warm start; optimizer state is fresh."""
 
+        checkpoint_training_data: bool = False
+        """Include controller dataset state and pending prompts in full checkpoints."""
+
     def __init__(
         self,
         config: Config,
@@ -341,6 +345,7 @@ class PolicyTrainer(Actor, Configurable):
                 "initial_policy_version requires an enabled model-only initial checkpoint"
             )
         self.policy_version = config.initial_policy_version
+        self._controller_training_data = b""
 
         # Always build CheckpointManager; enable is a field on the config.
         # When enable=False (CI/debug), load() is a no-op and random init stands.
@@ -381,16 +386,32 @@ class PolicyTrainer(Actor, Configurable):
     def state_dict(self) -> dict[str, Any]:
         # Checkpoint "train_state": policy_version == completed optim steps, so it
         # doubles as the resume step counter.
-        return {"policy_version": self.policy_version}
+        state: dict[str, Any] = {"policy_version": self.policy_version}
+        if self.config.checkpoint_training_data:
+            # An opaque byte payload lets DCP load variable-size prompt queues;
+            # an empty nested dict would not allocate their saved keys on load.
+            state["controller_training_data"] = self._controller_training_data
+        return state
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.policy_version = state_dict["policy_version"]
+        if self.config.checkpoint_training_data:
+            self._controller_training_data = state_dict["controller_training_data"]
 
     @endpoint
     async def get_policy_version(self) -> int:
         """Current policy version: after load(), the step a resume restored from
         (0 if fresh). The controller uses it to resume and re-sync generators."""
         return self.policy_version
+
+    @endpoint
+    async def get_training_data_state(self) -> bytes:
+        """Return the controller snapshot loaded with this policy and optimizer."""
+        return self._controller_training_data
+
+    @endpoint
+    async def should_save_checkpoint(self, step: int, last_step: bool = False) -> bool:
+        return self.checkpointer._should_save(step, last_step=last_step)
 
     @endpoint
     async def close(self) -> None:
@@ -725,7 +746,13 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     @sl.log_trace_span("save_checkpoint")
-    async def save_checkpoint(self, step: int, last_step: bool = False) -> bool:
+    async def save_checkpoint(
+        self,
+        step: int,
+        last_step: bool = False,
+        *,
+        training_data_state: bytes | None = None,
+    ) -> bool:
         """Save checkpoint via CheckpointManager.
 
         Args:
@@ -735,6 +762,22 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             True if a checkpoint was saved.
         """
+        if self.config.checkpoint_training_data and self.checkpointer._should_save(
+            step, last_step=last_step
+        ):
+            if training_data_state is None:
+                raise ValueError(
+                    "checkpoint_training_data requires a controller snapshot"
+                )
+            snapshot = pickle.loads(training_data_state)
+            if (
+                snapshot["policy_version"] != self.policy_version
+                or step != self.policy_version
+            ):
+                raise ValueError(
+                    "controller data snapshot disagrees with checkpoint policy version"
+                )
+            self._controller_training_data = training_data_state
         return self.checkpointer.save(step, last_step=last_step)
 
     @endpoint
