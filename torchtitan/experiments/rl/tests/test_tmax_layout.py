@@ -45,6 +45,41 @@ def test_signal_id_is_run_then_safe_task_and_group() -> None:
     )
 
 
+def test_attempts_preserve_prior_traces_and_do_not_reuse_closed_signals(
+    monkeypatch, tmp_path
+):
+    from torchtitan.experiments.rl.examples.tmax.evolution import evolve_ondella as od
+
+    root = layout.Root(tmp_path)
+    stable = root.run("training")
+    monkeypatch.setenv("TRL_RUN_DIR", str(stable.path))
+    previous = None
+    ledger = {}
+    for attempt in (
+        "20260101-000000Z--a",
+        "20260101-000100Z--b",
+        "20260101-000200Z--c",
+    ):
+        monkeypatch.setenv("TRL_ROLLOUT_ATTEMPT_ID", attempt)
+        run = layout.Run.from_env()
+        assert run == stable.for_attempt(attempt)
+        assert run is not None
+        trace = run.rollout_record("task", 0, 0)
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        trace.write_text(attempt)
+        layout.write_json_atomic(run.signal("task", 0), {"attempt": attempt})
+        pending = od._pending(root, ledger)
+        assert len(pending) == 1
+        sid = pending[0][2]
+        ledger[sid] = {"status": "accepted"}
+        if previous is not None:
+            assert previous.read_text() != attempt
+        previous = trace
+    assert len(root.run_dirs()) == 3
+    assert stable.trainer == tmp_path / "runs" / "training" / "trainer"
+    assert not stable.signal("task", 0).exists()
+
+
 # --- files ---
 
 

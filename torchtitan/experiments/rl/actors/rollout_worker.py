@@ -104,9 +104,15 @@ class RolloutWorker(Actor):
     """
 
     def __init__(
-        self, config: "Controller.Config", *, rollout_concurrency: int
+        self,
+        config: "Controller.Config",
+        *,
+        rollout_concurrency: int,
+        artifact_attempt_id: str = "",
     ) -> None:
         _enable_worker_info_logging()
+        if artifact_attempt_id:
+            os.environ["TRL_ROLLOUT_ATTEMPT_ID"] = artifact_attempt_id
         # aiohttp with trust_env=True (the Daytona SDK) reads $NETRC, else ~/.netrc,
         # on every request. With HOME on NFS and no such file, ~1000+ concurrent
         # sessions turn that one negative lookup into kernel lock contention: 89%

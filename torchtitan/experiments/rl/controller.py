@@ -427,6 +427,9 @@ class Controller(Configurable):
         training_heartbeat_interval_sec: float = 0
         """External lifecycle heartbeat interval; zero disables the heartbeat."""
 
+        isolate_rollout_artifacts: bool = False
+        """Give each controller lifetime a distinct rollout artifact namespace."""
+
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
 
@@ -741,11 +744,19 @@ class Controller(Configurable):
         # once `renderers` supports bring-your-own-tokenizer
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
         # Until then, reach into the renderer's tokenizer for the pad id (eos doubles as pad).
+        self.training_lineage = TrainingLineageRecorder(dump_dir=config.dump_folder)
+        self._rollout_attempt_id = ""
+        if config.isolate_rollout_artifacts:
+            self._rollout_attempt_id = (
+                time.strftime("%Y%m%d-%H%M%SZ", time.gmtime())
+                + "--"
+                + self.training_lineage.session_id
+            )
+            os.environ["TRL_ROLLOUT_ATTEMPT_ID"] = self._rollout_attempt_id
         self._rollouter: Rollouter = config.rollouter.build()
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
-        self.training_lineage = TrainingLineageRecorder(dump_dir=config.dump_folder)
         self._training_activity_phase = "starting"
         self.validation_trace_recorder: ValidationTraceRecorder = (
             config.async_loop.validation.trace.build(dump_dir=config.dump_folder)
@@ -1140,6 +1151,7 @@ class Controller(Configurable):
                             RolloutWorker,
                             config,
                             rollout_concurrency=worker_conc,
+                            artifact_attempt_id=self._rollout_attempt_id,
                         )
                     )
                 # Each worker builds its own generate-only router over the shared generators.
@@ -1178,6 +1190,7 @@ class Controller(Configurable):
                             RolloutWorker,
                             config,
                             rollout_concurrency=worker_conc,
+                            artifact_attempt_id=self._rollout_attempt_id,
                         )
                     )
                 await asyncio.gather(
