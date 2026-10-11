@@ -18,6 +18,7 @@ def _config(**overrides) -> SimpleNamespace:
     raise, so a test can exercise one check without building the whole config."""
     return SimpleNamespace(
         **{
+            "training_heartbeat_interval_sec": 0,
             "num_generators": 1,
             "num_eval_generators": 0,
             "num_eval_rollout_workers": 0,
@@ -27,6 +28,13 @@ def _config(**overrides) -> SimpleNamespace:
             **overrides,
         }
     )
+
+
+def test_negative_training_heartbeat_interval_is_rejected():
+    with pytest.raises(
+        ValueError, match="training_heartbeat_interval_sec must be nonnegative"
+    ):
+        Controller.Config.__post_init__(_config(training_heartbeat_interval_sec=-1))
 
 
 def test_torchstore_transport_recycle_is_rejected():

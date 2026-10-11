@@ -6,9 +6,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+import pytest
+
+from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.training_lineage import TrainingLineageRecorder
 
 
@@ -62,3 +67,41 @@ def test_recorder_atomically_marks_optimization_complete(tmp_path) -> None:
     assert marker["policy_version"] == 150
     assert marker["requested_training_steps"] == 150
     assert not list(recorder.root.glob(".optimization_complete.json.*.tmp"))
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_controller_heartbeat_closes_on_success_or_interruption(tmp_path, crash):
+    async def run():
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(training_heartbeat_interval_sec=0.01)
+        controller.training_lineage = TrainingLineageRecorder(dump_dir=str(tmp_path))
+        controller._training_activity_phase = "starting"
+        controller._trainer_policy_version = 3
+
+        async def training():
+            controller._training_activity_phase = "training"
+            await asyncio.sleep(0.04)
+            heartbeat = json.loads(
+                controller.training_lineage.training_activity_path.read_text()
+            )
+            assert heartbeat["phase"] == "training"
+            assert heartbeat["policy_version"] == 3
+            if crash:
+                raise RuntimeError("preempted")
+            controller._training_activity_phase = "complete"
+
+        controller._run = training
+        if crash:
+            with pytest.raises(RuntimeError, match="preempted"):
+                await controller.run()
+        else:
+            await controller.run()
+        heartbeat = json.loads(
+            controller.training_lineage.training_activity_path.read_text()
+        )
+        assert heartbeat["phase"] == ("interrupted" if crash else "complete")
+        assert not list(
+            controller.training_lineage.root.glob(".training_activity.json.*.tmp")
+        )
+
+    asyncio.run(run())

@@ -424,6 +424,9 @@ class Controller(Configurable):
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
+        training_heartbeat_interval_sec: float = 0
+        """External lifecycle heartbeat interval; zero disables the heartbeat."""
+
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
 
@@ -530,6 +533,8 @@ class Controller(Configurable):
         )
 
         def __post_init__(self):
+            if self.training_heartbeat_interval_sec < 0:
+                raise ValueError("training_heartbeat_interval_sec must be nonnegative")
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
@@ -741,6 +746,7 @@ class Controller(Configurable):
             dump_dir=config.dump_folder
         )
         self.training_lineage = TrainingLineageRecorder(dump_dir=config.dump_folder)
+        self._training_activity_phase = "starting"
         self.validation_trace_recorder: ValidationTraceRecorder = (
             config.async_loop.validation.trace.build(dump_dir=config.dump_folder)
         )
@@ -1560,7 +1566,36 @@ class Controller(Configurable):
             logger.exception("validation trace report failed at step %d", step)
             return None
 
+    async def _training_heartbeat(self) -> None:
+        while True:
+            await asyncio.to_thread(
+                self.training_lineage.record_training_activity,
+                phase=self._training_activity_phase,
+                policy_version=self._trainer_policy_version,
+            )
+            await asyncio.sleep(self.config.training_heartbeat_interval_sec)
+
     async def run(self) -> None:
+        if self.config.training_heartbeat_interval_sec == 0:
+            await self._run()
+            return
+        heartbeat = asyncio.create_task(self._training_heartbeat())
+        try:
+            await self._run()
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            await asyncio.to_thread(
+                self.training_lineage.record_training_activity,
+                phase=(
+                    "complete"
+                    if self._training_activity_phase == "complete"
+                    else "interrupted"
+                ),
+                policy_version=self._trainer_policy_version,
+            )
+
+    async def _run(self) -> None:
         """Start every async loop and run until training completes or a stage crashes.
 
         Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever; _trainer_loop is the
@@ -1594,6 +1629,7 @@ class Controller(Configurable):
             if num_training_steps == 0:
                 return
         sl.log_trace_instant("training_start")
+        self._training_activity_phase = "training"
 
         # Two policy version pointers, seeded from the resumed step: the trainer advances at the
         # optimizer step; the generator version advances when a weight pull completes.
@@ -1733,6 +1769,7 @@ class Controller(Configurable):
             policy_version=self._trainer_policy_version,
             requested_training_steps=num_training_steps,
         )
+        self._training_activity_phase = "complete"
 
         # Drain any background pass first: it holds the eval generators, and its
         # curve point would otherwise be lost when the controller exits.

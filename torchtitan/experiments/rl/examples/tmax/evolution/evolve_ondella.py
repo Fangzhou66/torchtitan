@@ -82,6 +82,7 @@ from finalize_interrupted_traces import finalize_interrupted  # noqa: E402
 import pack_to_dataset as pack  # noqa: E402
 from recorded_solution import solution_path  # noqa: E402
 import rewrite_workspace as rw_workspace  # noqa: E402
+from rewrite_admission import admission_is_open  # noqa: E402
 from torchtitan.experiments.rl.examples.tmax import layout, rollout_record  # noqa: E402
 from torchtitan.experiments.rl.examples.tmax.evolution_metrics import record_outcome  # noqa: E402
 
@@ -1644,6 +1645,8 @@ def run_round(
         "counts": {},
         "mix_version": None,
     }
+    if not admission_is_open(dry=dry):
+        return {**result, "reason": "training admission paused"}
     todo = select_work(
         root,
         ledger,
@@ -1686,11 +1689,15 @@ def run_round(
 
         def fill(batch: list[Signal]) -> None:
             """Submit up to the free slots, newest mix in hand."""
+            if not admission_is_open(dry=dry):
+                return
             batch = batch[: workers - len(futs)]
             if not batch:
                 return
             declared, pretests, protecteds = read_declared(root.mix.live)
             for s in batch:
+                if not admission_is_open(dry=dry):
+                    break
                 futs[
                     ex.submit(
                         handle,
@@ -1790,7 +1797,7 @@ def run_round(
             # deferred and superseded signals it reports are still pending on
             # the next call, and refilling would count each of them once per
             # refill. A dry round is a snapshot of one moment by design.
-            if refill and len(futs) < workers:
+            if refill and len(futs) < workers and admission_is_open():
                 fill_free_slots(busy={h["meta"]["task"] for h in finished})
             if not dry:
                 # Folded as soon as they are accepted, every rewrite that
@@ -1814,7 +1821,7 @@ def run_round(
                     _close(root, h, dry=dry)
             # With nothing left running the loop would end here, before the
             # tasks just closed are free again; their signals start now.
-            if refill and finished and not futs:
+            if refill and finished and not futs and admission_is_open():
                 fill_free_slots(busy=set())
             finished.clear()
             if (
@@ -1845,7 +1852,7 @@ def _wait_for_signals(root: layout.Root, max_wait: int, tick: float = 5.0) -> No
     ledger = load_ledger(root)
     deadline = time.time() + max_wait
     while time.time() < deadline:
-        if _pending(root, ledger):
+        if admission_is_open() and _pending(root, ledger):
             return
         time.sleep(tick)
 
