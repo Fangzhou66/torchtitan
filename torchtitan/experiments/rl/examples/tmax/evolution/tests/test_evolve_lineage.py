@@ -943,16 +943,17 @@ def test_an_unsolved_task_is_simplified_with_the_switch_off(
     assert seen[0]["job"] == "easier"
 
 
-def test_an_unsolved_task_is_not_hardened(tmp_path, monkeypatch) -> None:
+def test_an_unsolved_task_is_hardened(tmp_path, monkeypatch) -> None:
+    """All-pass on a task with no reference solution is still all-pass: its
+    harder rewrite writes the solution first, so the signal is handled."""
     root = _root(tmp_path, monkeypatch)
     (root.data / "sources/tw-extract/tasks/tw_a/solution/solve.sh").unlink()
     _signal(root, direction="harder")
+    seen = _stub(monkeypatch)
 
-    assert od.run_round(root, workers=1)["handled"] == 1
-    (rewrite,) = root.evolution.task("tw_a").path.glob("rewrites/*/rewrite.json")
-    record = json.loads(rewrite.read_text())
-    assert record["status"] == "failed" and record["stage"] == "unsolved"
-    assert not root.evolution.task("tw_a").rev(1).exists()
+    r = od.run_round(root, workers=1)
+    assert r["handled"] == 1
+    assert seen[0]["job"] == "harder"
 
 
 def test_one_signal_per_task_the_newest_at_the_current_rev(

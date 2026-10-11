@@ -91,10 +91,12 @@ pool has since moved past, and the revision check would supersede most of them
 anyway.
 
 The exception is a task with no reference solution, which some corpora ship
-because no model solved it. Its easier signal runs whatever the switch says:
-the easier rewrite is the one that writes its `solution/solve.sh`, told so in
-its prompt, and the oracle gate then holds that solution to the task. Such a
-task never takes a harder rewrite; that one fails with stage `unsolved`.
+because no model solved it. Its easier signal runs whatever the switch says.
+Either direction's rewrite writes its `solution/solve.sh` first, told so in its
+prompt, and the oracle gate then holds that solution to the task. A harder
+rewrite works from the attempts that passed, which are what proves the task as
+it stands can be solved; with no seed solution to measure from, the size rule
+bounds only the verifier's assertions, not the solution's length.
 
 ### 3. It gets a working directory
 

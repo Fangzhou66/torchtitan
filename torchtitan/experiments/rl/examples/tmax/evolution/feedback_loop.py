@@ -388,16 +388,20 @@ def revalidate(
         new_dark_literals(work, task, baseline or ()) if orig is not None else []
     )
     # One rung above the seed, by the size rule task_size.py documents;
-    # the agent's own check applies it first, this is the backstop.
+    # the agent's own check applies it first, this is the backstop. A seed
+    # with no reference solution has no length to count a rung from.
     step = (
         ts.violations(
-            ts.size_of(
-                orig["solve_sh"],
-                orig["test_state_py"],
-                _kind(orig),
-                solution_rel=ev.file_map(orig)["solve_sh"],
-                **_patches(orig, orig.get("_seed_dir") or task.get("_seed_dir")),
-            ),
+            {
+                **ts.size_of(
+                    orig["solve_sh"],
+                    orig["test_state_py"],
+                    _kind(orig),
+                    solution_rel=ev.file_map(orig)["solve_sh"],
+                    **_patches(orig, orig.get("_seed_dir") or task.get("_seed_dir")),
+                ),
+                **({"solution_lines": None} if orig.get("_unsolved") else {}),
+            },
             ts.size_of(
                 task["solve_sh"],
                 task["test_state_py"],
@@ -755,13 +759,11 @@ def process_one(
             deadline.final_validation_reserve_sec
         )
         task = ev.load(work)
-        if task.get("_unsolved") and job != "easier":
-            return _done(
-                rec,
-                "failed",
-                stage="unsolved",
-                reason="no reference solution; only an easier rewrite writes one",
-            )
+        # A task with no reference solution runs in either direction: the
+        # rewrite writes its solution/solve.sh first (told so in its prompt)
+        # and the oracle gate holds the result to it.
+        if task.get("_unsolved"):
+            rec["unsolved"] = True
         task["_task_id"] = tid
         task["_seed_dir"] = str(seed_dir)
         task["_solved"], task["_attempts"] = solved, graded

@@ -242,6 +242,47 @@ def test_only_all_pass_after_simplify_uses_restoration_guidance(
     assert bool(result.get("_calibration")) == calibration
 
 
+def test_an_unsolved_harder_rewrite_writes_its_solution_first(
+    tmp_path, monkeypatch
+):
+    import agent_sandbox as sandbox
+
+    rw = _rewrite(tmp_path, monkeypatch)
+    (rw.package / "solution/solve.sh").unlink()
+
+    def run_codex(run, pkg, prompt):
+        assert ec._UNSOLVED_HARDER_NOTE in prompt
+        assert ec._UNSOLVED_NOTE not in prompt
+        assert json.loads((pkg / "run/seed_size.json").read_text())[
+            "solution_lines"
+        ] is None
+        # No seed length to count a rung from: a full solution passes the
+        # agent's own size check.
+        (pkg / "solution/solve.sh").write_text(
+            "#!/bin/sh\n" + "echo step\n" * (ec.ts.MAX_ADDED + 10)
+        )
+        assert sandbox._step_audit(pkg) == []
+        return subprocess.CompletedProcess([], 0, stdout="")
+
+    monkeypatch.setattr(ec, "_require_codex", lambda: None)
+    monkeypatch.setattr(ec, "VERIFIER_AUTHOR", "same")
+    monkeypatch.setattr(
+        ec,
+        "session",
+        lambda *a, **k: nullcontext(
+            SimpleNamespace(dir=SimpleNamespace(path=tmp_path / "session"))
+        ),
+    )
+    monkeypatch.setattr(ec, "_run_codex", run_codex)
+    monkeypatch.setattr(ec, "_sandbox_down", lambda pkg: None)
+    monkeypatch.setattr(ec, "_check_verdict", lambda pkg: None)
+    monkeypatch.setattr(ec, "_require_checked", lambda pkg, result=None: None)
+    monkeypatch.setattr(ec, "_agent_checked", lambda pkg: True)
+    task = {**TASK, "solve_sh": "", "_unsolved": True, "_solved": 8, "_attempts": 8}
+    result = ec.evolve_agentic(rw, task, "harder")
+    assert result["solve_sh"].count("echo step") == ec.ts.MAX_ADDED + 10
+
+
 def test_evolve_resumes_an_author_with_no_check_record_once(
     tmp_path, monkeypatch
 ) -> None:

@@ -156,15 +156,17 @@ def _read(p: Path) -> str:
 
 def violations(seed: dict, new: dict, *, require_growth: bool = True) -> list[str]:
     """Why `new` is not one rung above `seed`, in the words the agent reads;
-    empty when it is."""
+    empty when it is. A seed with no reference solution (solution_lines None)
+    has no length to count a rung from, so only its assertions bound the
+    rewrite."""
     out = []
     s, n = seed["solution_lines"], new["solution_lines"]
-    if require_growth and n < s + MIN_ADDED:
+    if s is not None and require_growth and n < s + MIN_ADDED:
         out.append(
             f"the reference solution has {n} lines against the seed's {s}; a harder task "
             f"in operator mode requires at least {MIN_ADDED} more"
         )
-    if n > s + MAX_ADDED:
+    if s is not None and n > s + MAX_ADDED:
         out.append(
             f"the reference solution has {n} lines against the seed's {s}; one rung is at "
             f"most {MAX_ADDED} more (in this corpus the 0/16 share doubles once a task "

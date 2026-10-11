@@ -42,8 +42,8 @@ def load(task_dir: str | Path) -> dict:
     try:
         solution = solution_path(directory)
     except FileNotFoundError:
-        # A task nobody has solved yet: the easier rewrite writes its
-        # solve.sh (_unsolved), and no other job may run on it.
+        # A task with no reference solution yet (_unsolved): whichever
+        # rewrite runs on it writes its solve.sh first.
         solution = None
     paths = {**FILES, "test_state_py": verifier, "solve_sh": solution or SHELL_PATH}
     task = {
