@@ -36,10 +36,11 @@ A round:
      feedback_loop.process_one there, record the verdict in rewrite.json.
   4. fold, as soon as a rewrite is accepted: strip the harness files, rename
      package/ to r<N+1>/, rebuild the row (the replaced row's hook and size
-     carried across) and publish a new mix version. Then the lineage line,
-     then the ledger line, last. A round of many concurrent rewrites runs for
-     hours; folding each one on acceptance means a loop stopped mid-round
-     loses only the rewrites still in flight.
+     carried across) and publish a new mix version -- one per batch of
+     rewrites that finished together, after their freed slots are refilled.
+     Then the lineage line, then the ledger line, last. A round of many
+     concurrent rewrites runs for hours; folding on acceptance means a loop
+     stopped mid-round loses only the rewrites still in flight.
   5. refresh status.json during the round and rebuild it when the round ends;
      commit the records (never packages, sessions or traces) to the audit repo.
 
@@ -1182,13 +1183,18 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
         if "terminal_domain" in old_md:
             row["metadata"].setdefault("terminal_domain", old_md["terminal_domain"])
         row["metadata"]["rev"] = n + 1
-        os.rename(rewrite.package, target)
         rows[tid] = json.dumps(row, ensure_ascii=False)
         folded.append(
             (h, n + 1, {rk: row["metadata"].get(rk) for rk in ROW_KEYS.values()})
         )
     if not folded:
         return None
+    # Renamed only once every row is built, so a loop killed while a batch is
+    # being packed leaves no r<N+1> on disk without a mix version naming it.
+    for h, to_rev, _res in folded:
+        os.rename(
+            h["rewrite"].package, root.evolution.task(h["meta"]["task"]).rev(to_rev)
+        )
     version, path = mix.publish([rows[iid] for iid in order])
     for h, to_rev, res in folded:
         meta, rewrite = h["meta"], h["rewrite"]
@@ -1630,6 +1636,8 @@ def run_round(
         # Signals whose handle() raised before a rewrite existed: they close
         # no ledger line, so a refill would otherwise pick them again forever.
         stuck: set[str] = set()
+        # Rewrites handled in the current wait, folded and closed together.
+        finished: list[dict] = []
 
         def fill(batch: list[Signal]) -> None:
             """Submit up to the free slots, newest mix in hand."""
@@ -1649,6 +1657,23 @@ def run_round(
                         protecteds=protecteds,
                     )
                 ] = s
+
+        def fill_free_slots(*, busy: set[str]) -> None:
+            """Take pending signals into the free slots. The ledger is re-read
+            because _close may have just added to it; ``busy`` are tasks whose
+            rewrite has ended but is not closed yet."""
+            more = select_work(
+                root,
+                load_ledger(root),
+                result,
+                only=only,
+                limit=limit,
+                dry=dry,
+                signal=None,
+                running=frozenset(s.task for s in futs.values()) | busy,
+                stuck=frozenset(stuck),
+            )
+            fill(more or [])
 
         fill(todo)
         while futs:
@@ -1705,45 +1730,48 @@ def run_round(
                     _rewrite_ref(root, h["rewrite"]),
                 )
                 handled.append(h)
-                if h["status"] == "accepted" and not dry:
-                    # Folded the moment it is accepted, one mix version each,
-                    # rather than once for the whole round. A round of 64
-                    # concurrent rewrites runs for hours, and a loop stopped
-                    # inside it (a restart for a config change, a killed unit)
-                    # used to leave every accepted package sitting as `running`
-                    # with no revision behind it; on 2026-09-14 that was 7
-                    # accepted rewrites recovered by hand and 87 more at risk.
-                    # fold() settles the rewrite one way or the other (accepted
-                    # with a revision, or rejected/failed at the fold); closing
-                    # it afterwards keeps the ledger line the last thing written.
-                    version = fold(root, [h])
-                    if version is not None:
-                        result["mix_version"] = version
-                if h["status"] != "accepted" or not dry:
-                    _close(root, h, dry=dry)
+                finished.append(h)
             # A free slot takes the next pending signal now, including one
-            # written while all existing rewrites are still running. The ledger
-            # is re-read because _close above may have just added to it. A task
-            # whose rewrite just ended is free again: its pending signals are
-            # judged against its new revision.
+            # written while all existing rewrites are still running, and
+            # before this batch is folded: folding one rewrite costs tens of
+            # seconds on GPFS, and a slot left empty until a batch of 60 was
+            # folded sat idle for half an hour. The tasks just finished count
+            # as running until they are closed below -- their signals are
+            # still pending in the ledger, and a second rewrite would race the
+            # fold for r<N+1>. Their remaining signals are judged against the
+            # new revision on a later refill.
             #
             # Not for a dry round, which closes no ledger line: the junk,
             # deferred and superseded signals it reports are still pending on
             # the next call, and refilling would count each of them once per
             # refill. A dry round is a snapshot of one moment by design.
             if refill and len(futs) < workers:
-                more = select_work(
-                    root,
-                    load_ledger(root),
-                    result,
-                    only=only,
-                    limit=limit,
-                    dry=dry,
-                    signal=None,
-                    running=frozenset(s.task for s in futs.values()),
-                    stuck=frozenset(stuck),
-                )
-                fill(more or [])
+                fill_free_slots(busy={h["meta"]["task"] for h in finished})
+            if not dry:
+                # Folded as soon as they are accepted, every rewrite that
+                # finished in this wait into one mix version, rather than once
+                # for the whole round. A round of 64 concurrent rewrites runs
+                # for hours, and a loop stopped inside it (a restart for a
+                # config change, a killed unit) used to leave every accepted
+                # package sitting as `running` with no revision behind it; on
+                # 2026-09-14 that was 7 accepted rewrites recovered by hand and
+                # 87 more at risk. One version per batch rather than per
+                # rewrite: each version rewrites the whole mix, so N rewrites
+                # finishing together cost one write, not N in a queue.
+                # fold() settles each rewrite one way or the other (accepted
+                # with a revision, or rejected/failed at the fold); closing
+                # them afterwards keeps the ledger line the last thing written.
+                version = fold(root, [h for h in finished if h["status"] == "accepted"])
+                if version is not None:
+                    result["mix_version"] = version
+            for h in finished:
+                if h["status"] != "accepted" or not dry:
+                    _close(root, h, dry=dry)
+            # With nothing left running the loop would end here, before the
+            # tasks just closed are free again; their signals start now.
+            if refill and finished and not futs:
+                fill_free_slots(busy=set())
+            finished.clear()
             if (
                 not dry
                 and time.monotonic() - last_status_refresh >= STATUS_REFRESH_SEC

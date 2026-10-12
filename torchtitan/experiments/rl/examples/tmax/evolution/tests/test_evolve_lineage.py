@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 
@@ -1347,11 +1347,8 @@ def test_fold_carries_the_rows_protected_lists_when_the_package_ships_none(
     assert tm["protected_paths"] == PATHS and tm["protected_cmds"] == CMDS
 
 
-def test_each_accepted_rewrite_is_folded_on_its_own(tmp_path, monkeypatch):
-    """Two accepted rewrites in one round become two mix versions, each
-    published the moment its rewrite was accepted: a loop stopped after the
-    first has already folded it."""
-    root = _root(tmp_path, monkeypatch)
+def _two_tasks(root: layout.Root) -> int:
+    """Add tw_b beside tw_a, signal both; returns the mix version before."""
     shutil.copytree(
         root.data / "sources/tw-extract/tasks/tw_a",
         root.data / "sources/tw-extract/tasks/tw_b",
@@ -1364,13 +1361,10 @@ def test_each_accepted_rewrite_is_folded_on_its_own(tmp_path, monkeypatch):
     before = root.mix.live_version()[0]
     _signal(root, task="tw_a")
     _signal(root, task="tw_b", group=8)
-    seen = _stub(monkeypatch)
-    r = od.run_round(root, workers=2)
-    assert (r["handled"], r["accepted"]) == (2, 2), r
-    assert len(seen) == 2
-    versions = [v for v, _ in root.mix.versions() if v > before]
-    assert versions == [before + 1, before + 2], versions
-    assert r["mix_version"] == before + 2
+    return before
+
+
+def _both_folded(root: layout.Root) -> None:
     for tid in ("tw_a", "tw_b"):
         assert root.evolution.task(tid).rev(1).exists()
         fold = [
@@ -1384,6 +1378,80 @@ def test_each_accepted_rewrite_is_folded_on_its_own(tmp_path, monkeypatch):
         for l in root.mix.live.read_text().splitlines()
     }
     assert live["tw_a"]["metadata"]["rev"] == 1 and live["tw_b"]["metadata"]["rev"] == 1
+
+
+def test_a_rewrite_finishing_alone_is_folded_on_its_own(tmp_path, monkeypatch):
+    """A rewrite accepted while the other is still running is published
+    before the other finishes: a loop stopped in between has folded it."""
+    root = _root(tmp_path, monkeypatch)
+    before = _two_tasks(root)
+    seen = _stub(monkeypatch)
+    fake = od.fb.process_one
+
+    def after_a(rewrite, signal, **kw):
+        if json.loads(rewrite.meta.read_text())["task"] == "tw_b":
+            deadline = time.monotonic() + 10
+            while root.mix.live_version()[0] == before:
+                assert time.monotonic() < deadline, "tw_a was not folded on its own"
+                time.sleep(0.01)
+        return fake(rewrite, signal, **kw)
+
+    monkeypatch.setattr(od.fb, "process_one", after_a)
+    r = od.run_round(root, workers=2)
+    assert (r["handled"], r["accepted"]) == (2, 2), r
+    assert len(seen) == 2
+    versions = [v for v, _ in root.mix.versions() if v > before]
+    assert versions == [before + 1, before + 2], versions
+    assert r["mix_version"] == before + 2
+    _both_folded(root)
+
+
+def test_rewrites_finishing_together_are_one_mix_version(tmp_path, monkeypatch):
+    """Rewrites that finish in the same wait are folded into one version:
+    each version rewrites the whole mix, so a batch costs one write."""
+    root = _root(tmp_path, monkeypatch)
+    before = _two_tasks(root)
+    _stub(monkeypatch)
+    real_wait = od.wait
+    monkeypatch.setattr(
+        od,
+        "wait",
+        lambda fs, timeout=None, return_when=None: real_wait(
+            fs, return_when=ALL_COMPLETED
+        ),
+    )
+    r = od.run_round(root, workers=2)
+    assert (r["handled"], r["accepted"]) == (2, 2), r
+    versions = [v for v, _ in root.mix.versions() if v > before]
+    assert versions == [before + 1], versions
+    assert r["mix_version"] == before + 1
+    _both_folded(root)
+
+
+def test_a_free_slot_is_refilled_before_the_fold(tmp_path, monkeypatch):
+    """The slot a finished rewrite frees takes the next signal before that
+    rewrite is folded, and the finished task's own signal, still pending in
+    the ledger until the fold closes it, is not handed out a second time."""
+    root = _root(tmp_path, monkeypatch)
+    _two_tasks(root)
+    seen = _stub(monkeypatch)
+    real_fold = od.fold
+    started_at_fold: list[list[str]] = []
+
+    def watching_fold(root_, accepted):
+        deadline = time.monotonic() + 10
+        while len(seen) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        started_at_fold.append([json.loads(e["rewrite"].meta.read_text())["task"] for e in seen])
+        return real_fold(root_, accepted)
+
+    monkeypatch.setattr(od, "fold", watching_fold)
+    r = od.run_round(root, workers=1)
+    assert (r["handled"], r["accepted"]) == (2, 2), r
+    first = started_at_fold[0]
+    assert len(first) == 2 and set(first) == {"tw_a", "tw_b"}, started_at_fold
+    assert sorted(json.loads(e["rewrite"].meta.read_text())["task"] for e in seen) == ["tw_a", "tw_b"]
+    _both_folded(root)
 
 
 def test_fold_carries_the_rows_domain_annotation(tmp_path, monkeypatch):
