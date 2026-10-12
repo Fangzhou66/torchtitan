@@ -24,8 +24,10 @@ Historical progress under another policy does not estimate the current
 student's success. Work absent from a trace is unknown; use the latest
 measured behavior rather than an obstacle newer traces already solve.
 
-When the latest variant is all-solved, partially undo its help within the
-original requirements. Prefer a strict subset of the help. Compare decisions
+When the latest variant is all-solved, undo its help within the original
+requirements, sized by the attempts: what none of them uses or what they
+reproduce unaided is withdrawn whole; what they visibly rely on is reduced to
+a strict subset. Compare decisions
 automated, not code size or command count: splitting a helper into extra calls
 does not restore a decision if its checks still force the correct outcome.
 Identify a decision the student will now make and a plausible incorrect choice
@@ -95,6 +97,23 @@ If the work is already correct but the agent fails to submit, do not remove
 unrelated task requirements. With insufficient evidence, write GIVE UP with
 the reason and keep the task unchanged.
 
+The retained skill includes the task's core decision: the choice that makes
+the original task what it is, judged from the original instruction
+(traces/history/since-original.diff separates it from help added since).
+Keeping only routine work around that decision while the variant makes the
+decision for the student does not simplify this task; it replaces it, and
+every later hardening has to win the decision back one rewrite at a time.
+Tell apart attempts that fail at the core decision from attempts that fail on
+mechanics around it (writing or quoting a file through the terminal, a tool's
+invocation, an exhausted context); help with mechanics leaves the decision to
+the student. Judge help by the decisions it makes for the student, not by its
+size: a short working instance of the very construction the task asks for, or
+a skeleton that fixes its layout, makes the core decision and is stronger than
+a sentence naming a principle. Prefer, in this order: feedback at the mistaken
+decision, a principle or direction for it, a prerequisite that leaves it open;
+supply a working instance of the core construction only when traces show the
+student has no foothold any weaker help could reach, and say so in change.
+
 Choose the change from the attempts. If traces/history shows an earlier
 rewrite that made this task harder, what it changed is the first candidate:
 restore part of what it removed or added, within the task's requirements.
@@ -142,7 +161,11 @@ This is distinct from a check whose logic is wrong, which still goes
 to repair as described below.
 
 In prediction, name the observed failing action or decision and explain how
-the proposed change enables a different next action. State an observable
+the proposed change enables a different next action. Give the solved count
+you expect from the next group of the same size as a number ("3 of 8"); a range
+spanning everything from none to all predicts nothing. traces/history shows
+earlier predictions beside what was measured next; where they were
+systematically off, correct the size of this change for it. State an observable
 result that would disprove this explanation in a new rollout. A shorter task,
 fewer assertions, or a reminder to be careful is not a causal explanation.
 Name which attempts the change could help and what unresolved work remains

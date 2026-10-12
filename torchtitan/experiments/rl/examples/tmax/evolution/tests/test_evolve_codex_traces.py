@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import evolve_codex as ec
+import simplify_operators as so
 import rewrite_deadline as rd
 from torchtitan.experiments.rl.examples.tmax import layout, rollout_record
 
@@ -191,12 +192,31 @@ def test_author_session_is_capped_before_final_validation_reserve(
 
 def test_ordinary_hardening_may_withdraw_help_an_earlier_simplification_added():
     """Only the original task's hints are protected; help a simplification added
-    may be partly withdrawn, and a failure without it entirely is not evidence
-    against a partial withdrawal."""
+    may be withdrawn, wholly where the attempts no longer use it, and the
+    hardening states a numeric prediction."""
     g = ec._STUDENT_HARDER_GUIDANCE
     assert "not in removing the original task's hints" in g
     assert "Help that an earlier simplification of this task added is not part of the" in g
-    assert "Prefer a partial withdrawal" in g
+    assert "Size the withdrawal by what the attempts show" in g
+    assert "withdraw all of it in this one" in g
+    assert "Prefer a partial withdrawal" not in g
+    assert '("5 of 8")' in g
+
+
+def test_easier_keeps_the_core_decision_and_predicts_a_number():
+    """A simplification may not make the task's core decision for the student,
+    ranks help by the decisions it makes, and predicts a solved count."""
+    p = so.prompt("vague")
+    assert "The retained skill includes the task's core decision" in p
+    assert "stronger than\na sentence naming a principle" in p
+    assert '("3 of 8")' in p
+    assert "Prefer a strict subset of the help." not in so.CALIBRATION_GUIDANCE
+
+
+def test_traces_spec_points_at_the_revision_contrast(tmp_path):
+    (tmp_path / "attempt-01.jsonl").write_text("{}\n")
+    spec = ec._traces_spec(tmp_path)
+    assert "traces/revision/" in spec and "trajectory.jsonl" in spec
 
 
 @pytest.mark.parametrize("has_previous,solved", [(True, 8), (False, 8), (True, 4)])

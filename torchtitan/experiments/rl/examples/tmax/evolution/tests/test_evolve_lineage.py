@@ -20,6 +20,7 @@ import time
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -1713,3 +1714,44 @@ def test_a_task_without_earlier_rewrites_gets_no_history(tmp_path):
     now.traces.mkdir(parents=True)
     assert od._write_history(root, task, now) == 0
     assert not (now.traces / "history").exists()
+
+
+def test_a_rewrite_sees_its_revisions_mixed_groups(tmp_path):
+    """traces/revision: every scored group on the signal's revision in this run,
+    and the attempts of its latest mixed groups; other revisions, infra-failed
+    attempts and the signal group itself are left out of mixed/."""
+    run_dir = tmp_path / "run"
+    task = "tw_a"
+    recs = run_dir / "rollouts" / task
+
+    def rec(group, idx, rev, reward, **extra):
+        recs.mkdir(parents=True, exist_ok=True)
+        head = {"task": task, "rev": rev, "group": group, "rollout": idx,
+                "reward": reward, "finish_reason": "submit", **extra}
+        (recs / f"g{group}-r{idx}.jsonl").write_text(json.dumps(head) + "\n{\"turn\": 1}\n")
+
+    for g in range(5):  # rev 3: g0 all fail, g1-g4 mixed
+        rec(g, 0, 3, 1.0 if g else 0.0)
+        rec(g, 1, 3, 0.0)
+    rec(5, 0, 2, 1.0); rec(5, 1, 2, 0.0)  # another revision
+    rec(6, 0, 3, 1.0); rec(6, 1, 3, 1.0)  # the signal group, all solved
+    rec(6, 2, 3, 0.0, infra_failed=True)  # not an attempt
+    out = tmp_path / "traces" / "revision"
+    ws = SimpleNamespace(copy_input=lambda src, dst: (
+        dst.parent.mkdir(parents=True, exist_ok=True), shutil.copy2(src, dst)))
+
+    n = od._stage_revision(run_dir, {"task": task, "rev": 3, "group": 6}, out, ws)
+
+    traj = [json.loads(x) for x in (out / "trajectory.jsonl").read_text().splitlines()]
+    assert n == 6 and [t["group"] for t in traj] == [0, 1, 2, 3, 4, 6]
+    assert traj[0]["solved"] == 0 and traj[-1] == {
+        "group": 6, "solved": 2, "total": 2, "finish_reasons": {"submit": 2}}
+    staged = sorted(p.name for p in (out / "mixed").iterdir())
+    assert staged == [f"g{g}-r{i}.jsonl" for g in (2, 3, 4) for i in (0, 1)]
+
+
+def test_no_revision_dir_without_records(tmp_path):
+    ws = SimpleNamespace(copy_input=lambda s, d: None)
+    out = tmp_path / "revision"
+    assert od._stage_revision(tmp_path, {"task": "t", "rev": 0, "group": 1}, out, ws) == 0
+    assert not out.exists()

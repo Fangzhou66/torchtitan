@@ -1241,7 +1241,15 @@ If `traces/previous-simplify.json` exists, read the prior intervention and its
 measured outcome before editing. An all-failed variant needs a stronger or
 different intervention at the remaining obstacle; an all-solved variant needs
 part of the removed difficulty restored, not an unrelated extra deliverable.
-The current attempts show whether the prior prediction held. jq is on PATH;
+The current attempts show whether the prior prediction held.
+These attempts are one group, all solved or all failed, so they cannot show
+which decision separates a pass from a fail. When `traces/revision/` exists it
+holds that contrast for the revision being rewritten: `trajectory.jsonl`, one
+line per group the student finished on it in this run, oldest first (solved,
+total, finish reasons), and `mixed/gG-rK.jsonl`, the attempts of its latest
+mixed groups in the same format. Compare a passing and a failing attempt from
+one mixed group to find the decision that differs, and read the trajectory
+for how fast the student moved on this revision. jq is on PATH;
 these are enough:
 
   head -qn1 traces/*.jsonl | jq -c '{rollout, reward, turns, finish_reason}'
@@ -1562,15 +1570,27 @@ adding an implementation restriction.
 
 Help that an earlier simplification of this task added is not part of the
 original task; `traces/history` shows each easier rewrite and its diff. When the
-student now succeeds with such help, withdrawing part of it is a legitimate
-hardening. Prefer a partial withdrawal over removing all of it at once: reduce a
-shipped file to its structure, replace it with a short description, or drop one
-part of it. A failure measured when that help was absent entirely does not show
-that a partial withdrawal would fail. Existing method requirements remain part of the original task;
+student now succeeds with such help, withdrawing it is a legitimate
+hardening. Size the withdrawal by what the attempts show, not by a preference
+for small steps: every rewrite is measured only after the student has trained
+on it for many epochs, so a step the traces already show to be too small costs
+those epochs and buys nothing. Help the attempts do not use -- never opened,
+never cited in their analysis, or reproduced from their own knowledge before
+they read it -- is not what keeps them solving: withdraw all of it in this one
+rewrite, which counts as one change. Withdraw only part of the help the
+attempts visibly depend on: reduce a shipped file to its structure, replace it
+with a short description, or drop one part of it. A failure measured when that
+help was absent entirely, under an earlier policy, does not show that a
+withdrawal would fail now. Existing method requirements remain part of the original task;
 repair missing checks for validity, but do not count stricter enforcement of
 an unchanged requirement as the hardening mechanism.
 Aim for a modest reduction in this student's solve rate toward mixed success,
-not universal failure. Describe this as a hypothesis for student re-testing;
+not universal failure. In `run/hardening.md`, write the solved count you
+expect from the next group of the same size as a number ("5 of 8"); a range
+spanning everything from none to all predicts nothing. `traces/history` shows
+earlier predictions beside what was measured next; where they were
+systematically off -- withdrawals predicted to give mixed results that came
+back all-solved -- size this change for it. Describe this as a hypothesis for student re-testing;
 passing the reference solution only establishes validity. If the traces do not
 support a useful change within the size limits, write
 `GIVE UP: no-supported-hardening — <why>` and stop.
@@ -1582,7 +1602,8 @@ Read `traces/previous-simplify.json` and the current attempts. When the record
 includes a parent path, compare that original task's files with the current
 package to identify the exact help or restriction that changed. Keep the
 reference copy and lineage record unchanged; both are checked after the session. Move toward
-mixed success by partially undoing the previous simplification. Keep
+mixed success by undoing the previous simplification as far as the attempts
+show they no longer need it. Keep
 the change within the earlier task's requirements; do not introduce another
 obligation or a new difficulty dimension.
 
