@@ -342,7 +342,7 @@ def _write_history(
             entry["diff"] = f"{name}.diff"
         notes = [
             f"## {rel}\n\n{(earlier.package / rel).read_text(errors='replace')}\n"
-            for rel in ("run/hardening.md", "run/failure.txt")
+            for rel in ("run/hardening.md", "run/simplify.json", "run/failure.txt")
             if (earlier.package / rel).is_file()
         ]
         if notes:
@@ -358,6 +358,50 @@ def _write_history(
         if since:
             summary += since
         (out / "summary.md").write_text(summary)
+    return len(lines)
+
+
+REVISION_MIXED_GROUPS = 3
+
+
+def _stage_revision(run_dir: Path, signal: dict, out: Path, workspace) -> int:
+    """The revision's other groups in this run, beside the signal's attempts.
+
+    A signal group is all solved or all failed, so on its own it cannot show
+    which decision separates a pass from a fail. trajectory.jsonl is every
+    scored group the student finished on this revision in the run, oldest
+    first; mixed/ holds the attempts of the latest REVISION_MIXED_GROUPS mixed
+    groups. Returns the number of groups in the trajectory.
+    """
+    task, rev = str(signal["task"]), signal.get("rev")
+    groups: dict[int, list[tuple[int, dict, Path]]] = {}
+    for path in sorted((run_dir / "rollouts" / layout.safe(task)).glob("g*-r*.jsonl")):
+        try:
+            with path.open() as stream:
+                head = json.loads(stream.readline())
+        except (OSError, ValueError):
+            continue
+        if head.get("rev") != rev or head.get("infra_failed"):
+            continue
+        groups.setdefault(int(head["group"]), []).append((int(head["rollout"]), head, path))
+    if not groups:
+        return 0
+    lines, mixed = [], []
+    for group in sorted(groups):
+        records = sorted(groups[group], key=lambda r: r[0])
+        solved = sum(1 for _, h, _ in records if (h.get("reward") or 0) >= 1.0)
+        reasons: dict[str, int] = {}
+        for _, h, _ in records:
+            reasons[str(h.get("finish_reason"))] = reasons.get(str(h.get("finish_reason")), 0) + 1
+        lines.append({"group": group, "solved": solved, "total": len(records),
+                      "finish_reasons": reasons})
+        if 0 < solved < len(records) and group != signal.get("group"):
+            mixed.append((group, records))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "trajectory.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+    for group, records in mixed[-REVISION_MIXED_GROUPS:]:
+        for idx, _, path in records:
+            workspace.copy_input(path, out / "mixed" / f"g{group}-r{idx}.jsonl")
     return len(lines)
 
 
@@ -869,6 +913,7 @@ def handle(
             workspace.copy_input(
                 run_dir / rel, rewrite.traces / f"attempt-{i:02d}.jsonl"
             )
+        _stage_revision(run_dir, d, rewrite.traces / "revision", workspace)
         n_history = _write_history(
             root, task, rewrite, strict_storage=workspace.is_local, current=d
         )
