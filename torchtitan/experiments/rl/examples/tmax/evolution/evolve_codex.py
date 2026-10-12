@@ -1603,12 +1603,20 @@ includes a parent path, compare that original task's files with the current
 package to identify the exact help or restriction that changed. Keep the
 reference copy and lineage record unchanged; both are checked after the session. Move toward
 mixed success by undoing the previous simplification as far as the attempts
-show they no longer need it. Keep
+show they no longer need it. That simplification is the first candidate, not
+the limit: help that earlier simplifications added (`traces/history/since-original.diff`)
+and that these attempts no longer use -- never opened, never cited, or
+reproduced from their own knowledge before they read it -- is withdrawn in
+this same rewrite, which counts as one change. Every rewrite is measured only
+after many epochs of training on it, so a withdrawal the traces already show
+to be too small costs those epochs and buys nothing. Keep
 the change within the earlier task's requirements; do not introduce another
 obligation or a new difficulty dimension.
 
 Before editing, write `run/hardening.md` with the prior intervention, the
-portion being restored, the supporting attempts, and the predicted effect.
+portion being restored, the supporting attempts, and the predicted effect as
+the solved count you expect from the next group of the same size ("5 of 8");
+a range spanning everything from none to all predicts nothing.
 If the removed condition is indivisible, restore it with limited guidance or
 feedback at the recorded hint level. Keep the correctness checks for the
 retained goal. A change to guidance alone may leave the verifier unchanged.
