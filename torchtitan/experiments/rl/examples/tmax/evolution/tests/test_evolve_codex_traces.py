@@ -203,6 +203,15 @@ def test_ordinary_hardening_may_withdraw_help_an_earlier_simplification_added():
     assert '("5 of 8")' in g
 
 
+def test_calibration_may_withdraw_unused_older_help_and_predicts_a_number():
+    """After a simplification, hardening runs as calibration; it is not limited
+    to the latest simplification when the attempts no longer use earlier help."""
+    g = ec._CALIBRATION_GUIDANCE
+    assert "is the first candidate, not\nthe limit" in g
+    assert "since-original.diff" in g
+    assert '("5 of 8")' in g
+
+
 def test_easier_keeps_the_core_decision_and_predicts_a_number():
     """A simplification may not make the task's core decision for the student,
     ranks help by the decisions it makes, and predicts a solved count."""
