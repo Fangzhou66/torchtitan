@@ -31,6 +31,7 @@ endpoint synth_client uses, and the key injected via env.
 from __future__ import annotations
 
 import contextlib
+import difflib
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -2377,6 +2378,34 @@ def _independent_verifier(
             return
 
 
+def _instruction_change_note(before: Path, after: Path) -> str:
+    """The public instruction's diff against the previous revision, for the
+    blind verifier author. Without it the author sees only the new text and the
+    inherited checks, so a requirement the rewrite narrowed in one sentence while
+    another sentence still reads the old way keeps its old checks, and the
+    revision then rejects work its instruction permits."""
+    try:
+        old = (before / "instruction.md").read_text()
+        new = (after / "instruction.md").read_text()
+    except OSError:
+        return ""
+    if old == new:
+        return ""
+    diff = "".join(difflib.unified_diff(
+        old.splitlines(keepends=True), new.splitlines(keepends=True),
+        "previous/instruction.md", "instruction.md",
+    ))
+    return (
+        "\nThe public instruction changed in this revision:\n\n```diff\n"
+        + diff
+        + "```\n\nA requirement this diff removes or narrows loses or narrows its "
+        "inherited checks: an inherited check of the old scope now rejects work the "
+        "instruction permits. Where an unchanged sentence still reads the old way, "
+        "the changed sentence states the narrowed scope; check that scope, and name "
+        "the conflict in run/verifier-changes.md.\n"
+    )
+
+
 def _blind_verifier(
     rewrite: layout.RewriteDir,
     task: dict,
@@ -2427,6 +2456,7 @@ def _blind_verifier(
             )
             if task.get("_role_files"):
                 prompt += _ROLE_PATCH_NOTE
+            prompt += _instruction_change_note(seed_pkg, pkg)
             prompt += _budget(timeout)
             # A simplification may only add guidance (a hint, a starter file) and
             # keep every requirement; the previous verifier then still checks the

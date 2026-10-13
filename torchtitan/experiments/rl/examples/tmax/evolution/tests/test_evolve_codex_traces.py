@@ -1428,3 +1428,23 @@ def test_sandbox_boot_detaches_in_the_package(tmp_path, monkeypatch) -> None:
     )
     ec._sandbox_boot(tmp_path)
     assert calls == [([str(tmp_path / "sandbox"), "up", "--detach"], tmp_path)]
+
+
+def test_blind_verifier_is_told_how_the_instruction_changed(tmp_path):
+    """A rewrite that narrows a requirement in one sentence hands the blind
+    verifier author the diff, so the inherited checks of the old scope go."""
+    before, after = tmp_path / "before", tmp_path / "after"
+    before.mkdir()
+    after.mkdir()
+    (before / "instruction.md").write_text("Print the Nth prime.\n- Handle N from 0 to 100.\n")
+    (after / "instruction.md").write_text("Print the Nth prime.\n- Handle the input N=0.\n")
+    note = ec._instruction_change_note(before, after)
+    assert "-- Handle N from 0 to 100." in note and "+- Handle the input N=0." in note
+    assert "loses or narrows its" in note
+    (after / "instruction.md").write_text((before / "instruction.md").read_text())
+    assert ec._instruction_change_note(before, after) == ""
+    assert ec._instruction_change_note(tmp_path / "missing", after) == ""
+
+
+def test_easier_rewrites_every_sentence_of_a_narrowed_requirement():
+    assert "edit every sentence of\ninstruction.md that states or implies it" in so.prompt("vague")

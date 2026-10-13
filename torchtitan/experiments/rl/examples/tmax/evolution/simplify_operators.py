@@ -76,7 +76,10 @@ student created it, or its installation through the container build or task
 setup, in the evidence observation. A file under environment/ is not by itself
 proof that it was copied into the container. When delivery is unverified,
 mark it unknown and do not base the intervention on its presence.
-Identify a recurring obstacle, then state the skill this variant retains. Aim for some successful
+Identify a recurring obstacle, then state the skill this variant retains.
+When the change removes or narrows a requirement, edit every sentence of
+instruction.md that states or implies it, so no unchanged sentence still asks
+for the old scope; a separate author writes the verifier from that text. Aim for some successful
 and some unsuccessful student attempts, rather than preserving every difficult
 part of a task that the student cannot yet solve. A timeout or 0/k alone
 does not identify that obstacle. Compare the failed check with the submitted
