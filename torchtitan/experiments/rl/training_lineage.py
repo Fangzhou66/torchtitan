@@ -65,7 +65,7 @@ class TrainingLineageRecorder:
     remain intact and are reused when the same output directory is resumed.
     """
 
-    def __init__(self, *, dump_dir: str) -> None:
+    def __init__(self, *, dump_dir: str, track_pending_inputs: bool = False) -> None:
         self.root = Path(dump_dir) / "training_lineage"
         self.root.mkdir(parents=True, exist_ok=True)
         self.events_path = self.root / "events.jsonl"
@@ -74,6 +74,8 @@ class TrainingLineageRecorder:
         self.training_activity_path = self.root / "training_activity.json"
         self.session_id = uuid.uuid4().hex
         self._sequence = 0
+        self.track_pending_inputs = track_pending_inputs
+        self.pending_inputs: dict[int, object] = {}
         self._known_sample_revisions = self._read_known_sample_revisions()
         self.record_event("session_started", pid=os.getpid())
 
@@ -130,6 +132,8 @@ class TrainingLineageRecorder:
 
     def record_sample(self, *, lineage: dict[str, Any], sample: object) -> None:
         """Store a complete input once per content revision."""
+        if self.track_pending_inputs:
+            self.pending_inputs[lineage["group_id"]] = sample
         revision = lineage.get("sample_revision")
         if not isinstance(revision, str) or revision in self._known_sample_revisions:
             return
@@ -166,6 +170,8 @@ class TrainingLineageRecorder:
         }
         if lineage:
             record.update(lineage)
+            if self.track_pending_inputs and event in {"trained", "dropped"}:
+                self.pending_inputs.pop(lineage["group_id"], None)
         record.update(fields)
         self._append(self.events_path, record)
 

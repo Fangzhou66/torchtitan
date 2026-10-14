@@ -107,6 +107,7 @@ def _make_stub_rl_trainer():
         async_loop = AsyncLoopConfig()
         isolate_rollout_artifacts = False
         metrics = m.MetricsProcessor.Config()
+        trainer = SimpleNamespace(checkpoint_training_data=False)
         dump_folder = "/tmp/test_rl"
         rollout_recorder = RolloutSampleRecorder.Config()
         hf_assets_path = "./tests/assets/tokenizer"

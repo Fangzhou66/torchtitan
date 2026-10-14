@@ -891,6 +891,7 @@ def rl_grpo_qwen3_5_9b_tmax(
         checkpoint=dataclasses.replace(
             config.trainer.checkpoint,
             interval=int(os.environ.get("SWE_CKPT_INTERVAL", "20")),
+            enable_first_step_checkpoint=os.environ.get("SWE_CKPT_FIRST_STEP", "0") == "1",
             initial_load_path=os.environ.get("SWE_INITIAL_DCP_CHECKPOINT")
             or config.trainer.checkpoint.initial_load_path,
             initial_load_in_hf=False
@@ -940,6 +941,9 @@ def rl_grpo_qwen3_5_9b_tmax(
     )
     config.training_heartbeat_interval_sec = 30
     config.isolate_rollout_artifacts = True
+    config.trainer.checkpoint_training_data = (
+        os.environ.get("SWE_CKPT_CONTROLLER_DATA", "0") == "1"
+    )
     # Optional trainer FSDP width override for a fwd/bwd speed experiment. The mast_rl
     # launcher derives the trainer host count from data_parallel_shard_degree, so
     # SWE_DP_SHARD=16 -> 2 trainer hosts (FSDP-16), spreading the packed rows across
