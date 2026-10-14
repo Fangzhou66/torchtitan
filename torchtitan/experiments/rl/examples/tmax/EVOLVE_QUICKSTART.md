@@ -124,6 +124,12 @@ own is revalidated at that size.
 |---|---|---|
 | `SWE_EVOLVE_SIMPLIFY` | `0` (default) | The easier arm. At `0`, an all-fail signal is written to the ledger as `deferred` and the task stays as it is. At `1`, the loop simplifies it. The bound on how much the reference solution may grow does not apply to this direction, so a simplification is rejected only when the reference solution fails the verifier, when an untouched workspace passes it, or when the edit touches files its operator may not; the "Simplification" section of [`EVOLVE_LOOP.md`](EVOLVE_LOOP.md) has the detail. |
 | `SWE_SIMPLIFY_HINT` | `vague` | How much guidance a simplification may write into the instruction. `specific` writes where-to-look hints in, and the holdout experiment described in that same section showed the policy learning to follow hints rather than to solve. |
+| `EVOLVE_SPEC_REPAIR` | `0` (default) | At `1`, a simplification agent's evidence-based `repair_required` report starts a separate `repair_spec` attempt from the unmodified input revision, under the same rewrite deadline. Repairs retain their own route and metrics; they do not immediately trigger another simplification. Transient sandbox/provider failures or unusable evidence are `invalid_signal`, not repair requests. |
+| `SWE_POLICY_CANARY_K` | `0` (disabled) | At `0`, task-valid rewrites publish without dedicated student rollouts; ordinary training groups on the new revision provide difficulty feedback. At two or more trials per arm, accepted candidates must pass a fresh original/candidate student-policy check before publication. Export the same value for both the trainer and evolution loop; the 9B TMax recipe selects the admission controller automatically. See "Student-policy admission" below. |
+| `SWE_POLICY_CANARY_MAX_CONCURRENCY` | `4` | Concurrent paired policy checks. Each pair runs `2 * SWE_POLICY_CANARY_K` fresh sandbox episodes using the training inference engines. Controller-local orchestration does not consume a remote training-worker slot. |
+| `SWE_POLICY_CANARY_MAX_VERSION_SPAN` | `5` | Maximum spread of generated policy versions across both arms. A larger spread makes the measurement invalid and prevents publication. |
+| `SWE_POLICY_CANARY_TIMEOUT_SEC` | `7200` | Maximum time to wait for a policy response, including queuing. The end-to-end rewrite deadline may shorten it. Missing responses fail closed. |
+| `SWE_POLICY_CANARY_POLL_SEC` | `10` | Controller request polling and evolution response polling, in seconds. |
 | `SWE_RETUNE_AGENT` | `codex` | The rewrite runs as a Codex CLI session over the package and the group's rollout records. `claude` runs the same session with Claude Code; `EVOLVE_CLAUDE_MODEL` (default `opus`) selects its model. Only `codex` and `claude` are supported. |
 | `EVOLVE_AGENT_TIMEOUT` | `2400` (default) | Maximum seconds for any one author, verifier, or repair session. The actual timeout is the smaller of this value and the time left before the rewrite deadline, after reserving final-validation time. |
 | `EVOLVE_REPAIR_ROUNDS` | `3` (default) | When the reference solution and the verifier disagree, or the caller's revalidation fails, the author's session repairs first and the verifier's session second; that pair is one iteration, and this is how many are tried before the rewrite is discarded. |
@@ -133,6 +139,52 @@ own is revalidated at that size.
 | `EVOLVE_WORK_ROOT` | unset (in-place execution) | An absolute node-local directory for active rewrites. When set, the loop copies the input revision, rollout records, and pinned CLI tools there; Codex, hooks, sandbox commands, probes, and session logging stay local. The durable rewrite directory holds a `running` claim from the start; a completed rewrite is copied through a hidden incoming directory under `TRL_BASE` and `rewrite.json` is replaced last, before its signal can be closed. Use this when `TRL_BASE` is on FUSE or other remote storage. Do not point it inside `TRL_BASE`; allow enough space for `--workers` simultaneous task copies. |
 | `--workers` | `16` (default `8`) | Concurrent rewrites in a round. The loop is signal-starved most of the time; workers only drain a burst faster. |
 | `--interval` | `120` | Seconds between rounds. |
+
+### Student-policy admission
+
+The gate defaults off (`SWE_POLICY_CANARY_K=0`). In that mode, reference-solution,
+untouched-workspace and the applicable semantic checks still gate publication.
+Difficulty is measured when normal training samples the published revision:
+all-failed groups request simplification, and groups at the hardening threshold
+request hardening. Mixed-outcome groups can supply RL learning signal. This uses
+the normal rollout budget, not additional original/candidate trials. A task-valid
+rewrite may still be too hard or too easy until those training results arrive.
+Existing policy-probe records do not gate publication when the gate is disabled.
+
+The optional policy gate measures the candidate with the same student model,
+Terminus scaffold, sampling and verifier used in training. It requires an
+absolute `TRL_BASE` readable by both the training controller and the evolution
+loop. Requests contain complete task rows under
+`evolution/policy_canaries/requests/`; responses are content-bound to the request
+and candidate. The loop checks that the published row is the row measured.
+It rechecks admission expiry at publication, including after a delayed durable
+copy or storage recovery.
+
+These are online paired trials, not a frozen-checkpoint evaluation. An original
+task must still satisfy its triggering condition: all-failed for simplification,
+or the configured hardening success threshold. A difficulty-adjusted candidate
+is admitted only when some, but not all, trials succeed. A spec repair must pass
+the existing semantic, reference-solution and untouched-workspace checks and
+complete fresh student measurements; its solve rate does not define acceptance.
+Fresh training signals on the repaired revision decide whether it later needs
+a difficulty adjustment.
+
+Incomplete grading, infrastructure failures, missing policy versions or excessive
+policy drift prevent publication. `--dry` performs authoring and task validation
+only: it neither queues a policy probe nor publishes a mix version. With the gate
+disabled, recipes retain task-validation-only publication and normal training
+feedback, without an admission queue or policy-expiry requirement.
+
+The controller writes readable paired trajectories under
+`<dump_folder>/policy_canary_traces/<request-id>/`. These trajectories do not
+enter training batches, create evolution signals or contribute to fixed
+validation rewards. Pending policy admission occupies an evolution-worker slot.
+The controller cancels its probes when optimization ends, before final evaluation.
+
+Track `evolution/simplify/*`, `evolution/repair_spec/*` and
+`evolution/invalid_signal/*` separately. Repairs are counted in
+`evolution/rewrites/accepted_repair_spec`, not `accepted_easier`.
+`evolution/policy_canary/active` and `waiting` show controller admission load.
 
 A free worker takes the next pending signal at once, newest first, one per
 task. A task with a rewrite in progress waits for it to end; its next signal

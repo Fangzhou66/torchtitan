@@ -38,7 +38,10 @@ from torchtitan.experiments.rl.examples.tmax import layout
 
 
 SIGNAL_OUTCOMES = ("handled", "deferred", "superseded", "resolved", "junk")
-REWRITE_OUTCOMES = ("accepted_harder", "accepted_easier", "kept", "rejected", "failed")
+REWRITE_OUTCOMES = (
+    "accepted_harder", "accepted_easier", "accepted_repair_spec", "kept", "rejected", "failed"
+)
+REWRITE_ROUTES = ("simplify", "repair_spec", "invalid_signal")
 FLOW_KEYS = ("signals_issued", "signals_consumed", "rewrites_accepted", "rewrites_trained")
 # Merges the latency median looks back over: recent enough to move when the
 # loop speeds up or stalls, wide enough that one outlier does not set it.
@@ -56,6 +59,12 @@ def record_outcome(root: layout.Root, rewrite: layout.RewriteDir, meta: dict) ->
             "task": meta["task"],
             "direction": meta["job"],
             "status": meta["status"],
+            "route": meta.get("route") or (
+                "repair_spec" if meta.get("spec_repair") else
+                "invalid_signal" if meta.get("stage") == "invalid_signal" else
+                "simplify" if meta["job"] == "easier" else "evolve"
+            ),
+            "stage": meta.get("stage"),
             "started": meta.get("started"),
             "finished": meta.get("finished"),
             "signal": meta["signal"],
@@ -96,6 +105,7 @@ class EvolutionMetrics:
         self.closed: dict[str, str] = {}
         self.rewrites: set[str] = set()
         self.outcomes: Counter[str] = Counter()
+        self.routes: dict[str, Counter[str]] = {route: Counter() for route in REWRITE_ROUTES}
         self.latencies: list[int] = []
         self.history: dict[int, tuple[int, ...]] = {}
         # First training on an accepted revision: trained groups by task, and
@@ -200,8 +210,13 @@ class EvolutionMetrics:
                     started, self.rewrite_started.get(event["signal"], started)
                 )
             status = event["status"]
+            route = event.get("route") or ("simplify" if event["direction"] == "easier" else "evolve")
+            if route in self.routes:
+                self.routes[route]["attempted"] += 1
+                self.routes[route]["failed" if status == "interrupted" else status] += 1
             if status == "accepted":
-                self.outcomes[f"accepted_{event['direction']}"] += 1
+                outcome = "accepted_repair_spec" if route == "repair_spec" else f"accepted_{event['direction']}"
+                self.outcomes[outcome] += 1
                 origin = self.issued.get(event.get("signal"))
                 if step is not None and origin is not None:
                     self.latencies.append(step - origin)
@@ -265,13 +280,13 @@ class EvolutionMetrics:
         flow = (
             len(self.issued),
             sum(closed.values()),
-            self.outcomes["accepted_harder"] + self.outcomes["accepted_easier"],
+            self.outcomes["accepted_harder"] + self.outcomes["accepted_easier"] + self.outcomes["accepted_repair_spec"],
             len(self.train_latencies),
         )
         if step is not None:
             self.history[step] = flow
         values = {
-            **{f"evolution/flow/{k}": float(v) for k, v in zip(FLOW_KEYS, flow)},
+            **{f"evolution/flow/{k}": float(v) for k, v in zip(FLOW_KEYS, flow, strict=True)},
             **{f"evolution/signals/{o}": float(closed[o]) for o in SIGNAL_OUTCOMES},
             **{
                 f"evolution/rewrites/{o}": float(self.outcomes[o])
@@ -281,7 +296,15 @@ class EvolutionMetrics:
                 f"evolution/stale/{k}": float(self.stale[k])
                 for k in ("while_waiting", "while_rewriting")
             },
+            **{
+                f"evolution/{route}/{outcome}": float(counts[outcome])
+                for route, counts in self.routes.items()
+                for outcome in ("attempted", "accepted", "kept", "rejected", "failed")
+            },
         }
+        for route, counts in self.routes.items():
+            if counts["attempted"]:
+                values[f"evolution/{route}/acceptance_rate"] = counts["accepted"] / counts["attempted"]
         if self.latencies:
             values["evolution/flow/accept_latency_steps"] = float(
                 statistics.median(self.latencies[-LATENCY_WINDOW:])

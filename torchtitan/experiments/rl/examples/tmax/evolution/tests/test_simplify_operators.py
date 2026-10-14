@@ -122,7 +122,8 @@ def test_prompt_asks_for_faithful_guidance_and_unstated_choices():
     text = so.prompt("vague")
     # Guidance is checked against what the reference actually computes.
     assert "apply your guidance literally" in text
-    # A verifier that depends on a choice the instruction never fixes is an
-    # obstacle; stating the choice is allowed and leaves grading unchanged.
+    # A hidden grading choice is a specification repair, not simplification.
     assert "choices the reference solution makes that the instruction does not" in text
-    assert "leaves the grading unchanged" in text
+    assert "is a specification defect, not student difficulty" in text
+    assert "Do not combine this repair with the simplification" in text
+    assert "BLOCKED: invalid_signal:" in text

@@ -85,6 +85,11 @@ import rewrite_workspace as rw_workspace  # noqa: E402
 from rewrite_admission import admission_is_open  # noqa: E402
 from torchtitan.experiments.rl.examples.tmax import layout, rollout_record  # noqa: E402
 from torchtitan.experiments.rl.examples.tmax.evolution_metrics import record_outcome  # noqa: E402
+from torchtitan.experiments.rl.examples.tmax.policy_canary import (  # noqa: E402
+    content_hash,
+    PolicyCanaryConfig,
+    PolicyCanaryQueue,
+)
 
 log = logging.getLogger("evolve")
 
@@ -104,6 +109,11 @@ SIMPLIFY_ENABLED = os.environ.get("SWE_EVOLVE_SIMPLIFY", "0").lower() not in (
     "false",
     "no",
 )
+EASIER_MIN_SCORED_ATTEMPTS = int(
+    os.environ.get("EVOLVE_EASIER_MIN_SCORED_ATTEMPTS", "2")
+)
+if EASIER_MIN_SCORED_ATTEMPTS < 2:
+    raise ValueError("EVOLVE_EASIER_MIN_SCORED_ATTEMPTS must be at least 2")
 # What a seed copy leaves behind: backups of the pre-canary-strip instruction
 # are not part of the task and would show the agent text the pool deliberately
 # removed; the other two are records of an older loop's, not the package's.
@@ -154,6 +164,8 @@ ROW_KEYS = {
 
 def read_declared(
     mix: Path,
+    *,
+    rows_out: dict[str, dict] | None = None,
 ) -> tuple[dict[str, dict], dict[str, tuple[str, str]], dict[str, "pack.Protected"]]:
     """One pass over the mix: per row, the daytona_* it declares and the pin
     hook it carries (metadata.tmax.pre_test_sh with its environment stamp),
@@ -168,10 +180,13 @@ def read_declared(
     for ln in open(mix):
         if not ln.strip():
             continue
-        md = json.loads(ln).get("metadata") or {}
+        row = json.loads(ln)
+        md = row.get("metadata") or {}
         iid = md.get("instance_id")
         if not iid:
             continue
+        if rows_out is not None:
+            rows_out[iid] = row
         resources[iid] = {k: md[rk] for k, rk in ROW_KEYS.items() if rk in md}
         hook = row_pretest(md)
         if hook:
@@ -845,6 +860,7 @@ def handle(
     dry: bool = False,
     pretests: dict[str, tuple[str, str]] | None = None,
     protecteds: dict | None = None,
+    input_row: dict | None = None,
 ) -> dict:
     """One signal, one rewrite directory, one verdict in rewrite.json.
 
@@ -1022,6 +1038,34 @@ def handle(
                 }
             )
             rec["simplify_context"] = context
+        canary_config = PolicyCanaryConfig.from_env()
+        if rec.get("status") == "accepted" and canary_config.group_size:
+            if dry:
+                rec["policy_canary"] = {"ok": False, "stage": "dry_not_measured"}
+            else:
+                if input_row is None or int(input_row["metadata"].get("rev", 0)) != rev:
+                    raise ValueError("policy canary requires the exact input revision's mix row")
+                candidate = candidate_row(rewrite.package, input_row, {**meta, **rec})
+                queue = PolicyCanaryQueue(root)
+                identity, request = queue.submit(
+                    rewrite=str(durable_rewrite.path.relative_to(root.path)),
+                    task=tid, input_rev=rev, route=rec["route"],
+                    original=input_row, candidate=candidate, config=canary_config,
+                    expires_at=rec["rewrite_deadline_at"],
+                )
+                log.info("%s policy canary queued: %s", tid, identity)
+                pending_meta = {
+                    **meta, **rec, "status": "running", "stage": "policy_canary_pending",
+                    "policy_canary": {"request_id": identity, "ok": False},
+                }
+                layout.write_json_atomic(rewrite.meta, pending_meta)
+                workspace.claim(pending_meta)
+                verdict = queue.wait(identity, request, config=canary_config)
+                rec["policy_canary"] = verdict
+                if not verdict["ok"]:
+                    rec.update(status="kept", stage=verdict["stage"], reason=verdict["why"])
+                    if verdict["stage"] in ("invalid_signal", "policy_canary_error", "policy_canary_timeout"):
+                        rec["route"] = "invalid_signal"
     except rw_workspace.WorkspaceTransferError:
         # A storage outage is retryable infrastructure failure. Do not close
         # the signal; rw_workspace.recover publishes the local record before
@@ -1046,7 +1090,9 @@ def handle(
         }
     for key in (
         "action",
+        "route",
         "spec_repair",
+        "policy_canary",
         "operator",
         "harder_mode",
         "require_solution_growth",
@@ -1062,6 +1108,8 @@ def handle(
         "changed",
         "oracle_repair",
         "agent_validated",
+        "agent_failure_type",
+        "agent_exit_code",
         "cyber_filtered",
         "rewrite_budget_sec",
         "rewrite_deadline_at",
@@ -1155,6 +1203,27 @@ def _finish(h: dict, status: str, *, stage: str, reason: str) -> None:
     h["status"] = status
 
 
+def candidate_row(package: Path, input_row: dict, meta: dict) -> dict:
+    """Build the identical provisioned row for admission probes and publication."""
+    old_md = input_row["metadata"]
+    row = pack.to_row(
+        str(package), task_id=meta["task"], pretest=row_pretest(old_md),
+        protected=pack.Protected.from_tmax(old_md.get("tmax") or {}),
+    )
+    sized = meta.get("resources") or {}
+    for key, rk in ROW_KEYS.items():
+        if sized.get(key) is not None:
+            row["metadata"][rk] = sized[key]
+        elif rk not in row["metadata"] and rk in old_md:
+            row["metadata"][rk] = old_md[rk]
+    # Membership annotations are not in the package; keep them across revisions.
+    for key in ("corpus", "terminal_domain"):
+        if key in old_md:
+            row["metadata"].setdefault(key, old_md[key])
+    row["metadata"]["rev"] = int(meta["input_rev"]) + 1
+    return row
+
+
 def fold(root: layout.Root, accepted: list[dict]) -> int | None:
     """The accepted rewrites given into one new mix version.
 
@@ -1175,9 +1244,14 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
     A task no longer in the mix is not re-added: it was taken out
     deliberately, and a new label lands at the END of the file, which
     rotates the held-out slice. Replace only.
+
+    With policy admission disabled, task validation is the publication gate.
+    Later training groups measure difficulty; old policy-probe records do not
+    impose admission or expiry requirements on this mode.
     """
     if not accepted:
         return None
+    policy_admission_enabled = PolicyCanaryConfig.from_env().group_size != 0
     mix = root.mix
     rows: dict[str, str] = {}
     order: list[str] = []
@@ -1200,7 +1274,18 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
             # signal per task per round. A revision is never overwritten.
             _finish(h, "failed", stage="fold", reason=f"{target.name} already exists")
             continue
-        old_md = json.loads(rows[tid])["metadata"]
+        policy_canary = (
+            (meta.get("policy_canary") or {}) if policy_admission_enabled else {}
+        )
+        if policy_admission_enabled:
+            if not policy_canary.get("ok") or "expires_at" not in policy_canary:
+                _finish(h, "kept", stage="policy_canary_missing", reason="no passing current-policy admission check")
+                continue
+            # A storage outage can delay publication after admission has completed.
+            if time.time() >= policy_canary["expires_at"]:
+                meta["route"] = "invalid_signal"
+                _finish(h, "kept", stage="policy_canary_expired", reason="current-policy admission expired before publication")
+                continue
         try:
             strip_harness(rewrite.package)
             # The directory is `package` now and `r<N>` once renamed, so the
@@ -1208,27 +1293,12 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
             # the hook, which the package never held, and so are the row's
             # protected lists -- unless the package ships its own
             # tests/protected_paths.json, which pack.to_row lets override them.
-            row = pack.to_row(
-                str(rewrite.package),
-                task_id=tid,
-                pretest=row_pretest(old_md),
-                protected=pack.Protected.from_tmax(old_md.get("tmax") or {}),
-            )
+            row = candidate_row(rewrite.package, json.loads(rows[tid]), meta)
+            if policy_canary.get("ok") and content_hash(row) != policy_canary["candidate_sha256"]:
+                raise ValueError("candidate row changed after its policy canary")
         except Exception as e:  # noqa: BLE001 -- one malformed package, not the round
             _finish(h, "failed", stage="fold", reason=f"{type(e).__name__}: {e}")
             continue
-        sized = meta.get("resources") or {}
-        for key, rk in ROW_KEYS.items():
-            if sized.get(key) is not None:
-                row["metadata"][rk] = sized[key]
-            elif rk not in row["metadata"] and rk in old_md:
-                row["metadata"][rk] = old_md[rk]
-        # terminal_domain is an annotation of the task (build_mix_v2 reads it
-        # off the corpus table), not of the package, so pack.to_row cannot
-        # set it and a folded row would lose it.
-        if "terminal_domain" in old_md:
-            row["metadata"].setdefault("terminal_domain", old_md["terminal_domain"])
-        row["metadata"]["rev"] = n + 1
         rows[tid] = json.dumps(row, ensure_ascii=False)
         folded.append(
             (h, n + 1, {rk: row["metadata"].get(rk) for rk in ROW_KEYS.values()})
@@ -1334,9 +1404,14 @@ def rebuild_status(
         )
     rewrites = {"running": 0, "accepted": 0, "failed": 0, "kept": 0}
     rejected: dict[str, int] = {}
+    routes: dict[str, dict[str, int]] = {}
     running_on_disk: set[str] = set()
     for _task, _rw, meta in _rewrite_metas(root):
         st = meta.get("status")
+        route = meta.get("route")
+        if route is not None:
+            outcomes = routes.setdefault(route, {})
+            outcomes[st] = outcomes.get(st, 0) + 1
         if st == "running" and meta.get("task"):
             running_on_disk.add(meta["task"])
         if st == "rejected":
@@ -1363,6 +1438,7 @@ def rebuild_status(
         "rejected": rejected,
         "failed": rewrites["failed"],
         "kept": rewrites["kept"],
+        "routes": routes,
         "queue": _queue(
             root,
             ledger,
@@ -1521,14 +1597,26 @@ def _created(s: Signal) -> str:
     return str(s.data.get("created", ""))
 
 
+def _defer_reason(root: layout.Root, s: Signal) -> str | None:
+    """Explain why an easier signal must not start a rewrite."""
+    if s.data["direction"] != "easier":
+        return None
+    if not SIMPLIFY_ENABLED and not unsolved(root, s.task, int(s.data["rev"])):
+        return "the easier direction is off"
+    total = int(s.data["total"])
+    if total < EASIER_MIN_SCORED_ATTEMPTS:
+        return f"only {total} scored attempts; need {EASIER_MIN_SCORED_ATTEMPTS}"
+    num_attempts = len(s.data["attempts"])
+    if num_attempts < EASIER_MIN_SCORED_ATTEMPTS:
+        return (
+            f"only {num_attempts} scored trace records for {total} attempts; "
+            f"need {EASIER_MIN_SCORED_ATTEMPTS}"
+        )
+    return None
+
+
 def _deferred(root: layout.Root, s: Signal) -> bool:
-    """An easier signal waits for nothing while the easier direction is off,
-    unless its task has never been solved."""
-    return (
-        s.data["direction"] == "easier"
-        and not SIMPLIFY_ENABLED
-        and not unsolved(root, s.task, int(s.data["rev"]))
-    )
+    return _defer_reason(root, s) is not None
 
 
 def select_work(
@@ -1598,18 +1686,19 @@ def select_work(
 
     todo, deferred = [], []
     for s in sorted(picks, key=_created, reverse=True):
-        if not signal and _deferred(root, s):
-            deferred.append(s)
+        reason = None if signal else _defer_reason(root, s)
+        if reason is not None:
+            deferred.append((s, reason))
         else:
             todo.append(s)
     if limit:
         todo = todo[:limit]
-    closing = {s.sid for s in todo} | {s.sid for s in deferred}
-    for s in deferred:
-        log.info("%s %s deferred: the easier direction is off", s.task, s.sid)
+    closing = {s.sid for s in todo} | {s.sid for s, _reason in deferred}
+    for s, reason in deferred:
+        log.info("%s %s deferred: %s", s.task, s.sid, reason)
         result["deferred"] += 1
         if not dry:
-            _ledger_line(root, s, "deferred")
+            _ledger_line(root, s, "deferred", reason=reason)
     for s, why, pick in rest:
         # A signal yielding to a pick this round did not reach (--limit)
         # stays pending; one about a gone revision is closed now.
@@ -1694,7 +1783,8 @@ def run_round(
             batch = batch[: workers - len(futs)]
             if not batch:
                 return
-            declared, pretests, protecteds = read_declared(root.mix.live)
+            input_rows = {} if PolicyCanaryConfig.from_env().group_size else None
+            declared, pretests, protecteds = read_declared(root.mix.live, rows_out=input_rows)
             for s in batch:
                 if not admission_is_open(dry=dry):
                     break
@@ -1707,6 +1797,7 @@ def run_round(
                         dry=dry,
                         pretests=pretests,
                         protecteds=protecteds,
+                        input_row=input_rows.get(s.task) if input_rows is not None else None,
                     )
                 ] = s
 

@@ -93,8 +93,10 @@ Compilation or an existing executable does not establish correct runtime
 output. Use the recorded reward when claiming that an attempt passed.
 An oracle-informed constant can pass many valid fixed-output tasks; this
 alone is not evidence of wrong grading or a reason to discard the task.
-Infrastructure failures, missing required
-evidence, inconsistent specifications and wrong grading require repair:
+Transient sandbox/provider failures, unscored attempts and missing required
+trace evidence are not difficulty measurements: write
+BLOCKED: invalid_signal: <reason> to run/verdict.txt and stop without edits.
+Inconsistent specifications, broken task setup and wrong grading require repair:
 write BLOCKED: repair_required: <reason> to run/verdict.txt and stop.
 If the work is already correct but the agent fails to submit, do not remove
 unrelated task requirements. With insufficient evidence, write GIVE UP with
@@ -155,13 +157,9 @@ fix: a fitting window, a threshold, a seed, an ordering, a starting guess. For
 each, run the reference in the sandbox with another choice a competent solver
 could reasonably make, and grade it. A verifier that rejects a reasonable
 choice depends on something the student cannot discover from the task, which
-is an obstacle no attempt can get past however well it works. Stating that
-choice in the instruction leaves the grading unchanged and is an allowed
-simplification, which may accompany the change you choose since it adds no
-difficulty dimension; describe the alternative you tried and its grade in
-change.
-This is distinct from a check whose logic is wrong, which still goes
-to repair as described below.
+is a specification defect, not student difficulty. Request repair with the
+alternative choice, its grade and the conflicting public requirement as
+evidence. Do not combine this repair with the simplification you propose.
 
 In prediction, name the observed failing action or decision and explain how
 the proposed change enables a different next action. Give the solved count

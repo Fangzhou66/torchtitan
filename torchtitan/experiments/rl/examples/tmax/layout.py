@@ -501,7 +501,7 @@ class Run:
 
 @dataclass(frozen=True)
 class Evolution:
-    """``evolution/``: the loop's state. Only the loop writes here."""
+    """Loop state and optional controller-written policy admission responses."""
 
     path: Path
 

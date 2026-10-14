@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import evolve_ondella as od
 import rewrite_workspace as rw_workspace
 from torchtitan.experiments.rl.examples.tmax import layout, rollout_record
+from torchtitan.experiments.rl.examples.tmax.policy_canary import content_hash
 
 SEED = {
     "instruction.md": "Write the report to /app/report.txt.\n",
@@ -38,6 +39,177 @@ SEED = {
 }
 RUN = "tmax-9b--20260904-181500Z"
 VERDICTS = {"oracle": "pass", "dark_paths": [], "dark_literals": [], "step": []}
+
+
+@pytest.mark.parametrize("route", ["simplify", "evolve", "repair_spec"])
+@pytest.mark.parametrize(
+    "prior_admission",
+    [
+        None,
+        {"ok": True, "expires_at": 0, "candidate_sha256": "old-policy-measurement"},
+    ],
+)
+def test_training_feedback_publishes_validated_rewrites_without_policy_probes(
+    tmp_path, monkeypatch, route, prior_admission
+):
+    root = _root(tmp_path, monkeypatch)
+    before = root.mix.live.read_bytes()
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "0")
+    monkeypatch.setattr(od, "EASIER_MIN_SCORED_ATTEMPTS", 16)
+    direction = "harder" if route == "evolve" else "easier"
+    _signal(root, direction=direction, n=16)
+    seen = _stub(
+        monkeypatch, action=route, route=route, policy_canary=prior_admission
+    )
+
+    def no_policy_probe(*args, **kwargs):
+        pytest.fail("normal training feedback must not queue student-policy probes")
+
+    monkeypatch.setattr(od, "PolicyCanaryQueue", no_policy_probe)
+
+    result = od.run_round(root, workers=1, limit=1)
+
+    assert result["accepted"] == 1
+    assert root.evolution.task("tw_a").rev(1).exists()
+    assert root.mix.live.read_bytes() != before
+    assert json.loads(root.mix.live.read_text())["metadata"]["rev"] == 1
+    assert seen[0]["signal"]["total"] == 16
+    assert seen[0]["signal"]["solved"] == (16 if direction == "harder" else 0)
+    assert not (root.evolution.path / "policy_canaries").exists()
+
+
+@pytest.mark.parametrize("next_direction", ["easier", "harder"])
+def test_training_outcome_on_published_revision_drives_the_next_rewrite(
+    tmp_path, monkeypatch, next_direction
+):
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "0")
+    monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
+    monkeypatch.setattr(od, "EASIER_MIN_SCORED_ATTEMPTS", 16)
+    _signal(root, direction="easier", n=16)
+    seen = _stub(monkeypatch)
+    assert od.run_round(root, workers=1)["accepted"] == 1
+
+    _signal(root, group=8, rev=0, direction="easier", n=16)
+    _signal(root, group=9, rev=1, direction=next_direction, n=16)
+
+    result = od.run_round(root, workers=1)
+
+    assert result["handled"] == 1
+    assert result["accepted"] == 1
+    assert len(seen) == 2
+    assert seen[1]["job"] == next_direction
+    signal = seen[1]["signal"]
+    measurement = {
+        key: signal[key] for key in ("run", "group", "rev", "solved", "total")
+    }
+    assert measurement == {
+        "run": RUN,
+        "group": 9,
+        "rev": 1,
+        "solved": 16 if next_direction == "harder" else 0,
+        "total": 16,
+    }
+    assert root.evolution.task("tw_a").rev(2).exists()
+    assert not (root.evolution.path / "policy_canaries").exists()
+
+
+@pytest.mark.parametrize("stage", ["daytona_oracle", "null_pass", "null_check"])
+def test_training_feedback_does_not_publish_failed_task_validation(
+    tmp_path, monkeypatch, stage
+):
+    root = _root(tmp_path, monkeypatch)
+    before = root.mix.live.read_bytes()
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "0")
+    _signal(root, direction="easier", n=16)
+    seen = _stub(monkeypatch, status="rejected", stage=stage, route="simplify")
+
+    result = od.run_round(root, workers=1, limit=1)
+
+    assert result["accepted"] == 0
+    assert result["handled"] == 1
+    meta = json.loads(seen[0]["rewrite"].meta.read_text())
+    assert meta["status"] == "rejected"
+    assert meta["stage"] == stage
+    assert root.mix.live.read_bytes() == before
+    assert not root.evolution.task("tw_a").rev(1).exists()
+    assert not (root.evolution.path / "policy_canaries").exists()
+
+
+@pytest.mark.parametrize("admitted", [True, False])
+def test_node_local_candidate_is_published_only_after_policy_admission(
+    tmp_path, monkeypatch, admitted
+):
+    root = _root(tmp_path, monkeypatch)
+    row = json.loads(root.mix.live.read_text())
+    row["metadata"]["corpus"] = "tw-extract"
+    root.mix.publish([json.dumps(row)])
+    before = root.mix.live.read_bytes()
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "4")
+    _signal(root)
+    _stub(monkeypatch, route="evolve", rewrite_deadline_at=time.time() + 60)
+
+    def wait(queue, identity, request, *, config):
+        assert request["original"]["metadata"]["rev"] == 0
+        assert request["candidate"]["metadata"]["rev"] == 1
+        assert request["candidate"]["metadata"]["daytona_cpu"] == 2
+        assert request["candidate"]["metadata"]["corpus"] == "tw-extract"
+        assert "node-local" not in json.dumps(request["candidate"])
+        return {
+            "ok": admitted, "stage": "policy_canary_pass" if admitted else "policy_too_hard",
+            "why": "fresh student verdict", "request_id": identity,
+            "expires_at": request["expires_at"],
+            "candidate_sha256": content_hash(request["candidate"]),
+        }
+
+    monkeypatch.setattr(od.PolicyCanaryQueue, "wait", wait)
+    result = od.run_round(root, workers=1, limit=1)
+    assert result["accepted"] == int(admitted)
+    assert root.evolution.task("tw_a").rev(1).exists() == admitted
+    if admitted:
+        assert json.loads(root.mix.live.read_text())["metadata"]["corpus"] == "tw-extract"
+    assert (root.mix.live.read_bytes() == before) != admitted
+    assert len(list((root.evolution.path / "policy_canaries/requests").glob("*.json"))) == 1
+
+
+def test_enabled_policy_gate_refuses_unmeasured_fold(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    _signal(root)
+    _stub(monkeypatch)
+    sig = od._replay_signal(root, f"{RUN}/tw_a--g7")
+    h = od.handle(root, sig, declared={})
+    before = root.mix.live.read_bytes()
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "4")
+    assert od.fold(root, [h]) is None
+    assert h["meta"]["stage"] == "policy_canary_missing"
+    assert root.mix.live.read_bytes() == before
+
+
+def test_storage_delay_cannot_publish_an_expired_policy_admission(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "0")
+    _signal(root)
+    _stub(monkeypatch)
+    sig = od._replay_signal(root, f"{RUN}/tw_a--g7")
+    h = od.handle(root, sig, declared={})
+    row = json.loads(root.mix.live.read_text())
+    h["meta"]["policy_canary"] = {
+        "ok": True,
+        "expires_at": time.time() - 1,
+        "candidate_sha256": content_hash(od.candidate_row(h["rewrite"].package, row, h["meta"])),
+    }
+    before = root.mix.live.read_bytes()
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "4")
+
+    assert od.fold(root, [h]) is None
+
+    assert h["status"] == "kept"
+    assert h["meta"]["stage"] == "policy_canary_expired"
+    assert h["meta"]["route"] == "invalid_signal"
+    assert root.mix.live.read_bytes() == before
+    assert not root.evolution.task("tw_a").rev(1).exists()
 
 
 def _root(tmp_path, monkeypatch, tmax: dict | None = None) -> layout.Root:
@@ -896,6 +1068,59 @@ def test_simplify_requires_explicit_opt_in(monkeypatch, value, enabled):
         importlib.reload(od)
         assert od.SIMPLIFY_ENABLED is enabled
     importlib.reload(od)
+
+
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_easier_min_scored_attempts_rejects_values_below_two(monkeypatch, value):
+    with monkeypatch.context() as env:
+        env.setenv("EVOLVE_EASIER_MIN_SCORED_ATTEMPTS", value)
+        with pytest.raises(
+            ValueError, match="EVOLVE_EASIER_MIN_SCORED_ATTEMPTS must be at least 2"
+        ):
+            importlib.reload(od)
+    importlib.reload(od)
+
+
+def test_easier_signal_requires_configured_scored_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    root = _root(tmp_path, monkeypatch)
+    first = _signal(root, direction="easier", n=4)
+    seen = _stub(monkeypatch)
+    monkeypatch.setattr(od, "EASIER_MIN_SCORED_ATTEMPTS", 16)
+
+    result = od.run_round(root, workers=1)
+
+    assert result["deferred"] == 1 and seen == []
+    line = _ledger(root)[0]
+    assert line["signal"] == first and line["outcome"] == "deferred"
+    assert line["reason"] == "only 4 scored attempts; need 16"
+
+    incomplete = _signal(
+        root,
+        group=8,
+        direction="easier",
+        created="20260904-190000Z",
+        n=16,
+    )
+    incomplete_path = root.run(RUN).signal("tw_a", 8)
+    incomplete_data = json.loads(incomplete_path.read_text())
+    incomplete_data["attempts"] = incomplete_data["attempts"][:-1]
+    layout.write_json_atomic(incomplete_path, incomplete_data)
+    result = od.run_round(root, workers=1)
+    assert result["deferred"] == 1 and seen == []
+    line = {entry["signal"]: entry for entry in _ledger(root)}[incomplete]
+    assert line["reason"] == "only 15 scored trace records for 16 attempts; need 16"
+
+    _signal(
+        root,
+        group=9,
+        direction="easier",
+        created="20260904-200000Z",
+        n=16,
+    )
+    result = od.run_round(root, workers=1)
+    assert result["handled"] == 1 and seen[0]["job"] == "easier"
 
 
 def test_a_deferred_signal_stays_deferred_when_the_switch_is_turned_on(

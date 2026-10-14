@@ -148,6 +148,67 @@ def test_invalid_generator_replica_count(monkeypatch):
         rl_grpo_qwen3_5_9b_tmax()
 
 
+@pytest.mark.parametrize("canary_k", [None, "0"])
+def test_policy_canary_recipe_is_opt_in(monkeypatch, canary_k):
+    from torchtitan.experiments.rl.controller import Controller
+
+    if canary_k is None:
+        monkeypatch.delenv("SWE_POLICY_CANARY_K", raising=False)
+    else:
+        monkeypatch.setenv("SWE_POLICY_CANARY_K", canary_k)
+    config = rl_grpo_qwen3_5_9b_tmax()
+    assert config._owner is Controller
+    assert not hasattr(config, "policy_canary")
+
+
+def test_policy_canary_recipe_preserves_training_config(monkeypatch):
+    from torchtitan.experiments.rl.examples.tmax.policy_canary_controller import (
+        PolicyCanaryController,
+    )
+
+    monkeypatch.setenv("TMAX_AGENT", "terminus")
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "0")
+    baseline = rl_grpo_qwen3_5_9b_tmax()
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "8")
+    monkeypatch.setenv("SWE_POLICY_CANARY_MAX_CONCURRENCY", "4")
+    monkeypatch.setenv("SWE_POLICY_CANARY_MAX_VERSION_SPAN", "5")
+    monkeypatch.setenv("SWE_POLICY_CANARY_TIMEOUT_SEC", "7200")
+    monkeypatch.setenv("SWE_POLICY_CANARY_POLL_SEC", "10")
+    monkeypatch.setenv("TRL_BASE", "/data/experiment")
+
+    config = rl_grpo_qwen3_5_9b_tmax()
+
+    assert isinstance(config, PolicyCanaryController.Config)
+    assert config._owner is PolicyCanaryController
+    assert config.policy_canary.group_size == 8
+    assert config.policy_canary.max_concurrency == 4
+    assert config.policy_canary.max_version_span == 5
+    assert config.policy_canary.timeout_sec == 7200
+    assert config.policy_canary.poll_sec == 10
+    assert config.policy_canary_root == "/data/experiment"
+    assert config.trainer == baseline.trainer
+    assert config.generator == baseline.generator
+    assert config.async_loop == baseline.async_loop
+    assert config.rollouter == baseline.rollouter
+
+
+@pytest.mark.parametrize("root", ("", "relative/root"))
+def test_policy_canary_requires_an_absolute_root(monkeypatch, root):
+    monkeypatch.setenv("TMAX_AGENT", "terminus")
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "8")
+    monkeypatch.setenv("TRL_BASE", root)
+    with pytest.raises(ValueError, match="absolute experiment root"):
+        rl_grpo_qwen3_5_9b_tmax()
+
+
+def test_policy_canary_requires_terminus(monkeypatch):
+    monkeypatch.setenv("TMAX_AGENT", "vanillux")
+    monkeypatch.setenv("SWE_POLICY_CANARY_K", "8")
+    monkeypatch.setenv("TRL_BASE", "/data/experiment")
+    with pytest.raises(ValueError, match="training Terminus scaffold"):
+        rl_grpo_qwen3_5_9b_tmax()
+
+
 @pytest.mark.parametrize("override,expected", [(None, 1.0), ("0.9", 0.9)])
 def test_evolution_harder_ratio_env(monkeypatch, override, expected):
     if override is None:

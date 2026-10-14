@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -684,6 +685,15 @@ def _done(
     return rec
 
 
+def _restart_for_spec_repair(rewrite: layout.RewriteDir, seed_dir: Path) -> None:
+    """Keep the declined attempt, then repair a clean copy of the input revision."""
+    declined = rewrite.path / "declined-simplify"
+    rewrite.package.rename(declined)
+    shutil.copytree(seed_dir, rewrite.package)
+    if (declined / "traces").exists():
+        (declined / "traces").rename(rewrite.traces)
+
+
 def _failed(rec: dict, *, stage: str, error: Exception) -> dict:
     """Record structured agent-process details when an exception carries them."""
     if failure_type := getattr(error, "failure_type", None):
@@ -788,6 +798,7 @@ def process_one(
         # the input revision before anything here is rewritten.
         baseline = seed_literals(task, seed_dir)
         rec["action"] = "simplify" if job == "easier" else "evolve"
+        rec["route"] = rec["action"]
 
         if job == "easier":  # 0/k -> easier
             # SWE_SIMPLIFY_HINT selects how much guidance a simplify may write
@@ -806,14 +817,38 @@ def process_one(
                     deadline=deadline,
                 )
             except ec.Blocked as e:
+                if str(e).startswith("BLOCKED: invalid_signal:"):
+                    rec["route"] = rec["action"] = "invalid_signal"
+                    return _done(
+                        rec, "kept", stage="invalid_signal",
+                        reason=getattr(e, "report", str(e)),
+                    )
                 if not str(e).startswith("BLOCKED: repair_required:"):
                     return _done(rec, "kept", stage="agent", reason=str(e))
                 report = (work / "run" / "verdict.txt").read_text()
                 rec["spec_repair"] = {"reported": report}
-                return _done(rec, "kept", stage="repair_required", reason=report)
+                rec["route"] = "repair_spec"
+                if os.environ.get("EVOLVE_SPEC_REPAIR", "0") != "1":
+                    return _done(rec, "kept", stage="repair_required", reason=report)
+                rec["action"] = "repair_spec"
+                rec["family"] = "spec_repair"
+                try:
+                    _restart_for_spec_repair(rewrite, seed_dir)
+                    new = ec.evolve_agentic(
+                        rewrite, task, "repair_spec", observed=report,
+                        deadline=deadline,
+                    )
+                    rec["spec_repair"]["declaration"] = new["_spec_repair"]
+                except ec.Blocked as error:
+                    return _done(
+                        rec, "kept", stage="spec_repair_declined", reason=str(error)
+                    )
+                except Exception as error:  # noqa: BLE001 -- leave the input unchanged
+                    return _failed(rec, stage="spec_repair_agent", error=error)
             except Exception as e:  # noqa: BLE001 -- the task stays as it is
                 return _failed(rec, stage="agent", error=e)
             rec["hint"] = new.get("_hint")
+            rec["agent_validated"] = new.get("_agent_validated")
             if new.get("_simplify"):
                 rec["simplify"] = new["_simplify"]
                 rec["family"] = new["_family"]

@@ -763,6 +763,78 @@ def test_an_unsolved_seed_does_not_bound_the_solution_length(tmp_path, monkeypat
     assert not verdict["ok"] and verdict["stage"] == "step_size"
 
 
+@pytest.mark.parametrize("validated", [True, False])
+def test_spec_repair_restarts_from_seed_and_does_not_simplify_again(
+    tmp_path, monkeypatch, validated
+):
+    rw, r0 = _rewrite(tmp_path, monkeypatch)
+    ec = _fake_ec()
+    report = "BLOCKED: repair_required: verifier requires an unspecified spelling"
+    calls = []
+
+    def simplify(rewrite, task, **kwargs):
+        calls.append("simplify")
+        (rewrite.package / "run").mkdir()
+        (rewrite.package / "run/verdict.txt").write_text(report)
+        (rewrite.package / "instruction.md").write_text("Unfinished simplification")
+        (rewrite.package / "environment/partial.txt").write_text("partial")
+        rewrite.traces.mkdir()
+        (rewrite.traces / "attempt-01.jsonl").write_text('{"reward": 0}\n')
+        raise ec.Blocked(report)
+
+    declaration = {
+        "diagnosis": "unstated exact spelling", "evidence": "attempt-01 turn 0",
+        "change": "check semantic error", "retained_skill": "handle a refresh error",
+        "validation": "valid and invalid implementations graded independently",
+    }
+
+    def repair(rewrite, task, job, **kwargs):
+        calls.append(job)
+        assert job == "repair_spec" and kwargs["observed"] == report
+        assert kwargs["deadline"].expires_at == 10**12
+        assert (rewrite.package / "instruction.md").read_text() == SEED["instruction"]
+        assert not (rewrite.package / "environment/partial.txt").exists()
+        assert not (rewrite.package / "run/verdict.txt").exists()
+        assert (rewrite.traces / "attempt-01.jsonl").is_file()
+        assert (rewrite.path / "declined-simplify/run/verdict.txt").read_text() == report
+        return {**task, "test_state_py": "assert semantic_error()\n", "_spec_repair": declaration}
+
+    def validate(work, task, **kwargs):
+        calls.append("validate")
+        assert task["_spec_repair"] == declaration and "_simplify" not in task
+        return {"ok": validated, "stage": "daytona_oracle", "why": "oracle failed"}
+
+    ec.simplify_codex, ec.evolve_agentic = simplify, repair
+    monkeypatch.setitem(sys.modules, "evolve_codex", ec)
+    monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
+    monkeypatch.setenv("EVOLVE_SPEC_REPAIR", "1")
+    monkeypatch.setattr(fb, "revalidate", validate)
+    rec = fb.process_one(rw, {**SIGNAL, "solved": 0}, job="easier", seed_dir=r0)
+    assert calls == ["simplify", "repair_spec", "validate"]
+    assert rec["status"] == ("accepted" if validated else "rejected")
+    assert rec["route"] == rec["action"] == "repair_spec"
+    assert rec["spec_repair"]["declaration"] == declaration
+    assert "simplify" not in rec
+
+
+def test_invalid_signal_never_starts_spec_repair(tmp_path, monkeypatch):
+    rw, r0 = _rewrite(tmp_path, monkeypatch)
+    ec = _fake_ec()
+
+    def decline(*args, **kwargs):
+        raise ec.Blocked("BLOCKED: invalid_signal: all attempts lost their sandbox")
+
+    ec.simplify_codex = decline
+    ec.evolve_agentic = lambda *a, **k: pytest.fail("invalid evidence started repair")
+    monkeypatch.setitem(sys.modules, "evolve_codex", ec)
+    monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
+    monkeypatch.setenv("EVOLVE_SPEC_REPAIR", "1")
+    monkeypatch.setattr(fb, "revalidate", lambda *a, **k: pytest.fail("invalid evidence was validated"))
+    rec = fb.process_one(rw, {**SIGNAL, "solved": 0}, job="easier", seed_dir=r0)
+    assert rec["route"] == rec["action"] == rec["stage"] == "invalid_signal"
+    assert rec["status"] == "kept"
+
+
 def test_final_size_gate_uses_student_mode(tmp_path, monkeypatch):
     work, task = _pkg(tmp_path, SEED["instruction"], SEED["test_state_py"])
     task.update(solve_sh=SEED["solve_sh"], _direction="harder", _harder_mode="student")

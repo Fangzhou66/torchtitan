@@ -567,6 +567,24 @@ def rl_grpo_qwen3_5_9b_tmax(
     """
     config = _swe_9b()
     config.rollouter = _tmax_rollouter(validation_from_caller=validation_from_caller)
+    from torchtitan.experiments.rl.examples.tmax.policy_canary import PolicyCanaryConfig
+
+    canary = PolicyCanaryConfig.from_env()
+    if canary.group_size:
+        from torchtitan.experiments.rl.examples.tmax.policy_canary_controller import (
+            PolicyCanaryController,
+        )
+
+        # Wrap before the recipe overrides: Controller.Config.__post_init__ mutates
+        # nested trainer settings and would otherwise change a completed recipe.
+        config = PolicyCanaryController.Config(
+            **{
+                field.name: getattr(config, field.name)
+                for field in dataclasses.fields(config)
+            },
+            policy_canary=canary,
+            policy_canary_root=os.environ.get("TRL_BASE", ""),
+        )
     assert config.model_spec is not None
     _set_max_seq_len(config.model_spec, _TMAX_9B_CONTEXT)
     # Interleaved thinking: keep each turn's <think> in later prompts (the tmax

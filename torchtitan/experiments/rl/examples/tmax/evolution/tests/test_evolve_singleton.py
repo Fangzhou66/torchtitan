@@ -23,7 +23,7 @@ from torchtitan.experiments.rl.examples.tmax import layout
 SCRIPT = Path(od.__file__).resolve()
 # The loop imports layout through the torchtitan package, so the child needs
 # the repository root importable the way the loop's PYTHONPATH=$TRL_TT has it.
-REPO = Path(__file__).resolve().parents[6]
+REPO = Path(__file__).resolve().parents[7]
 
 
 def _env(root: layout.Root) -> dict[str, str]:
