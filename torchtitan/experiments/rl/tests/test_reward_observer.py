@@ -41,6 +41,7 @@ def row(task="a", rev=0, epoch=0, group=0, scored=4, solved=2, revision="same"):
         rev=rev,
         epoch=epoch,
         group=group,
+        group_key=f"None:{group}",
         scored=scored,
         solved=solved,
         reward_sum=solved,
@@ -798,6 +799,67 @@ class RewardObserverTest(unittest.TestCase):
             (task / "g0-r0.jsonl").unlink()
             cached, _ = observer.collect(root, run, output)
             self.assertEqual(cached, rows)
+
+    def test_observes_a_run_across_controller_attempts(self):
+        # isolate_rollout_artifacts: a restart reuses group 0 under a new lineage
+        # session and writes its rollouts to its own attempt directory.
+        with tempfile.TemporaryDirectory() as directory:
+            root = observer.layout.Root(Path(directory))
+            run = root.run("test")
+            output = Path(directory) / "observer"
+            output.mkdir()
+            records = []
+            for session, epoch, rev, rewards, stamp in [
+                ("sa", 0, 0, [0, 0], "2026-01-01T00:00:00Z"),
+                ("sb", 1, 1, [1, 1], "2026-01-01T00:02:00Z"),
+            ]:
+                common = dict(
+                    group_id=0,
+                    session_id=session,
+                    task_id="a",
+                    occurrence_id=f"{session}:0",
+                    sample_revision=f"hash{rev}",
+                    dataset_epoch=epoch,
+                    generator_policy_version=epoch,
+                    timestamp=stamp,
+                )
+                records += [
+                    dict(common, event="admitted"),
+                    dict(common, event="claimed"),
+                    dict(common, event="finalized", num_rollouts=2),
+                    dict(common, event="trained", train_step=10 + epoch),
+                ]
+                attempt = run.for_attempt(f"20260101-00000{epoch}Z--{session}")
+                for index, reward in enumerate(rewards):
+                    record = attempt.rollout_record("a", 0, index)
+                    record.parent.mkdir(parents=True, exist_ok=True)
+                    record.write_text(
+                        json.dumps(dict(task="a", rev=rev, group=0, reward=reward))
+                        + "\n"
+                    )
+            events = run.trainer / "training_lineage/events.jsonl"
+            events.parent.mkdir(parents=True)
+            events.write_text("".join(json.dumps(e) + "\n" for e in records))
+            rows, _ = observer.collect(root, run, output)
+            self.assertEqual(
+                sorted((r["group_key"], r["solved"]) for r in rows),
+                [("sa:0", 0), ("sb:0", 2)],
+            )
+            folds = [
+                {
+                    "task": "a",
+                    "stamp": "20260101-000100Z",
+                    "from_rev": 0,
+                    "to_rev": 1,
+                    "rewrite": "rewrites/one",
+                }
+            ]
+            result = observer.observe_lineage.build(
+                root, run, rows, folds, records, output
+            )
+            [comparison] = result["comparisons"]
+            self.assertEqual((comparison["before"], comparison["after"]), (0.0, 1.0))
+            self.assertEqual(comparison["after_step"], 11)
 
     def test_source_url_discovery(self):
         with tempfile.TemporaryDirectory() as directory:

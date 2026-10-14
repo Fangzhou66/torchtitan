@@ -21,6 +21,11 @@ import layout
 LOG = logging.getLogger("observe_rewards")
 
 
+def group_key(event: dict) -> str:
+    """A group across controller attempts: ids restart with each lineage session."""
+    return f"{event.get('session_id')}:{event['group_id']}"
+
+
 def milliseconds(value: str | None) -> float | None:
     if not value:
         return None
@@ -141,12 +146,12 @@ def build(
     """Keep missing next observations missing; timestamps alone do not prove adoption."""
     cache = output / "trace-evidence"
     cache.mkdir(exist_ok=True)
-    by_group = {r["group"]: r for r in rows}
+    by_group = {r["group_key"]: r for r in rows}
     admissions = {}
     trained = {}
     epoch_starts = {}
     finalized = {
-        e["group_id"]: milliseconds(e["timestamp"])
+        group_key(e): milliseconds(e["timestamp"])
         for e in events
         if e.get("event") == "finalized"
     }
@@ -164,7 +169,7 @@ def build(
         kind = event.get("event")
         if kind not in {"admitted", "trained"}:
             continue
-        group = event["group_id"]
+        group = group_key(event)
         instant = milliseconds(event["timestamp"])
         if kind == "admitted":
             admissions[group] = event
@@ -194,7 +199,7 @@ def build(
                 if row.get("scored")
                 else None,
                 "evidence": "",
-                "source": f"group {group}",
+                "source": f"group {event['group_id']}",
             }
         )
     for epoch, instant in epoch_starts.items():
@@ -222,7 +227,8 @@ def build(
             if not rewrite.meta.exists():
                 continue
             meta = json.loads(rewrite.meta.read_text())
-            if not str(meta.get("signal", "")).startswith(run.name + "/"):
+            name, slash, _ = str(meta.get("signal", "")).partition("/")
+            if not slash or layout.Run(run.path.with_name(name)).base != run.base:
                 continue
             LOG.info(
                 "rewrite start task=%s rewrite=%s", task.task_id, rewrite.path.name
@@ -265,8 +271,8 @@ def build(
             if r["task"] == tid
             and r["rev"] == fold["from_rev"]
             and r["scored"]
-            and r["group"] in admissions
-            and finalized.get(r["group"], float("inf")) < instant
+            and r["group_key"] in admissions
+            and finalized.get(r["group_key"], float("inf")) < instant
         ]
         new = [
             r
@@ -274,11 +280,16 @@ def build(
             if r["task"] == tid
             and r["rev"] == fold["to_rev"]
             and r["scored"]
-            and r["group"] in admissions
-            and milliseconds(admissions[r["group"]]["timestamp"]) >= instant
+            and r["group_key"] in admissions
+            and milliseconds(admissions[r["group_key"]]["timestamp"]) >= instant
         ]
-        before = max(old, key=lambda r: r["group"]) if old else None
-        after = min(new, key=lambda r: r["group"]) if new else None
+
+        # Group ids restart with each controller attempt; admission time orders them.
+        def admitted(r):
+            return milliseconds(admissions[r["group_key"]]["timestamp"])
+
+        before = max(old, key=admitted) if old else None
+        after = min(new, key=admitted) if new else None
         timeline.append(
             {
                 "task": tid,
@@ -307,7 +318,9 @@ def build(
                     "after_n": after["scored"],
                     "before_group": before["group"],
                     "after_group": after["group"],
-                    "after_step": trained.get(after["group"], {}).get("train_step"),
+                    "after_step": trained.get(after["group_key"], {}).get(
+                        "train_step"
+                    ),
                 }
             )
         else:
