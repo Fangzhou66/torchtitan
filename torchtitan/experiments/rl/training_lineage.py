@@ -71,6 +71,7 @@ class TrainingLineageRecorder:
         self.events_path = self.root / "events.jsonl"
         self.samples_path = self.root / "samples.jsonl"
         self.optimization_complete_path = self.root / "optimization_complete.json"
+        self.training_activity_path = self.root / "training_activity.json"
         self.session_id = uuid.uuid4().hex
         self._sequence = 0
         self._known_sample_revisions = self._read_known_sample_revisions()
@@ -188,15 +189,28 @@ class TrainingLineageRecorder:
             "policy_version": policy_version,
             "requested_training_steps": requested_training_steps,
         }
-        temporary = self.root / (
-            f".{self.optimization_complete_path.name}.{uuid.uuid4().hex}.tmp"
+        self._atomic_snapshot(self.optimization_complete_path, record)
+
+    def record_training_activity(self, *, phase: str, policy_version: int) -> None:
+        """Heartbeat for consumers that must pause during controller restarts."""
+        self._atomic_snapshot(
+            self.training_activity_path,
+            {
+                "session_id": self.session_id,
+                "phase": phase,
+                "policy_version": policy_version,
+                "time_unix_ns": time.time_ns(),
+            },
         )
+
+    def _atomic_snapshot(self, path: Path, record: dict[str, Any]) -> None:
+        temporary = self.root / f".{path.name}.{uuid.uuid4().hex}.tmp"
         try:
             with temporary.open("x") as output:
                 output.write(canonical_json(record) + "\n")
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, self.optimization_complete_path)
+            os.replace(temporary, path)
         finally:
             try:
                 temporary.unlink()

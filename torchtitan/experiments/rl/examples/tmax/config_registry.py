@@ -938,6 +938,7 @@ def rl_grpo_qwen3_5_9b_tmax(
         ),
         initial_policy_version=int(os.environ.get("SWE_INITIAL_POLICY_VERSION", "0")),
     )
+    config.training_heartbeat_interval_sec = 30
     # Optional trainer FSDP width override for a fwd/bwd speed experiment. The mast_rl
     # launcher derives the trainer host count from data_parallel_shard_degree, so
     # SWE_DP_SHARD=16 -> 2 trainer hosts (FSDP-16), spreading the packed rows across
