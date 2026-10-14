@@ -421,6 +421,28 @@ def test_drain_pulls_idle_generators_while_busy_generator_drains():
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("hot_swap", [False, True])
+def test_failed_pull_waits_for_sibling_pulls_before_raising(hot_swap):
+    async def _run():
+        failing = _Actor("gen0", raises_pull=True)
+        slow = _Actor("gen1", wait_pull=True)
+        router = _router([failing, slow], hot_swap=hot_swap)
+
+        pull_task = asyncio.create_task(router.pull_model_state_dict(policy_version=4))
+        await slow.pull_model_state_dict.started.wait()
+        await asyncio.sleep(0)
+        # gen0 has already failed; the error must not surface while gen1's pull is
+        # still in flight, or a retrying caller abandons it mid-call.
+        assert not pull_task.done()
+
+        slow.pull_model_state_dict.release.set()
+        with pytest.raises(RuntimeError, match="endpoint failed"):
+            await pull_task
+        assert slow.pull_model_state_dict.calls == [((4,), {})]
+
+    asyncio.run(_run())
+
+
 def test_hot_swap_keeps_generators_serving_during_pull():
     async def _run():
         actor = _Actor("gen0", wait_pull=True)

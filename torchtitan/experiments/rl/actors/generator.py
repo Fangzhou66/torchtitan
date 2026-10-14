@@ -14,6 +14,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import Any, Literal
 
 import cloudpickle
@@ -1401,7 +1402,14 @@ class VLLMGenerator(Actor, Configurable):
 
         # --- Continuous-batching state (see the class docstring) ---
         self._rank = dist.get_rank()
-        self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
+        # For LoopDecisions. While rank 0 has no work it waits on the condition and
+        # the other ranks sit in broadcast_object_list, so an idle generator (an eval
+        # generator between passes) must not hit gloo's default 30-minute timeout,
+        # which kills the engine loop. A crashed peer still fails fast on the closed
+        # connection, so the long timeout does not hide real failures.
+        self._broadcast_group = dist.new_group(
+            backend="gloo", timeout=timedelta(days=7)
+        )
         self._dp_weight_broadcaster: DPWeightBroadcaster | None = None
         if config.enable_dp_weight_broadcast:
             unsupported_reason = dp_weight_broadcast_unsupported_reason(

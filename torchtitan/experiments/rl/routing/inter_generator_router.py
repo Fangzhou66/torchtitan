@@ -244,5 +244,13 @@ class InterGeneratorRouter(Configurable):
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during weight sync, but that's not a priority
-        # for now.
-        await asyncio.gather(*[_pull_one(h) for h in self._generators])
+        # for now. Let every pull settle before raising: a plain gather returns
+        # on the first failure and abandons the sibling pulls, and a caller that
+        # retries then has those calls cancelled inside the generator actors, which
+        # Monarch treats as the actor aborting.
+        results = await asyncio.gather(
+            *[_pull_one(h) for h in self._generators], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
