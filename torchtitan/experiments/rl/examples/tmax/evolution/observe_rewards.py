@@ -84,42 +84,47 @@ def collect(
     root: layout.Root, run: layout.Run, output: Path, task_filter: str | None = None
 ) -> tuple[list[dict], list[dict]]:
     events = read_events(run.trainer / "training_lineage/events.jsonl")
+    # Each controller attempt restarts group ids and writes its rollouts under
+    # its own runs/<name>--attempt-*; its lineage session tells them apart.
+    sources = {attempt.session_id: attempt for attempt in run.attempts()}
     claimed = {}
     finalized = {}
     for event in events:
         if event.get("event") not in {"claimed", "finalized"}:
             continue
         target = claimed if event["event"] == "claimed" else finalized
-        key = event["group_id"]
+        key = observe_lineage.group_key(event)
         if key in target and target[key].get("occurrence_id") != event.get(
             "occurrence_id"
         ):
-            raise ValueError(
-                f"reused group id {key}; observe each trainer lifetime separately"
-            )
+            raise ValueError(f"reused group {key} within one lineage session")
         target[key] = event
     cache = output / "groups"
     cache.mkdir(exist_ok=True)
     rows = []
-    for group, event in sorted(finalized.items()):
+    for group_key, event in finalized.items():
         if task_filter and event["task_id"] != task_filter:
             continue
         started = time.monotonic()
         task = event["task_id"]
+        group = event["group_id"]
         key = hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()
         path = cache / f"{group}-{key}.json"
         if path.exists():
-            rows.append(json.loads(path.read_text())["row"])
+            # Rows cached before group_key existed are keyed again here.
+            rows.append({**json.loads(path.read_text())["row"], "group_key": group_key})
             continue
         LOG.info(
             "start task=%s group=%s finalized=%s", task, group, event.get("timestamp")
         )
-        claim = claimed.get(group)
+        claim = claimed.get(group_key)
         if claim is None:
             raise ValueError(f"no claim for finalized group {group}")
         headers = []
         for record in sorted(
-            (run.rollouts / layout.safe(task)).glob(f"g{group}-r*.jsonl")
+            (sources.get(event.get("session_id"), run).rollouts / layout.safe(task)).glob(
+                f"g{group}-r*.jsonl"
+            )
         ):
             with record.open() as stream:
                 header = json.loads(stream.readline())
@@ -150,6 +155,7 @@ def collect(
             "task": task,
             "rev": revisions.pop(),
             "group": group,
+            "group_key": group_key,
             "epoch": claim["dataset_epoch"],
             "sample_revision": event["sample_revision"],
             "policy_at_claim": claim["generator_policy_version"],
