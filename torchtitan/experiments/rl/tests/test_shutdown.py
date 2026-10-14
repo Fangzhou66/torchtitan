@@ -105,6 +105,7 @@ def _make_stub_rl_trainer():
 
     class _StubConfig:
         async_loop = AsyncLoopConfig()
+        isolate_rollout_artifacts = False
         metrics = m.MetricsProcessor.Config()
         dump_folder = "/tmp/test_rl"
         rollout_recorder = RolloutSampleRecorder.Config()

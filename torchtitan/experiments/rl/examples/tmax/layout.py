@@ -367,7 +367,21 @@ class Run:
     @classmethod
     def from_env(cls) -> "Run | None":
         d = os.environ.get("TRL_RUN_DIR")
-        return cls(Path(d)) if d else None
+        if not d:
+            return None
+        run = cls(Path(d))
+        attempt_id = os.environ.get("TRL_ROLLOUT_ATTEMPT_ID")
+        return run.for_attempt(attempt_id) if attempt_id else run
+
+    def for_attempt(self, attempt_id: str) -> "Run":
+        """Namespace replayed group IDs without moving checkpoints or W&B files.
+
+        Attempt directories are siblings so the evolution loop discovers signals
+        from both old and new controller lifetimes using its normal run scan.
+        """
+        if not attempt_id or safe(attempt_id) != attempt_id:
+            raise ValueError("attempt_id must be a nonempty, safe path segment")
+        return Run(self.path.with_name(f"{self.name}--attempt-{attempt_id}"))
 
     @property
     def name(self) -> str:
