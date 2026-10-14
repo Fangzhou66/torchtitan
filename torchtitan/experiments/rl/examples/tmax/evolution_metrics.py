@@ -6,8 +6,10 @@
 
 """Run-scoped evolution flow, sampled at each training step.
 
-Every value is cumulative for this training run and counted when the trainer
-observes it. Three of them form a cumulative flow diagram over training steps:
+Every value is cumulative for this training run, across its controller
+attempts (``runs/<name>--attempt-*`` hold each lifetime's signals and outcomes;
+``runs/<name>/trainer`` holds the lineage of all of them), and counted when the
+trainer observes it. Three of them form a cumulative flow diagram over training steps:
 `signals_issued` (the trainer wrote the signal), `signals_consumed` (the loop
 wrote its ledger decision) and `rewrites_accepted` (a rewrite was accepted,
 which means folded into the mix). At one step, the vertical gap between issued
@@ -80,12 +82,16 @@ def _new_lines(path: Path, offset: int) -> tuple[list[dict], int]:
 class EvolutionMetrics:
     def __init__(self, run: layout.Run, root: layout.Root) -> None:
         self.run = run
+        self.base = run.base
         self.root = root
         self.claim_offset = 0
         self.ledger_offset = 0
-        self.outcome_offset = 0
+        self.outcome_offsets: dict[str, int] = {}
         # The policy version at group claim is the step a signal was issued at.
-        self.claimed_origin: dict[int, int] = {}
+        # Group ids restart with every controller attempt, so a claim is keyed by
+        # its lineage session; (None, group) is the latest claim of that group,
+        # for a run without attempts.
+        self.claimed_origin: dict[tuple[str | None, int], int] = {}
         self.issued: dict[str, int] = {}
         self.closed: dict[str, str] = {}
         self.rewrites: set[str] = set()
@@ -99,7 +105,7 @@ class EvolutionMetrics:
         self.train_latencies: list[int] = []
         # Staleness: every claim by task, each signal's revision and lifetime.
         self.claims: dict[str, list[tuple[float, str, str]]] = {}
-        self.group_revision: dict[int, str] = {}
+        self.group_revision: dict[tuple[str | None, int], str] = {}
         self.signal_span: dict[str, tuple[str, str, float]] = {}
         self.closed_at: dict[str, float] = {}
         self.rewrite_started: dict[str, float] = {}
@@ -109,7 +115,7 @@ class EvolutionMetrics:
 
     def _poll_claims(self) -> None:
         events, self.claim_offset = _new_lines(
-            self.run.trainer / "training_lineage/events.jsonl", self.claim_offset
+            self.base.trainer / "training_lineage/events.jsonl", self.claim_offset
         )
         for event in events:
             if event["event"] == "trained" and "sample_revision" in event:
@@ -121,12 +127,13 @@ class EvolutionMetrics:
                     )
                 )
             if event["event"] == "claimed":
-                self.claimed_origin[event["group_id"]] = event[
-                    "generator_policy_version"
-                ]
+                keys = ((event.get("session_id"), event["group_id"]), (None, event["group_id"]))
+                for key in keys:
+                    self.claimed_origin[key] = event["generator_policy_version"]
                 # Lineage written before claims carried their sample is skipped.
                 if "sample_revision" in event and "task_id" in event:
-                    self.group_revision[event["group_id"]] = event["sample_revision"]
+                    for key in keys:
+                        self.group_revision[key] = event["sample_revision"]
                     self.claims.setdefault(event["task_id"], []).append(
                         (
                             event["time_unix_ns"] / 1e9,
@@ -136,22 +143,27 @@ class EvolutionMetrics:
                     )
 
     def _poll_signals(self) -> None:
-        for path in self.run.signal_files():
-            identity = f"{self.run.name}/{path.stem}"
-            if identity in self.issued:
-                continue
-            signal = json.loads(path.read_text())
-            origin = self.claimed_origin.get(signal["group"])
-            # Counted once its claim is visible, so its issue step is known.
-            if origin is not None:
-                self.issued[identity] = origin
-                revision = self.group_revision.get(signal["group"])
-                if revision is not None and signal.get("created"):
-                    self.signal_span[identity] = (
-                        signal["task"],
-                        revision,
-                        layout.parse_stamp(signal["created"]),
-                    )
+        for attempt in self.base.attempts():
+            for path in attempt.signal_files():
+                self._poll_signal(attempt, path)
+
+    def _poll_signal(self, attempt: layout.Run, path: Path) -> None:
+        identity = f"{attempt.name}/{path.stem}"
+        if identity in self.issued:
+            return
+        signal = json.loads(path.read_text())
+        key = (attempt.session_id, signal["group"])
+        origin = self.claimed_origin.get(key)
+        # Counted once its claim is visible, so its issue step is known.
+        if origin is not None:
+            self.issued[identity] = origin
+            revision = self.group_revision.get(key)
+            if revision is not None and signal.get("created"):
+                self.signal_span[identity] = (
+                    signal["task"],
+                    revision,
+                    layout.parse_stamp(signal["created"]),
+                )
 
     def _poll_ledger(self) -> None:
         events, self.ledger_offset = _new_lines(
@@ -159,15 +171,24 @@ class EvolutionMetrics:
         )
         for event in events:
             signal = event.get("signal", "")
-            if signal.startswith(f"{self.run.name}/"):
+            if self._ours(signal):
                 self.closed[signal] = event["outcome"]
                 if event.get("stamp"):
                     self.closed_at.setdefault(signal, layout.parse_stamp(event["stamp"]))
 
+    def _ours(self, signal: str) -> bool:
+        """A signal id names the attempt directory that issued it."""
+        name, slash, _ = signal.partition("/")
+        return bool(slash) and layout.Run(self.base.path.with_name(name)).base == self.base
+
     def _poll_outcomes(self, step: int | None) -> None:
-        events, self.outcome_offset = _new_lines(
-            self.root.evolution.run_outcomes(self.run.name), self.outcome_offset
-        )
+        events = []
+        for attempt in self.base.attempts():
+            new, self.outcome_offsets[attempt.name] = _new_lines(
+                self.root.evolution.run_outcomes(attempt.name),
+                self.outcome_offsets.get(attempt.name, 0),
+            )
+            events += new
         for event in events:
             if event["rewrite"] in self.rewrites:
                 continue

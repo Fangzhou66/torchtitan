@@ -2003,8 +2003,10 @@ class Controller(Configurable):
                 "evolution/observer_url"
             ):
                 try:
+                    # launch_9b.sh starts the observer on runs/<name>, not on
+                    # this controller's attempt directory.
                     observer = json.loads(
-                        (run.path / "observer/wandb.json").read_text()
+                        (run.base.path / "observer/wandb.json").read_text()
                     )
                 except FileNotFoundError:
                     pass
