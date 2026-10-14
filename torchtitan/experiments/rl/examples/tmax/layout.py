@@ -26,6 +26,8 @@ from pathlib import Path
 
 STAMP_FMT = "%Y%m%d-%H%M%SZ"
 RUN_PREFIX = "tmax-9b"
+# runs/<name><_ATTEMPT><attempt id>: one controller lifetime of runs/<name>.
+_ATTEMPT = "--attempt-"
 _SAFE = re.compile(r"[^A-Za-z0-9._+=@-]")
 _VERSION = re.compile(r"^v(\d+)--(\d{8}-\d{6}Z)\.jsonl$")
 
@@ -381,7 +383,31 @@ class Run:
         """
         if not attempt_id or safe(attempt_id) != attempt_id:
             raise ValueError("attempt_id must be a nonempty, safe path segment")
-        return Run(self.path.with_name(f"{self.name}--attempt-{attempt_id}"))
+        return Run(self.path.with_name(f"{self.name}{_ATTEMPT}{attempt_id}"))
+
+    @property
+    def base(self) -> "Run":
+        """The run an attempt directory belongs to: it holds trainer/ and W&B."""
+        name, attempt, _ = self.name.partition(_ATTEMPT)
+        return Run(self.path.with_name(name)) if attempt else self
+
+    @property
+    def session_id(self) -> str | None:
+        """The lineage session that wrote an attempt directory; the controller
+        names attempts ``<stamp>--<session_id>``."""
+        _, attempt, attempt_id = self.name.partition(_ATTEMPT)
+        return attempt_id.rsplit("--", 1)[-1] if attempt else None
+
+    def attempts(self) -> list["Run"]:
+        """The base run, then every attempt directory of it, oldest first."""
+        base = self.base
+        prefix = f"{base.name}{_ATTEMPT}"
+        siblings = base.path.parent
+        return [base] + [
+            Run(p)
+            for p in (sorted(siblings.iterdir()) if siblings.exists() else [])
+            if p.is_dir() and p.name.startswith(prefix)
+        ]
 
     @property
     def name(self) -> str:

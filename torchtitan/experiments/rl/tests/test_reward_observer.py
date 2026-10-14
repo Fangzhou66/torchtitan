@@ -161,8 +161,14 @@ class RewardObserverTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "runs/test"
+            # The controller runs as an attempt; the observer link stays in runs/test.
             with patch.dict(
-                observer.os.environ, {"TRL_BASE": directory, "TRL_RUN_DIR": str(run)}
+                observer.os.environ,
+                {
+                    "TRL_BASE": directory,
+                    "TRL_RUN_DIR": str(run),
+                    "TRL_ROLLOUT_ATTEMPT_ID": "20261011-000000Z--sa",
+                },
             ):
                 with patch.dict(
                     sys.modules,
@@ -308,6 +314,64 @@ class RewardObserverTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(ys, [[3, 4], [0, 3], [0, 1], [0, 0]])
+
+    def test_flow_spans_controller_attempts_and_survives_a_restart(self):
+        # isolate_rollout_artifacts: each controller lifetime writes its signals
+        # and outcomes under runs/<name>--attempt-<stamp>--<session>, reuses group
+        # ids from 0, and appends its claims to the one lineage in runs/<name>.
+        with tempfile.TemporaryDirectory() as directory:
+            root = observer.layout.Root(Path(directory))
+            stable = root.run("training")
+            first = stable.for_attempt("20261011-000000Z--sa")
+            second = stable.for_attempt("20261011-010000Z--sb")
+
+            def issue(attempt, session, task, group, origin):
+                observer.layout.append_jsonl(
+                    stable.trainer / "training_lineage/events.jsonl",
+                    {
+                        "event": "claimed",
+                        "session_id": session,
+                        "group_id": group,
+                        "generator_policy_version": origin,
+                    },
+                )
+                observer.layout.write_json_atomic(
+                    attempt.signal(task, group), {"task": task, "group": group}
+                )
+                return observer.layout.signal_id(attempt.name, task, group)
+
+            a = issue(first, "sa", "a", 0, origin=0)
+            observer.layout.append_jsonl(
+                root.evolution.ledger, {"signal": a, "outcome": "handled"}
+            )
+            self._record_outcome(root, a, "a", "accepted", name="a")
+            before = outcome_metrics.EvolutionMetrics(first, root).poll(step=2)
+            self.assertEqual(before["evolution/flow/signals_issued"], 1)
+            self.assertEqual(before["evolution/flow/signals_consumed"], 1)
+            self.assertEqual(before["evolution/flow/rewrites_accepted"], 1)
+
+            # The restart reuses group 0; its claim must not stand in for the
+            # first attempt's, and the counts carry on instead of starting at 0.
+            b = issue(second, "sb", "b", 0, origin=5)
+            metrics = outcome_metrics.EvolutionMetrics(second, root)
+            after = metrics.poll(step=6)
+            self.assertEqual(after["evolution/flow/signals_issued"], 2)
+            self.assertEqual(after["evolution/flow/signals_consumed"], 1)
+            self.assertEqual(after["evolution/flow/rewrites_accepted"], 1)
+            self.assertEqual(metrics.issued, {a: 0, b: 5})
+
+            observer.layout.append_jsonl(
+                root.evolution.ledger, {"signal": b, "outcome": "handled"}
+            )
+            observer.layout.append_jsonl(
+                root.evolution.ledger,
+                {"signal": "training-other--attempt-x--sb/b--g0", "outcome": "junk"},
+            )
+            self._record_outcome(root, b, "b", "accepted", name="b")
+            last = metrics.poll(step=7)
+            self.assertEqual(last["evolution/flow/signals_consumed"], 2)
+            self.assertEqual(last["evolution/flow/rewrites_accepted"], 2)
+            self.assertEqual(last["evolution/signals/junk"], 0)
 
     def test_stale_counts_original_draws_while_a_rewrite_is_pending(self):
         stamp = observer.layout.stamp
