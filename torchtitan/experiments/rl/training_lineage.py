@@ -70,6 +70,7 @@ class TrainingLineageRecorder:
         self.root.mkdir(parents=True, exist_ok=True)
         self.events_path = self.root / "events.jsonl"
         self.samples_path = self.root / "samples.jsonl"
+        self.optimization_complete_path = self.root / "optimization_complete.json"
         self.session_id = uuid.uuid4().hex
         self._sequence = 0
         self._known_sample_revisions = self._read_known_sample_revisions()
@@ -172,3 +173,32 @@ class TrainingLineageRecorder:
         payload = dict(event)
         event_name = str(payload.pop("event"))
         self.record_event(event_name, **payload)
+
+    def record_optimization_complete(
+        self, *, policy_version: int, requested_training_steps: int
+    ) -> None:
+        """Atomically publish that the optimizer will perform no more steps."""
+        record = {
+            "schema_version": _SCHEMA_VERSION,
+            "record_type": "optimization_complete",
+            "event": "optimization_complete",
+            "timestamp": _utc_now(),
+            "time_unix_ns": time.time_ns(),
+            "session_id": self.session_id,
+            "policy_version": policy_version,
+            "requested_training_steps": requested_training_steps,
+        }
+        temporary = self.root / (
+            f".{self.optimization_complete_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with temporary.open("x") as output:
+                output.write(canonical_json(record) + "\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self.optimization_complete_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass

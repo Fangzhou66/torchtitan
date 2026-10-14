@@ -46,3 +46,19 @@ def test_recorder_appends_events_and_deduplicates_complete_inputs(tmp_path) -> N
     ]
     assert events[-1]["train_step"] == 9
     assert events[-1]["occurrence_id"] == lineage["occurrence_id"]
+
+
+def test_recorder_atomically_marks_optimization_complete(tmp_path) -> None:
+    recorder = TrainingLineageRecorder(dump_dir=str(tmp_path))
+
+    recorder.record_optimization_complete(
+        policy_version=150,
+        requested_training_steps=150,
+    )
+
+    marker = json.loads(recorder.optimization_complete_path.read_text())
+    assert marker["event"] == "optimization_complete"
+    assert marker["record_type"] == "optimization_complete"
+    assert marker["policy_version"] == 150
+    assert marker["requested_training_steps"] == 150
+    assert not list(recorder.root.glob(".optimization_complete.json.*.tmp"))
