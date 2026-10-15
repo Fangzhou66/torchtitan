@@ -935,6 +935,131 @@ def test_publish_archives_session_payload_directories(tmp_path, monkeypatch) -> 
     assert (durable.package / "tests" / "test_outputs.py").read_text() == "ok\n"
 
 
+def _local_rewrite(root, tmp_path, name="20260904-190000Z--harder"):
+    durable = layout.RewriteDir(root.evolution.task("tw_a").path / "rewrites" / name)
+    workspace = rw_workspace.prepare_rewrite(root, durable, tmp_path)
+    meta = {"task": "tw_a", "status": "running", "sessions": []}
+    layout.write_json_atomic(workspace.active.meta, meta)
+    workspace.claim(meta)
+    (workspace.active.package / "tests").mkdir(parents=True)
+    (workspace.active.package / "tests" / "test.sh").write_text("ok\n")
+    (workspace.active.package / "tests" / "test.sh").chmod(0o755)
+    return durable, workspace
+
+
+def test_publish_copies_in_place_and_sweeps_stale_staging(
+    tmp_path, monkeypatch
+) -> None:
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    durable, workspace = _local_rewrite(root, tmp_path)
+    (workspace.active.path / "auth.json").symlink_to(tmp_path / "private-auth.json")
+    # Staging copies crashed publications by an older version left: one of
+    # this rewrite, one of a rewrite that is no longer local.
+    rewrites = durable.path.parent
+    for stale in (
+        rewrites / f".{durable.path.name}.incoming-1-a" / "package",
+        rewrites / ".20260904-180000Z--easier.incoming-2-b" / "package",
+    ):
+        stale.mkdir(parents=True)
+        (stale / "instruction.md").write_text("stale\n")
+
+    assert [d.path for d in rw_workspace.recover(root)] == [durable.path]
+
+    assert sorted(p.name for p in rewrites.iterdir()) == [durable.path.name]
+    test_sh = durable.package / "tests" / "test.sh"
+    assert test_sh.read_text() == "ok\n" and os.access(test_sh, os.X_OK)
+    link = durable.path / "auth.json"
+    assert link.is_symlink() and os.readlink(link) == str(tmp_path / "private-auth.json")
+    assert not list(durable.path.rglob(".*incoming*"))
+
+
+def test_publish_cut_short_keeps_the_claim_until_recovered(
+    tmp_path, monkeypatch
+) -> None:
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    durable, workspace = _local_rewrite(root, tmp_path)
+    workspace.active.traces.mkdir()
+    for i in range(20):
+        (workspace.active.traces / f"attempt-{i:02d}.jsonl").write_text(f"{i}\n")
+    layout.write_json_atomic(
+        workspace.active.meta,
+        {**json.loads(workspace.active.meta.read_text()), "status": "kept"},
+    )
+    copy2 = shutil.copy2
+    calls = []
+
+    def flaky_copy2(src, dst, *args, **kwargs):
+        calls.append(dst)
+        if len(calls) == 5:
+            raise OSError("durable storage unavailable")
+        return copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(rw_workspace.shutil, "copy2", flaky_copy2)
+    with pytest.raises(rw_workspace.WorkspaceTransferError):
+        workspace.publish()
+    # Part of the copy landed, but the record still reads as the claim.
+    assert json.loads(durable.meta.read_text())["status"] == "running"
+    assert workspace.active.path.exists()
+
+    monkeypatch.setattr(rw_workspace.shutil, "copy2", copy2)
+    assert [d.path for d in rw_workspace.recover(root)] == [durable.path]
+    assert json.loads(durable.meta.read_text())["status"] == "kept"
+    assert sorted(p.name for p in durable.traces.iterdir()) == [
+        f"attempt-{i:02d}.jsonl" for i in range(20)
+    ]
+    assert not workspace.active.path.exists()
+
+
+def test_unpublishable_name_fails_the_rewrite_once(tmp_path, monkeypatch) -> None:
+    root = _root(tmp_path, monkeypatch)
+    work_root = tmp_path / "node-local"
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(work_root))
+    durable, workspace = _local_rewrite(root, tmp_path)
+    junk = workspace.active.package / "tests" / "cat <<'EOF'\necho hi\nEOF"
+    junk.write_text("junk\n")
+    session = workspace.active.session("agent", "20260904-190001Z")
+    session.path.mkdir(parents=True)
+    session.stderr.write_text("agent log\n")
+    layout.write_json_atomic(
+        workspace.active.meta,
+        {**json.loads(workspace.active.meta.read_text()), "status": "accepted"},
+    )
+
+    with pytest.raises(rw_workspace.UnpublishableRewrite):
+        workspace.publish()
+
+    meta = json.loads(durable.meta.read_text())
+    assert meta["status"] == "failed" and meta["stage"] == "publish"
+    assert "unpublishable file names" in meta["reason"] and meta["finished"]
+    assert "active_path" not in meta
+    # The package is left out whole rather than published without the file.
+    assert not durable.package.exists()
+    assert durable.session("agent", "20260904-190001Z").stderr.read_text() == (
+        "agent log\n"
+    )
+    # Moved aside, so recover() does not try it again every round.
+    assert not workspace.active.path.exists()
+    quarantined = work_root.glob("*/quarantine/tasks/tw_a/rewrites/*/package/tests")
+    assert [p.name for p in next(quarantined).iterdir() if "\n" in p.name]
+    assert rw_workspace.recover(root) == []
+    assert json.loads(durable.meta.read_text()) == meta
+
+
+def test_recover_publishes_an_unpublishable_rewrite_as_failed(
+    tmp_path, monkeypatch
+) -> None:
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    durable, workspace = _local_rewrite(root, tmp_path)
+    (workspace.active.package / "bad\tname").write_text("junk\n")
+
+    assert [d.path for d in rw_workspace.recover(root)] == [durable.path]
+    assert json.loads(durable.meta.read_text())["status"] == "failed"
+    assert rw_workspace.recover(root) == []
+
+
 def test_loop_refuses_to_start_when_the_budget_leaves_no_session_time(
     tmp_path, monkeypatch
 ) -> None:
