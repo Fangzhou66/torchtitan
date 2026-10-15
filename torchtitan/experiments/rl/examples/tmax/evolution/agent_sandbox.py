@@ -426,7 +426,9 @@ def _wait_ready(
             last_note = time.time()
             print(f"  building/booting... {time.time() - started:.0f}s", file=out,
                   flush=True)
-        time.sleep(2)
+        # A cached image boots in ~1 s; a 2 s poll added a second per boot,
+        # and every probe replay boots one container per control.
+        time.sleep(0.5)
 
 
 def cmd_down(pkg: Path) -> int:
@@ -442,7 +444,7 @@ def cmd_down(pkg: Path) -> int:
             os.kill(int(pid), 0)
         except OSError:
             break
-        time.sleep(1)
+        time.sleep(0.2)
     else:
         if pid:
             try:

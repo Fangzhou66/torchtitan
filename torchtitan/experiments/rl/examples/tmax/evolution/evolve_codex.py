@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import difflib
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import logging
@@ -41,6 +41,7 @@ import shutil
 import statistics
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -248,18 +249,48 @@ def _prune_private_home(home: Path) -> None:
     Claude Code keeps its transcript somewhere else under the config dir, so
     the same rule would delete the thread a later `--resume` needs. Its home
     is left alone; it is small, and the whole session directory is the record.
+
+    The caches (~4k files) are renamed out of the home at once and deleted in
+    the background: deleting them inline took up to 80 s on the rewrite's
+    critical path. ``drain_cache_cleanup`` waits for them before publication.
     """
     if EVOLVE_AGENT == "claude":
         return
     if not home.is_dir():
         return
+    trash = None
     for child in home.iterdir():
         if child.name == "sessions":
             continue
         if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
+            if trash is None:
+                trash = home.parent / f"{CACHE_TRASH_PREFIX}{uuid.uuid4().hex}"
+                trash.mkdir()
+            child.rename(trash / child.name)
         else:
             child.unlink(missing_ok=True)
+    if trash is not None:
+        with _TRASH_LOCK:
+            _TRASH[trash] = _TRASH_POOL.submit(
+                shutil.rmtree, trash, ignore_errors=True
+            )
+
+
+# Session-directory entries holding a pruned home's caches until deleted.
+CACHE_TRASH_PREFIX = ".codex-cache-"
+_TRASH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="codex-cache")
+_TRASH_LOCK = threading.Lock()
+_TRASH: dict[Path, Future] = {}
+
+
+def drain_cache_cleanup(under: Path) -> None:
+    """Wait for the background cache deletions of session homes below ``under``."""
+    with _TRASH_LOCK:
+        pending = [(p, f) for p, f in _TRASH.items() if p.is_relative_to(under)]
+    for path, future in pending:
+        future.result()
+        with _TRASH_LOCK:
+            _TRASH.pop(path, None)
 
 
 def _link_session_jsonl(src: layout.SessionDir, dst: layout.SessionDir) -> None:
@@ -1281,6 +1312,8 @@ def simplify_codex(
     hint: str = "vague",
     *,
     deadline: RewriteDeadline | None = None,
+    handoff=None,
+    timings: dict | None = None,
 ) -> dict:
     """Choose one trace-supported operator and validate the resulting package."""
     so.prompt(hint)
@@ -1307,6 +1340,8 @@ def simplify_codex(
         {**task, "_solved": solved, "_attempts": attempts, "_simplify_hint": hint},
         "easier",
         deadline=deadline,
+        handoff=handoff,
+        timings=timings,
     )
 
 
@@ -2022,12 +2057,7 @@ def _blind_layout(pkg: Path, vpkg: Path) -> None:
         rel = Path(d).relative_to(pkg)
         if rel == Path("run"):
             # Preserve harness inputs, excluding author analysis and oracle output.
-            return set(names) - {
-                "seed_size.json",
-                "resources.json",
-                "seed_literals.json",
-                "pretest.json",
-            }
+            return set(names) - set(_LAYOUT_RUN_INPUTS)
         return {
             n
             for n in names
@@ -2319,12 +2349,112 @@ def _author_independent_probes(
     )
 
 
+_LAYOUT_RUN_INPUTS = (
+    "seed_size.json",
+    "resources.json",
+    "seed_literals.json",
+    "pretest.json",
+)
+
+
+def _replay_inputs(vpkg: Path, probe: Path) -> tuple[dict, dict]:
+    """Hashes of everything an independent replay reads: what _blind_layout
+    copies from the verifier's package, and the probe author's controls."""
+    files = {}
+    for dirpath, dirnames, filenames in os.walk(vpkg):
+        rel_dir = Path(dirpath).relative_to(vpkg)
+        if rel_dir == Path("."):
+            dirnames[:] = [d for d in dirnames if d != "run"]
+            names = filenames
+            names = names + [
+                f"run/{n}" for n in _LAYOUT_RUN_INPUTS if (vpkg / "run" / n).is_file()
+            ]
+        else:
+            names = filenames
+        for name in names:
+            path = Path(dirpath) / name
+            if path.is_file():
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                files[str(rel_dir / name)] = digest
+    return files, _probe_hashes(probe / "run/verifier-probes")
+
+
+def _replay_independent(
+    vpkg: Path, probe: Path, deadline: RewriteDeadline
+) -> None:
+    """Replay the probe author's controls against the verifier's package in a
+    fresh copy. Raises SemanticProbeMisses when a control is graded against
+    its declared expectation."""
+    replay = Path(tempfile.mkdtemp(prefix="replay-", dir=probe.parent))
+    _blind_layout(vpkg, replay)
+    shutil.copytree(probe / "run/verifier-probes", replay / "run/verifier-probes")
+    timeout = _session_timeout(deadline, "independent probe replay")
+    verify_probes(
+        replay,
+        _harness_env(),
+        timeout,
+        deadline=deadline,
+    )
+
+
+def _early_independent_replay(
+    probe_future: Future, vsession: layout.SessionDir, deadline: RewriteDeadline
+) -> tuple[tuple, SemanticProbeMisses | None] | None:
+    """The first independent replay, run beside the original-probe replay.
+
+    Both read the verifier's finished package and neither writes outside its
+    own run/, so neither can change the other's inputs. Returns the inputs it
+    replayed and its outcome, or None if they moved while it ran;
+    _independent_verifier uses it only if those inputs are still current.
+    """
+    probe_future.result()
+    pointer = vsession.path / "independent-probes.json"
+    probe = Path(json.loads(pointer.read_text())["package"])
+    before = _replay_inputs(vsession.package, probe)
+    try:
+        _replay_independent(vsession.package, probe, deadline)
+    except SemanticProbeMisses as error:
+        outcome = error
+    else:
+        outcome = None
+    if _replay_inputs(vsession.package, probe) != before:
+        return None
+    return before, outcome
+
+
+def _early_outcome(early: Future | None, vpkg: Path, probe: Path):
+    """The early replay's outcome if it replayed the current inputs, else _RERUN.
+
+    Any other failure of the early run (a transport error, the deadline)
+    is not reused either: the replay then runs again here, as it always did."""
+    if early is None:
+        return _RERUN
+    try:
+        got = early.result()
+    except Exception as error:  # noqa: BLE001 -- rerun reproduces a real failure
+        log.info("early independent replay not used: %s", str(error)[:200])
+        return _RERUN
+    if got is None or got[0] != _replay_inputs(vpkg, probe):
+        return _RERUN
+    return got[1]
+
+
+_RERUN = object()
+
+
+def _add_time(timings: dict | None, stage: str, seconds: float) -> None:
+    """Accumulate one stage's wall seconds into the rewrite's timings."""
+    if timings is not None:
+        timings[stage] = round(timings.get(stage, 0.0) + seconds, 1)
+
+
 def _independent_verifier(
     rewrite: layout.RewriteDir,
     vsession: layout.SessionDir,
     *,
     allow_repair: bool = True,
     deadline: RewriteDeadline | None = None,
+    early: Future | None = None,
 ) -> None:
     deadline = deadline or rewrite_deadline(rewrite)
     vpkg = vsession.package
@@ -2344,17 +2474,12 @@ def _independent_verifier(
     for attempt in range(2 if allow_repair else 1):
         if _probe_hashes(probe / "run/verifier-probes") != controls_sha256:
             raise RuntimeError("Independent controls changed during verifier repair")
-        replay = Path(tempfile.mkdtemp(prefix="replay-", dir=probe.parent))
-        _blind_layout(vpkg, replay)
-        shutil.copytree(probe / "run/verifier-probes", replay / "run/verifier-probes")
+        outcome = _early_outcome(early, vpkg, probe) if attempt == 0 else _RERUN
         try:
-            timeout = _session_timeout(deadline, "independent probe replay")
-            verify_probes(
-                replay,
-                _harness_env(),
-                timeout,
-                deadline=deadline,
-            )
+            if outcome is _RERUN:
+                _replay_independent(vpkg, probe, deadline)
+            elif outcome is not None:
+                raise outcome
         except SemanticProbeMisses as error:
             if not allow_repair or attempt:
                 raise
@@ -2434,6 +2559,7 @@ def _blind_verifier(
     fmap: dict,
     *,
     deadline: RewriteDeadline | None = None,
+    timings: dict | None = None,
 ) -> tuple[layout.SessionDir, str]:
     """Second session: write the verifier without seeing the solution.
 
@@ -2445,6 +2571,7 @@ def _blind_verifier(
     never could: the hidden solution against the blind verifier.
     """
     deadline = deadline or rewrite_deadline(rewrite)
+    started = time.monotonic()
     pkg = rewrite.package
     seed_rel = fmap["test_state_py"]
     seed_text = task["test_state_py"]
@@ -2465,7 +2592,7 @@ def _blind_verifier(
             if key in roles and (seed_pkg / roles[key]).is_file()
         },
     )
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         timeout = _session_timeout(deadline, "blind verifier author")
         with session(rewrite, "verifier", timeout=timeout) as run:
             vpkg = run.dir.package
@@ -2522,9 +2649,13 @@ def _blind_verifier(
             finally:
                 _sandbox_down(vpkg)
         _check_verdict(vpkg)
+        sessions_done = time.monotonic()
+        early = pool.submit(_early_independent_replay, probe_future, run.dir, deadline)
         _verify_original_probes(run.dir, rewrite, deadline)
         probe_future.result()
-    _independent_verifier(rewrite, run.dir, deadline=deadline)
+    _independent_verifier(rewrite, run.dir, deadline=deadline, early=early)
+    _add_time(timings, "blind_verifier", sessions_done - started)
+    _add_time(timings, "independent_verifier", time.monotonic() - sessions_done)
     rel = _take_verifier(
         vpkg,
         pkg,
@@ -2658,6 +2789,7 @@ def _blind_verifier_answered(
     fmap: dict,
     *,
     deadline: RewriteDeadline,
+    timings: dict | None = None,
 ) -> tuple[layout.SessionDir, str, dict]:
     """_blind_verifier, with the author answering a verifier side that stopped.
 
@@ -2674,7 +2806,7 @@ def _blind_verifier_answered(
     while True:
         try:
             vsession, rel = _blind_verifier(
-                rewrite, task, fmap, deadline=deadline
+                rewrite, task, fmap, deadline=deadline, timings=timings
             )
             return vsession, rel, task
         except Blocked as blocked:
@@ -2699,13 +2831,14 @@ def _reconcile_blind(
     fmap: dict,
     task: dict,
     deadline: RewriteDeadline,
-) -> None:
+) -> bool:
     """Hidden solution against blind verifier, with bounded repair.
 
     The two sessions never saw each other's file, so the first time they meet
     is here. A failure means the verifier asks for something the instruction
     did not promise, or the solution does not do what the instruction says;
-    _repair_iterations lets each side answer in turn.
+    _repair_iterations lets each side answer in turn. Returns whether the
+    first check passed, i.e. no repair touched the package.
     """
     pkg = rewrite.package
     text = _harness_check(
@@ -2714,7 +2847,7 @@ def _reconcile_blind(
         timeout=_session_timeout(deadline, "blind handoff check"),
     )
     if _agent_checked(pkg):
-        return
+        return True
     fmap["test_state_py"] = _repair_iterations(
         rewrite,
         task,
@@ -2725,6 +2858,7 @@ def _reconcile_blind(
         check_name="check.blind",
         deadline=deadline,
     )
+    return False
 
 
 def _repair_agent_validation(
@@ -2777,6 +2911,32 @@ def _repair_agent_validation(
     return run, result, agent_error
 
 
+def _notify_handoff(
+    handoff, task: dict | None, pkg: Path, fmap: dict, author_check: dict | None
+) -> None:
+    """Tell the caller what the package is before the blind handoff check.
+
+    What _collect will return if the check passes, except the measurement,
+    which is the author's last passing check (the handoff check replaces it);
+    the caller compares its probe inputs again before using anything. Best
+    effort: a failure here never touches the rewrite."""
+    if handoff is None:
+        return
+    try:
+        if task is None:
+            handoff(None)
+            return
+        pre = _collect(task, pkg, fmap)
+        chk = author_check or {}
+        if chk.get("verdict") == "pass":
+            pre["_measured"] = chk.get("measured")
+            pre["_box"] = chk.get("resources")
+            pre["_at_max"] = bool(chk.get("at_max"))
+        handoff(pre)
+    except Exception as error:  # noqa: BLE001 -- an optimisation, never a verdict
+        log.warning("handoff notification failed: %s", str(error)[:200])
+
+
 def evolve_agentic(
     rewrite: layout.RewriteDir,
     task: dict,
@@ -2785,6 +2945,8 @@ def evolve_agentic(
     observed: str = "",
     exit_code: int = 1,
     deadline: RewriteDeadline | None = None,
+    handoff=None,
+    timings: dict | None = None,
 ) -> dict:
     """Run one agent session over the rewrite's package, with its container as
     a tool.
@@ -2798,9 +2960,17 @@ def evolve_agentic(
     `job` is "harder", "easier", "repair", or "repair_spec". The attempts are the records
     the loop hardlinked under ``traces/``. Raises on failure; raises Blocked
     when the agent declined.
+
+    ``handoff``, when given, is called with the package as collected just
+    before the blind handoff check, and again with None if that check needed
+    a repair: the caller may start its Daytona probes early and must drop them
+    then. ``timings`` collects per-stage wall seconds.
     """
     _require_codex()
     deadline = deadline or rewrite_deadline(rewrite)
+    stage_start = time.monotonic()
+    # A retried session rewrites the package; nothing started before it stands.
+    _notify_handoff(handoff, None, rewrite.package, {}, None)
     author_timeout = _session_timeout(deadline, f"{job} author")
     if job == "harder":
         task = {**task, "_harder_mode": "student"}
@@ -2925,14 +3095,21 @@ def evolve_agentic(
             _require_declaration(
                 rewrite, run.dir, task.get("_simplify_hint", "vague"), deadline
             )
+        _add_time(timings, "agent", time.monotonic() - stage_start)
         if blind:
+            author_check = _last_check(pkg)
             vsession, fmap["test_state_py"], answered = _blind_verifier_answered(
                 rewrite,
                 {**task, "_session": str(run.dir.path)},
                 fmap,
                 deadline=deadline,
+                timings=timings,
             )
-            _reconcile_blind(rewrite, vsession, fmap, answered, deadline)
+            stage_start = time.monotonic()
+            _notify_handoff(handoff, task, pkg, fmap, author_check)
+            if not _reconcile_blind(rewrite, vsession, fmap, answered, deadline):
+                _notify_handoff(handoff, None, pkg, fmap, None)
+            _add_time(timings, "reconcile", time.monotonic() - stage_start)
         out = _collect(task, pkg, fmap)
     except Blocked:
         raise

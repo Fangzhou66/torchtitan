@@ -330,6 +330,10 @@ def _pack_session_payloads(active: Path) -> None:
         if not session.is_dir() or session.is_symlink():
             continue
         for child in sorted(session.iterdir()):
+            if child.name.startswith(".codex-cache-") and not child.is_symlink():
+                # A pruned home's caches whose background deletion never ran.
+                shutil.rmtree(child, ignore_errors=True)
+                continue
             if child.name == "codex" or child.is_symlink() or not child.is_dir():
                 continue
             archive = session / f"{child.name}.tar.gz"

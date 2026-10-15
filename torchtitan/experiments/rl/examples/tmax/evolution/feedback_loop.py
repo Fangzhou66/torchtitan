@@ -32,6 +32,7 @@ The loop writes the record and decides what happens to the package.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -316,6 +317,136 @@ def _patches(task: dict, pkg: Path | None) -> dict[str, str]:
     return out
 
 
+def _instruction_only(task: dict, orig: dict | None, changed) -> bool:
+    """Whether revalidate takes the instruction-only fast path (no Daytona)."""
+    return (
+        changed == ["instruction"]
+        and orig is not None
+        and not task.get("_simplify")
+        and not task.get("_spec_repair")
+        and not task.get("_calibration")
+    )
+
+
+def _probe_pair(
+    work: Path,
+    resources: dict | None,
+    dark: list[str],
+    pretest_file: Path | None,
+    deadline: RewriteDeadline | None,
+) -> tuple[dict | None, dict | None]:
+    """The oracle and the null probe, each in its own fresh container.
+
+    Both read the same package; both are joined before returning so a repair
+    cannot edit their inputs mid-run."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        oracle_future = pool.submit(
+            daytona_probe,
+            work,
+            resources=resources,
+            require_paths=dark,
+            pretest_file=pretest_file,
+            deadline=deadline,
+        )
+        null_future = pool.submit(
+            daytona_probe,
+            work,
+            shortcut=":",
+            resources=resources,
+            pretest_file=pretest_file,
+            deadline=deadline,
+        )
+        return oracle_future.result(), null_future.result()
+
+
+def _probe_inputs_digest(work: Path, pretest_file: Path | None) -> str:
+    """One hash over every file the Daytona probes read: the package minus
+    the harness's run/ and traces/, and the pin-hook snapshot."""
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(work):
+        rel = Path(dirpath).relative_to(work)
+        if rel == Path("."):
+            dirnames[:] = [d for d in dirnames if d not in ("run", "traces")]
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            h.update(str(rel / name).encode() + b"\0")
+            h.update(path.read_bytes() if path.is_file() else b"<not a file>")
+            h.update(b"\0")
+    if pretest_file is not None and pretest_file.is_file():
+        h.update(b"pretest\0" + pretest_file.read_bytes())
+    return h.hexdigest()
+
+
+def _box_key(resources: dict | None) -> tuple:
+    return tuple((resources or {}).get(k) for k in RESOURCE_KEYS)
+
+
+class EarlyProbes:
+    """The revalidation probes, started while the blind handoff check runs.
+
+    evolve_agentic calls this with the package as it stands before the check
+    (and with None if the check needed a repair). The check only reads the
+    package, so when it passes the probes' inputs are usually already final;
+    the probes then run beside it instead of after it. revalidate uses their
+    verdicts only if the box, the required paths, the pin hook and every
+    package byte are what the probes started from, and the package did not
+    move while they ran. Otherwise they are dropped and the probes run again
+    on the final package, as before.
+    """
+
+    def __init__(self, work: Path, orig: dict, floor: dict | None,
+                 pretest_file: Path | None, deadline: RewriteDeadline | None):
+        self.work, self.orig, self.floor = work, orig, floor
+        self.pretest_file, self.deadline = pretest_file, deadline
+        self.started = False
+        self.used = False
+        self._valid = False
+        self._key = None
+        self._future = None
+
+    def __call__(self, pre: dict | None) -> None:
+        if pre is None:
+            self._valid = False
+            return
+        if _instruction_only(pre, self.orig, _changed(self.orig, pre)):
+            return
+        box = _probe_box(pre, self.floor)
+        dark = new_dark_paths(self.work, pre, self.orig)
+        self._key = (_box_key(box), list(dark), self.pretest_file)
+        start = _probe_inputs_digest(self.work, self.pretest_file)
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="early-probes")
+        self._future = pool.submit(self._run, start, box, dark)
+        pool.shutdown(wait=False)
+        self._valid = self.started = True
+        log.info("early Daytona probes started for %s", self.work)
+
+    def _run(self, start: str, box: dict | None, dark: list[str]):
+        pair = _probe_pair(self.work, box, dark, self.pretest_file, self.deadline)
+        return start, _probe_inputs_digest(self.work, self.pretest_file), pair
+
+    def take(self, work: Path, resources: dict | None, dark: list[str],
+             pretest_file: Path | None):
+        """The early (oracle, null) verdicts if they answer for exactly these
+        inputs, else None. Used at most once."""
+        future, self._future = self._future, None
+        if future is None or not self._valid or work != self.work:
+            return None
+        if self._key != (_box_key(resources), list(dark), pretest_file):
+            log.info("early Daytona probes dropped: box or required paths moved")
+            return None
+        try:
+            start, end, pair = future.result()
+        except Exception as error:  # noqa: BLE001 -- rerun reproduces a real failure
+            log.info("early Daytona probes not used: %s", str(error)[:200])
+            return None
+        if not start == end == _probe_inputs_digest(work, pretest_file):
+            log.info("early Daytona probes dropped: the package moved")
+            return None
+        self.used = True
+        return pair
+
+
 def revalidate(
     work: Path,
     task: dict,
@@ -325,9 +456,13 @@ def revalidate(
     baseline=None,
     pretest_file: Path | None = None,
     deadline: RewriteDeadline | None = None,
+    early: "EarlyProbes | None" = None,
 ) -> dict:
     """Validate the adjusted task on Daytona: the reference solution passes,
     and the verifier fails an untouched workspace.
+
+    ``early`` holds probes started on this package before the blind handoff
+    check; their verdicts are used only if every probe input is unchanged.
 
     The null probe replaced an LLM-guessed shortcut. Of the 148 rewrites that
     probe rejected in one week, 29 had "passed" on `cd /app` or `mkdir -p` --
@@ -352,13 +487,7 @@ def revalidate(
         deadline.timeout(
             "final validation", 1, reserve_final_validation=False
         )
-    if (
-        changed == ["instruction"]
-        and orig is not None
-        and not task.get("_simplify")
-        and not task.get("_spec_repair")
-        and not task.get("_calibration")
-    ):
+    if _instruction_only(task, orig, changed):
         if not task["instruction"].strip():
             return {"ok": False, "stage": "empty", "why": "instruction emptied"}
         before, after = sl.audit(orig), sl.audit(task)
@@ -415,27 +544,9 @@ def revalidate(
         if orig is not None and task.get("_direction") != "easier"
         else []
     )
-    # Both probes read the same package but boot separate fresh containers.
-    # Join both before returning so a repair cannot edit their inputs mid-run.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        oracle_future = pool.submit(
-            daytona_probe,
-            work,
-            resources=resources,
-            require_paths=dark,
-            pretest_file=pretest_file,
-            deadline=deadline,
-        )
-        null_future = pool.submit(
-            daytona_probe,
-            work,
-            shortcut=":",
-            resources=resources,
-            pretest_file=pretest_file,
-            deadline=deadline,
-        )
-        dv = oracle_future.result()
-        null = null_future.result() or {}
+    pair = early.take(work, resources, dark, pretest_file) if early else None
+    dv, null = pair or _probe_pair(work, resources, dark, pretest_file, deadline)
+    null = null or {}
     if dv is None:
         return {
             "ok": False,
@@ -624,6 +735,7 @@ def _evolve_retrying_the_filter(
     rewrite: layout.RewriteDir,
     agent_task: dict,
     deadline: RewriteDeadline,
+    **kwargs,
 ) -> dict:
     """One agent session, retried when the provider's classifier stops it.
 
@@ -638,7 +750,7 @@ def _evolve_retrying_the_filter(
     for attempt in range(1, ec.CYBER_RETRIES + 2):
         try:
             return ec.evolve_agentic(
-                rewrite, agent_task, "harder", deadline=deadline
+                rewrite, agent_task, "harder", deadline=deadline, **kwargs
             )
         except ec.Filtered:
             rec["cyber_filtered"] = attempt
@@ -751,6 +863,9 @@ def process_one(
         "resources": None,
         "t_start": time.time(),
     }
+    # Wall seconds per stage (agent, blind_verifier, independent_verifier,
+    # reconcile, daytona_oracle, daytona_repair, publish, total) for rewrite.json.
+    timings: dict = {}
     mark = dict(llm.USAGE)
     try:
         if not graded:
@@ -799,6 +914,8 @@ def process_one(
         baseline = seed_literals(task, seed_dir)
         rec["action"] = "simplify" if job == "easier" else "evolve"
         rec["route"] = rec["action"]
+        early = EarlyProbes(work, task, resources, pretest_file, deadline)
+        agent_kw = {"handoff": early, "timings": timings}
 
         if job == "easier":  # 0/k -> easier
             # SWE_SIMPLIFY_HINT selects how much guidance a simplify may write
@@ -815,6 +932,7 @@ def process_one(
                     attempts=graded,
                     hint=hint_lvl,
                     deadline=deadline,
+                    **agent_kw,
                 )
             except ec.Blocked as e:
                 if str(e).startswith("BLOCKED: invalid_signal:"):
@@ -858,7 +976,7 @@ def process_one(
             rec["require_solution_growth"] = False
             try:
                 new = _evolve_retrying_the_filter(
-                    ec, rec, tid, rewrite, task, deadline
+                    ec, rec, tid, rewrite, task, deadline, **agent_kw
                 )
                 rec["hint"] = new.get("_hint")
                 rec["agent_validated"] = new.get("_agent_validated")
@@ -874,6 +992,7 @@ def process_one(
         changed = _changed(task, new)
         box = _probe_box(new, resources)
         rec["resources"] = box
+        started = time.monotonic()
         v = revalidate(
             work,
             new,
@@ -883,7 +1002,11 @@ def process_one(
             baseline=baseline,
             pretest_file=pretest_file,
             deadline=deadline,
+            # Only when started: test doubles of revalidate take no such keyword.
+            **({"early": early} if early.started else {}),
         )
+        timings["daytona_oracle"] = round(time.monotonic() - started, 1)
+        timings["daytona_early"] = early.used
         rec["revalidate"] = v
         _size_from_probe(rec, v, resources)
         # Repair-and-revalidate iterations. Each one hands the failure back to
@@ -951,6 +1074,7 @@ def process_one(
             box = _probe_box(fixed, resources)
             rec["resources"] = box
             changed = _changed(task, fixed)
+            started = time.monotonic()
             v2 = revalidate(
                 work,
                 fixed,
@@ -960,6 +1084,9 @@ def process_one(
                 baseline=baseline,
                 pretest_file=pretest_file,
                 deadline=deadline,
+            )
+            timings["daytona_repair"] = round(
+                timings.get("daytona_repair", 0.0) + time.monotonic() - started, 1
             )
             _size_from_probe(rec, v2, resources)
             rec.setdefault("oracle_repairs", []).append(
@@ -981,5 +1108,12 @@ def process_one(
     except Exception as e:  # noqa: BLE001
         return _failed(rec, stage="error", error=e)
     finally:
+        # Pruned session caches are deleted in the background; the loop
+        # publishes this directory next.
+        drain = getattr(sys.modules.get("evolve_codex"), "drain_cache_cleanup", None)
+        if drain is not None:
+            drain(rewrite.path)
         rec["usage"] = llm.usage_since(mark)
         rec["t_end"] = time.time()
+        timings["total"] = round(rec["t_end"] - rec["t_start"], 1)
+        rec["timings"] = timings

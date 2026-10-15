@@ -1129,6 +1129,7 @@ def handle(
         "rewrite_deadline_at",
         "final_validation_reserve_sec",
         "usage",
+        "timings",
     ):
         if key in rec:
             meta[key] = rec[key]
@@ -1141,8 +1142,14 @@ def handle(
         meta["status"] = status
         meta["finished"] = layout.stamp()
     layout.write_json_atomic(rewrite.meta, meta)
+    published = time.monotonic()
     rewrite = workspace.publish()
     workspace.cleanup()
+    if isinstance(meta.get("timings"), dict):
+        meta["timings"]["publish"] = round(time.monotonic() - published, 1)
+        # An accepted rewrite's record is written again by the fold.
+        if meta["status"] != "running":
+            layout.write_json_atomic(rewrite.meta, meta)
     return {"signal": sig, "rewrite": rewrite, "meta": meta, "status": status}
 
 
