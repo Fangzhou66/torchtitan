@@ -55,6 +55,7 @@ import verifier_literals as vl
 from rewrite_deadline import RewriteDeadline
 from torchtitan.experiments.rl.examples.tmax import layout, rollout_record
 from verifier_probes import (
+    run_executable,
     SemanticProbeContract,
     SemanticProbeMisses,
     load_probe_contract,
@@ -1158,7 +1159,7 @@ def _sandbox_boot(pkg: Path) -> None:
     command that needs the container.
     """
     try:
-        p = subprocess.run(
+        p = run_executable(
             [str(pkg / "sandbox"), "up", "--detach"],
             cwd=pkg,
             env=_harness_env(),
@@ -1182,7 +1183,7 @@ def _sandbox_down(pkg: Path) -> None:
     except ValueError:
         pass
     try:
-        subprocess.run(
+        run_executable(
             [str(pkg / "sandbox"), "down"],
             cwd=pkg,
             env=_harness_env(),
@@ -1204,7 +1205,7 @@ def _harness_check(
     for whoever reads a rejected rewrite."""
     timeout = AGENT_TIMEOUT if timeout is None else timeout
     try:
-        p = subprocess.run(
+        p = run_executable(
             [str(pkg / "sandbox"), "check"],
             cwd=pkg,
             env=_harness_env(),

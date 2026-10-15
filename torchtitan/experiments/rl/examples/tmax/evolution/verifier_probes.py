@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime
+import errno
 import hashlib
 import json
 import re
@@ -16,10 +17,27 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from rewrite_deadline import RewriteDeadline, RewriteDeadlineExceeded
+
+
+def run_executable(argv, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run, retried when exec races a concurrent write (ETXTBSY).
+
+    A thread that just wrote an executable can have its fd inherited by a
+    child another thread is forking, so exec fails for a moment even though
+    the file is complete."""
+    for attempt in range(8):
+        try:
+            return subprocess.run(argv, **kwargs)
+        except OSError as exc:
+            if exc.errno != errno.ETXTBSY or attempt == 7:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+    raise AssertionError("unreachable")
 
 
 class SemanticProbeMisses(RuntimeError):
@@ -221,7 +239,7 @@ def verify_probes(
                 if deadline is not None and phase != "down"
                 else timeout
             )
-            result = subprocess.run(
+            result = run_executable(
                 [str(workspace / "sandbox"), *args],
                 cwd=workspace,
                 env=env,
@@ -277,7 +295,7 @@ def verify_probes(
                 if deadline is not None
                 else timeout
             )
-            details = subprocess.run(
+            details = run_executable(
                 [
                     str(workspace / "sandbox"),
                     "exec",
