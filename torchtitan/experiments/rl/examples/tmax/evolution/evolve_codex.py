@@ -2422,7 +2422,9 @@ def _instruction_change_note(before: Path, after: Path) -> str:
         "inherited checks: an inherited check of the old scope now rejects work the "
         "instruction permits. Where an unchanged sentence still reads the old way, "
         "the changed sentence states the narrowed scope; check that scope, and name "
-        "the conflict in run/verifier-changes.md.\n"
+        "the conflict in run/verifier-changes.md. A removed sentence that only fixed "
+        "how the expected values are computed (a window, a convention) removes no "
+        "requirement, and its inherited bounds stay as they are.\n"
     )
 
 

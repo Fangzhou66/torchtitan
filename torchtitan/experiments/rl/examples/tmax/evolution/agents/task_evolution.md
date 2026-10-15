@@ -262,7 +262,12 @@ The reference solution may stay the same length or shrink, and may grow by at
 most 8 non-comment lines. The verifier may gain at most 5 assertions.
 `./sandbox check` and the caller enforce these size bounds. Preserve
 necessary facts in the instruction or discoverable workspace; remove a
-solution hint only when the task remains unambiguous. Measure difficulty by
+solution hint only when the task remains unambiguous. A window, convention, unit
+or cutoff the expected values were computed with is part of the contract, not
+a hint: deleting it leaves several answers legal, and the verifier author then
+blocks the rewrite. To make the agent work it out, put the fact in the
+environment (a configuration file, a header, metadata) where investigating
+finds it. Measure difficulty by
 student re-testing, not by added lines.
 
 **State the deliverable, not the inference.** The instruction states the
