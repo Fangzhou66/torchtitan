@@ -364,3 +364,29 @@ def test_rerun_null_probe_pass_fails_the_check(tmp_path, monkeypatch):
     finally:
         b.close()
 
+
+def test_harness_check_never_trusts_the_agent_writable_cache(tmp_path, monkeypatch):
+    seen = []
+
+    def run(cmd, **kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "VERDICT: pass", "")
+
+    monkeypatch.setattr(ec, "run_executable", run)
+    monkeypatch.setattr(ec, "_sandbox_down", lambda pkg: None)
+    monkeypatch.setattr(ec, "_harness_env", lambda: {})
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    ec._harness_check(pkg, timeout=5)
+    assert seen[0][1:] == ["check", "--fresh"]
+
+
+def test_digest_skips_special_files_and_survives_unreadable_ones(tmp_path):
+    pkg = _package(tmp_path)
+    os.mkfifo(pkg / "environment" / "pipe")
+    assert asb._inputs_digest(pkg, 30)  # would block forever reading the FIFO
+    bad = pkg / "tests" / "secret"
+    bad.write_text("x")
+    bad.chmod(0)
+    if os.geteuid() != 0:
+        assert asb._inputs_digest(pkg, 30) is None

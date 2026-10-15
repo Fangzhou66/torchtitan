@@ -87,6 +87,7 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -234,6 +235,9 @@ def _hash_tree(h, root: Path, rel: str, seen: set[str]) -> None:
         if child.is_dir():
             h.update(f"dir {crel}\0".encode())
             _hash_tree(h, child, crel, seen)
+        elif not stat.S_ISREG(st.st_mode):
+            # A FIFO or device would block or never end; its type is enough.
+            h.update(f"special {crel} {st.st_mode:o}\0".encode())
         else:
             h.update(f"file {crel} {st.st_mode & 0o777:o} {st.st_size}\0".encode())
             with child.open("rb") as f:
@@ -241,7 +245,7 @@ def _hash_tree(h, root: Path, rel: str, seen: set[str]) -> None:
                     h.update(chunk)
 
 
-def _inputs_digest(pkg: Path, solve_timeout: int) -> str:
+def _inputs_digest(pkg: Path, solve_timeout: int) -> str | None:
     """What decides an oracle or check outcome, as one hash: every package
     file except _UNREAD (environment/ with its Dockerfile and context,
     solution/, tests/, task.toml, anything else the agent added), the pin hook
@@ -262,8 +266,12 @@ def _inputs_digest(pkg: Path, solve_timeout: int) -> str:
         h.update(f"run {name}\0".encode())
         if p.is_file():
             h.update(p.read_bytes())
-    if pkg.is_dir():
-        _hash_tree(h, pkg, "", set())
+    try:
+        if pkg.is_dir():
+            _hash_tree(h, pkg, "", set())
+    except OSError:
+        # Unreadable or changing under us: no reuse, and nothing remembered.
+        return None
     return h.hexdigest()
 
 
@@ -276,15 +284,26 @@ def _read_reuse(pkg: Path) -> list[dict]:
         got = json.loads((pkg / "run" / REUSE_FILE).read_text())
     except (OSError, ValueError):
         return []
-    return [e for e in got if isinstance(e, dict)] if isinstance(got, list) else []
+    if not isinstance(got, list):
+        return []
+    return [
+        e
+        for e in got
+        if isinstance(e, dict) and isinstance(e.get("oracle"), dict) and "time" in e
+    ]
 
 
 def _write_reuse(pkg: Path, entries: list[dict]) -> None:
+    """Best effort: the cache only saves time, so a failed write (a concurrent
+    sandbox command in the same package) must not turn a verdict into a crash."""
     path = pkg / "run" / REUSE_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    incoming = path.with_suffix(".json.incoming")
-    incoming.write_text(json.dumps(entries[-20:], sort_keys=True) + "\n")
-    os.replace(incoming, path)
+    incoming = path.with_suffix(f".json.{os.getpid()}.incoming")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        incoming.write_text(json.dumps(entries[-20:], sort_keys=True) + "\n")
+        os.replace(incoming, path)
+    except OSError:
+        incoming.unlink(missing_ok=True)
 
 
 def _remember(pkg: Path, entry: dict) -> None:
@@ -884,7 +903,8 @@ def cmd_check(
             f"replayed and the container was left as it is. "
             f"./sandbox check --fresh reruns it."
         )
-        box, null_reward, r = hit["resources"] or {}, hit["null_reward"], hit["oracle"]
+        box, r = hit.get("resources") or {}, hit["oracle"]
+        null_reward = float(hit.get("null_reward") or 0)
         return _check_verdict(
             pkg, started, solve_timeout, at_max, box, null_reward, r,
             reused_from=hit["time"],

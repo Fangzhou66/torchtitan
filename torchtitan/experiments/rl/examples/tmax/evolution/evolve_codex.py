@@ -1219,11 +1219,14 @@ def _harness_check(
     than from a session, and return what it printed. Used when the verifier
     was written elsewhere: the record it appends to run/checks.jsonl is the
     same one _require_checked reads, and the text is kept as run/<name>.txt
-    for whoever reads a rejected rewrite."""
+    for whoever reads a rejected rewrite.
+
+    Always --fresh: run/result-cache.json sits where the agent writes, so a
+    reused entry is the agent's word, not a run."""
     timeout = AGENT_TIMEOUT if timeout is None else timeout
     try:
         p = run_executable(
-            [str(pkg / "sandbox"), "check"],
+            [str(pkg / "sandbox"), "check", "--fresh"],
             cwd=pkg,
             env=_harness_env(),
             capture_output=True,
