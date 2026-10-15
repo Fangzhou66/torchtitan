@@ -281,3 +281,86 @@ def test_prompts_carry_the_wait_and_grade_guidance():
     role = ec.SPEC.read_text()
     assert "yield_time_ms 600000" in role
     assert "re-check verifier\nedits with `grade` rather than `check`" in role
+
+
+class _ReplayBox(_Box):
+    """A recorded solution: the fast replay fails, the recorded-timing one
+    answers ``recorded_reward``; the null probe answers ``null_rewards`` in turn."""
+
+    def __init__(self, pkg, monkeypatch, *, recorded_reward, null_rewards=(0.0,)):
+        super().__init__(pkg, monkeypatch)
+        self.recorded_reward = recorded_reward
+        self.null_rewards = list(null_rewards)
+
+    def handle(self, req):
+        self.ops.append(req["op"] + ("/recorded" if req.get("fast") is False else ""))
+        if req["op"] == "grade":
+            reward = (
+                self.null_rewards.pop(0)
+                if len(self.null_rewards) > 1
+                else self.null_rewards[0]
+            )
+            return {"ok": True, "reward": reward}
+        if req["op"] == "oracle":
+            fast = req.get("fast") is not False
+            return {
+                "ok": True,
+                "reward": 0.0 if fast else self.recorded_reward,
+                "solve_exit": 0,
+                "tail": "",
+                "measured": {"mem_peak_mb": 100.0, "solve_secs": 3.0},
+                "replay": {
+                    "fast_used": fast,
+                    "waited_sec": 1.0,
+                    "recorded_wait_sec": 9.0,
+                },
+            }
+        return {"ok": True}
+
+
+def test_fallback_pass_is_remembered_with_its_replay_fields(tmp_path, monkeypatch):
+    monkeypatch.delenv("EVOLVE_SANDBOX_REUSE", raising=False)
+    b = _ReplayBox(_package(tmp_path), monkeypatch, recorded_reward=1.0)
+    try:
+        assert asb.cmd_check(b.pkg, 30) == 0
+        assert b.ops == ["grade", "oracle", "grade", "oracle/recorded"]
+        rec = _records(b.pkg)[-1]
+        assert rec["verdict"] == "pass"
+        assert rec["fast_replay_used"] is False and rec["fast_replay_fallback"] is True
+        (entry,) = asb._read_reuse(b.pkg)
+        assert entry["sandbox_id"] == "sb-2"  # the rerun's container
+        assert entry["oracle"]["fast_replay_fallback"] is True
+        # A hit runs nothing and carries the replay fields into the record.
+        assert asb.cmd_check(b.pkg, 30) == 0
+        assert len(b.ops) == 4
+        again = _records(b.pkg)[-1]
+        assert again["reused_from"] and again["fast_replay_fallback"] is True
+    finally:
+        b.close()
+
+
+def test_fallback_fail_forgets_the_earlier_pass(tmp_path, monkeypatch):
+    monkeypatch.delenv("EVOLVE_SANDBOX_REUSE", raising=False)
+    b = _ReplayBox(_package(tmp_path), monkeypatch, recorded_reward=1.0)
+    try:
+        assert asb.cmd_check(b.pkg, 30) == 0
+        b.recorded_reward = 0.0
+        assert asb.cmd_check(b.pkg, 30, fresh=True) == 1
+        assert asb._read_reuse(b.pkg) == []
+        assert _records(b.pkg)[-1]["fast_replay_fallback"] is True
+    finally:
+        b.close()
+
+
+def test_rerun_null_probe_pass_fails_the_check(tmp_path, monkeypatch):
+    monkeypatch.delenv("EVOLVE_SANDBOX_REUSE", raising=False)
+    b = _ReplayBox(
+        _package(tmp_path), monkeypatch, recorded_reward=1.0, null_rewards=(0.0, 1.0)
+    )
+    try:
+        assert asb.cmd_check(b.pkg, 30) == 1
+        assert _records(b.pkg)[-1]["stage"] == "null_probe"
+        assert asb._read_reuse(b.pkg) == []
+    finally:
+        b.close()
+

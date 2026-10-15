@@ -332,9 +332,17 @@ def _reusable_oracle(pkg: Path, digest: str, state: dict) -> dict | None:
 
 
 def _oracle_summary(r: dict) -> dict:
-    return {
-        k: r.get(k) for k in ("reward", "solve_exit", "measured", "grading")
-    } | {"tail": (r.get("tail") or "")[-2000:]}
+    keys = (
+        "reward",
+        "solve_exit",
+        "measured",
+        "grading",
+        "replay",
+        "fast_replay_used",
+        "fast_replay_fallback",
+        "fast_replay_first",
+    )
+    return {k: r.get(k) for k in keys} | {"tail": (r.get("tail") or "")[-2000:]}
 
 
 # --------------------------------------------------------------------------
@@ -646,11 +654,29 @@ def _measured_str(m: dict | None) -> str:
     )
 
 
+def _print_replay(r: dict) -> None:
+    replay = r.get("replay")
+    if replay:
+        print(
+            f"recorded solution replay: waited {replay['waited_sec']:.0f}s of "
+            f"{replay['recorded_wait_sec']:.0f}s recorded between turns "
+            f"({'fast' if r.get('fast_replay_used') else 'recorded timing'})"
+        )
+    if r.get("fast_replay_fallback"):
+        first = r.get("fast_replay_first") or {}
+        print(
+            f"(the fast replay got reward={first.get('reward')} "
+            f"solve_exit={first.get('solve_exit')}; this result is the "
+            "recorded-timing rerun's)"
+        )
+
+
 def _print_oracle(r: dict) -> None:
     print(
         f"oracle: reward={r.get('reward')} solve_exit={r.get('solve_exit')}  "
         f"measured: {_measured_str(r.get('measured'))}"
     )
+    _print_replay(r)
     tail = r.get("tail") or ""
     if tail.strip():
         print("--- what the run printed (tail) ---")
@@ -659,6 +685,52 @@ def _print_oracle(r: dict) -> None:
 
 def _passed(r: dict) -> bool:
     return float(r.get("reward") or 0) >= 1.0 and r.get("solve_exit") == 0
+
+
+def _with_recorded_rerun(
+    pkg: Path, r: dict, solve_timeout: int, at_max: bool, null_probe: bool
+) -> dict:
+    """Rerun a failed fast replay at the recorded timing; that run is the verdict.
+
+    A recorded solution replays fast by default (terminus_validation): each
+    turn starts once the terminal is idle. A fast replay that fails is run
+    again on a fresh container -- after the same null probe, for check -- at
+    the recorded timing, so fast replay can never reject a recording that
+    passes as recorded.
+    """
+    fast = bool((r.get("replay") or {}).get("fast_used"))
+    if not r.get("ok") or _passed(r) or not fast:
+        return {**r, "fast_replay_used": fast, "fast_replay_fallback": False}
+    print(
+        "fast replay of the recorded solution did not pass; rerunning it on a "
+        "fresh container at the recorded timing",
+        flush=True,
+    )
+    first = {k: r.get(k) for k in ("reward", "solve_exit")}
+    cmd_down(pkg)
+    if cmd_up(pkg, at_max=at_max) != 0:
+        return {"ok": False, "error": "no environment for the recorded-timing rerun"}
+    state = _read_state(pkg)
+    null_reward = None
+    if null_probe:
+        null = _request(state, "grade", wait=900)
+        if not null.get("ok"):
+            return {"ok": False, "error": f"null probe: {null.get('error')}"}
+        null_reward = float(null.get("reward") or 0)
+    r = _request(
+        state,
+        "oracle",
+        wait=solve_timeout + 600,
+        solve_timeout=solve_timeout,
+        fast=False,
+    )
+    return {
+        **r,
+        "fast_replay_used": False,
+        "fast_replay_fallback": True,
+        "fast_replay_first": first,
+        **({"rerun_null_reward": null_reward} if null_reward is not None else {}),
+    }
 
 
 def cmd_oracle(pkg: Path, solve_timeout: int, fresh: bool = False) -> int:
@@ -685,10 +757,15 @@ def cmd_oracle(pkg: Path, solve_timeout: int, fresh: bool = False) -> int:
     if state is None:
         return 2
     r = _request(state, "oracle", wait=solve_timeout + 600, solve_timeout=solve_timeout)
+    r = _with_recorded_rerun(
+        pkg, r, solve_timeout, bool(state.get("at_max")), null_probe=False
+    )
     if not r.get("ok"):
         print(f"sandbox error: {r.get('error')}", file=sys.stderr)
         return 2
     _print_oracle(r)
+    if r.get("fast_replay_fallback"):
+        state = _read_state(pkg)
     if digest is not None:
         if _passed(r):
             _remember(
@@ -828,28 +905,19 @@ def cmd_check(
         return 2
     null_reward = float(null.get("reward") or 0)
     if null_reward >= 1.0:
-        _append_check(
-            pkg,
-            {
-                "time": _now(),
-                "verdict": "fail",
-                "stage": "null_probe",
-                "null_reward": null_reward,
-                "resources": box,
-                "at_max": at_max,
-            },
-        )
-        _forget(pkg, digest)
-        print(f"VERDICT: fail   stage=null_probe   null_reward={null_reward}")
-        print(
-            "The verifier passes on the untouched workspace: it pays for nothing.\n"
-            "Make it depend on work the solution has to do, then check again."
-        )
-        return 1
+        return _null_probe_fail(pkg, digest, null_reward, box, at_max)
     r = _request(state, "oracle", wait=solve_timeout + 600, solve_timeout=solve_timeout)
+    r = _with_recorded_rerun(pkg, r, solve_timeout, at_max, null_probe=True)
     if not r.get("ok"):
         print(f"VERDICT: error   stage=oracle ({r.get('error')})")
         return 2
+    if r.get("fast_replay_fallback"):
+        # The verdict is the rerun's, on its own container and null probe.
+        state = _read_state(pkg)
+        box = state.get("resources") or {}
+        null_reward = float(r.get("rerun_null_reward") or 0)
+        if null_reward >= 1.0:
+            return _null_probe_fail(pkg, digest, null_reward, box, at_max)
     if digest is not None:
         if _passed(r):
             _remember(
@@ -868,6 +936,29 @@ def cmd_check(
         else:
             _forget(pkg, digest)
     return _check_verdict(pkg, started, solve_timeout, at_max, box, null_reward, r)
+
+
+def _null_probe_fail(
+    pkg: Path, digest: str | None, null_reward: float, box: dict, at_max: bool
+) -> int:
+    _append_check(
+        pkg,
+        {
+            "time": _now(),
+            "verdict": "fail",
+            "stage": "null_probe",
+            "null_reward": null_reward,
+            "resources": box,
+            "at_max": at_max,
+        },
+    )
+    _forget(pkg, digest)
+    print(f"VERDICT: fail   stage=null_probe   null_reward={null_reward}")
+    print(
+        "The verifier passes on the untouched workspace: it pays for nothing.\n"
+        "Make it depend on work the solution has to do, then check again."
+    )
+    return 1
 
 
 def _check_verdict(
@@ -913,6 +1004,8 @@ def _check_verdict(
             "step_size": step,
             "elapsed_s": round(time.time() - started),
             **({"reused_from": reused_from} if reused_from else {}),
+            "fast_replay_used": r.get("fast_replay_used"),
+            "fast_replay_fallback": r.get("fast_replay_fallback"),
         },
     )
     if oracle_ok and step:
@@ -921,6 +1014,7 @@ def _check_verdict(
             f"took={time.time() - started:.0f}s   box=[{_box_str(box)}]"
         )
         print(f"measured: {_measured_str(r.get('measured'))}")
+        _print_replay(r)
         print("The reference solution passes, but " + ts.why(step))
         if names:
             print("Also worth a look, not a failure: " + vl.why(names))
@@ -931,6 +1025,7 @@ def _check_verdict(
         f"took={time.time() - started:.0f}s   box=[{_box_str(box)}]"
     )
     print(f"measured: {_measured_str(r.get('measured'))}")
+    _print_replay(r)
     if names:
         print("Also, once the solution passes: " + vl.why(names))
     if step:
@@ -1121,7 +1216,7 @@ async def _serve(pkg: Path, sock: str, resources: dict | None = None) -> int:
                 sb, md["tmax"], workdir=workdir, timeout=EXEC_TIMEOUT
             )
 
-            async def oracle(solve_timeout: int) -> dict:
+            async def oracle(solve_timeout: int, fast: bool | None = None) -> dict:
                 # Re-read the package: the agent edits solution/ and tests/
                 # between calls and expects the current files to be judged.
                 tmax = pack.to_row(str(pkg), pretest=pretest, protected=protected)[
@@ -1154,7 +1249,11 @@ async def _serve(pkg: Path, sock: str, resources: dict | None = None) -> int:
                     sb,
                     "bash /solution/solve.sh",
                     solve_timeout,
-                    **({"actions": actions} if actions is not None else {}),
+                    **(
+                        {"actions": actions, "fast": fast}
+                        if actions is not None
+                        else {}
+                    ),
                 )
                 code, out, err = (
                     execution[key] for key in ("solve_exit", "stdout", "stderr")
@@ -1183,6 +1282,7 @@ async def _serve(pkg: Path, sock: str, resources: dict | None = None) -> int:
                     "execution_harness": "terminus",
                     "terminal": execution["terminal"],
                     "transcript": execution["transcript"],
+                    "replay": execution.get("replay"),
                     "pane_error": execution.get("pane_error"),
                     "measured": measured,
                     "resources": box,
@@ -1201,7 +1301,10 @@ async def _serve(pkg: Path, sock: str, resources: dict | None = None) -> int:
                     )
                     return {"ok": True, "code": code, "stdout": out, "stderr": err}
                 if op == "oracle":
-                    return await oracle(int(req.get("solve_timeout") or SOLVE_TIMEOUT))
+                    return await oracle(
+                        int(req.get("solve_timeout") or SOLVE_TIMEOUT),
+                        req.get("fast"),
+                    )
                 if op == "grade":
                     tmax = pack.to_row(str(pkg), pretest=pretest, protected=protected)[
                         "metadata"

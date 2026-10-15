@@ -218,7 +218,30 @@ def starved(measured: dict, solve_exit: int | None, solve_timeout: int) -> str:
     return ""
 
 
-async def probe(
+async def probe(pkg: Path, shortcut: str | None, *args, **kwargs) -> dict:
+    """One verdict on a fresh sandbox; see ``_probe_once``.
+
+    A recorded solution replays fast by default (terminus_validation). A fast
+    replay that fails is run again, on a fresh sandbox, at the recorded timing,
+    and that run is the verdict: fast replay may save time, never reject a
+    recording that passes as recorded.
+    """
+    result = await _probe_once(pkg, shortcut, *args, **kwargs)
+    fast = bool((result.get("replay") or {}).get("fast_used"))
+    if shortcut is not None or result.get("ok") or not fast:
+        return {**result, "fast_replay_used": fast, "fast_replay_fallback": False}
+    log("fast replay failed; rerunning the recorded solution at its recorded timing")
+    first = {k: result.get(k) for k in ("stage", "reward", "solve_exit", "why")}
+    result = await _probe_once(pkg, shortcut, *args, fast=False, **kwargs)
+    return {
+        **result,
+        "fast_replay_used": False,
+        "fast_replay_fallback": True,
+        "fast_replay_first": first,
+    }
+
+
+async def _probe_once(
     pkg: Path,
     shortcut: str | None,
     solve_timeout: int,
@@ -228,6 +251,7 @@ async def probe(
     protected: "pack.Protected | None" = None,
     prepared_row: dict | None = None,
     check_terminal: bool = True,
+    fast: bool | None = None,
 ) -> dict:
     # Retained for callers of the former optional smoke check. Reference and
     # shortcut commands now always run through Terminus.
@@ -334,7 +358,7 @@ async def probe(
             sb,
             cmd,
             solve_timeout,
-            **({"actions": actions} if actions is not None else {}),
+            **({"actions": actions, "fast": fast} if actions is not None else {}),
         )
         code, out, err = (execution[key] for key in ("solve_exit", "stdout", "stderr"))
         terminal = execution["terminal"]
@@ -372,6 +396,7 @@ async def probe(
             "measured": measured,
             "pretest": hook,
             "terminal": terminal,
+            "replay": execution.get("replay"),
             "paths_checked": list(require_paths or []),
             "paths_missing": missing,
             **(
