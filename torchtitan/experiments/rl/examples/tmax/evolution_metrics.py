@@ -217,9 +217,12 @@ class EvolutionMetrics:
             status = event["status"]
             self.stages[("failed" if status == "interrupted" else status, event.get("stage") or "none")] += 1
             if event.get("started") and event.get("finished"):
-                self.rewrite_secs.append(
-                    layout.parse_stamp(event["finished"]) - layout.parse_stamp(event["started"])
-                )
+                try:
+                    self.rewrite_secs.append(
+                        layout.parse_stamp(event["finished"]) - layout.parse_stamp(event["started"])
+                    )
+                except (TypeError, ValueError):
+                    pass
             route = event.get("route") or ("simplify" if event["direction"] == "easier" else "evolve")
             if route in self.routes:
                 self.routes[route]["attempted"] += 1
