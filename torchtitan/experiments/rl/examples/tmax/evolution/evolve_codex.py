@@ -278,6 +278,10 @@ def _prune_private_home(home: Path) -> None:
 CACHE_TRASH_PREFIX = ".codex-cache-"
 _TRASH_LOCK = threading.Lock()
 _TRASH: dict[Path, Future] = {}
+# Caps concurrent cache deletions; each walks ~4k small files.
+_TRASH_SLOTS = threading.BoundedSemaphore(
+    int(os.environ.get("EVOLVE_CACHE_DELETE_CONCURRENCY", "8"))
+)
 
 
 def _delete_in_background(trash: Path) -> None:
@@ -288,7 +292,8 @@ def _delete_in_background(trash: Path) -> None:
 
     def delete() -> None:
         try:
-            shutil.rmtree(trash, ignore_errors=True)
+            with _TRASH_SLOTS:
+                shutil.rmtree(trash, ignore_errors=True)
         finally:
             done.set_result(None)
 

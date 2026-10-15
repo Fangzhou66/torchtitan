@@ -36,6 +36,7 @@ import shutil
 import socket
 import stat
 import tarfile
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -375,12 +376,24 @@ def _unpublishable_paths(active: Path, target: Path) -> list[str]:
     return sorted(bad)
 
 
+# One pool for the whole process: concurrent publishes share PUBLISH_WORKERS
+# storage round trips instead of each opening its own.
+_PUBLISH_POOL: ThreadPoolExecutor | None = None
+_PUBLISH_POOL_LOCK = threading.Lock()
+
+
 def _pool_map(fn, items: list) -> None:
+    global _PUBLISH_POOL
     if not items:
         return
-    with ThreadPoolExecutor(max_workers=min(PUBLISH_WORKERS, len(items))) as pool:
-        # list() re-raises the first failure.
-        list(pool.map(fn, items))
+    with _PUBLISH_POOL_LOCK:
+        if _PUBLISH_POOL is None:
+            _PUBLISH_POOL = ThreadPoolExecutor(
+                max_workers=PUBLISH_WORKERS, thread_name_prefix="publish"
+            )
+        pool = _PUBLISH_POOL
+    # list() re-raises the first failure.
+    list(pool.map(fn, items))
 
 
 def _copy_file_atomic(src: Path, dst: Path) -> None:
