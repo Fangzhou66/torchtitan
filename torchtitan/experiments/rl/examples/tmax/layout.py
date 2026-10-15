@@ -310,7 +310,8 @@ class MixDir:
         target = self.version_path(version, st)
         self.history.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".incoming")
-        tmp.write_text("".join(r + "\n" for r in rows))
+        data = "".join(r + "\n" for r in rows).encode("utf-8")
+        tmp.write_bytes(data)
         os.replace(tmp, target)
         write_json_atomic(
             self.manifest_of(target),
@@ -318,7 +319,8 @@ class MixDir:
                 "version": version,
                 "parent_version": parent_version,
                 "stamp": st,
-                "sha256": sha256_file(target),
+                # From the bytes just written, not a second read of the file.
+                "sha256": hashlib.sha256(data).hexdigest(),
                 "rows": len(rows),
             },
         )
@@ -563,7 +565,8 @@ class TaskDir:
             return []
         out = []
         for p in self.path.iterdir():
-            if p.is_dir() and re.fullmatch(r"r\d+", p.name):
+            # The name first: on a FUSE root every is_dir() is a round trip.
+            if re.fullmatch(r"r\d+", p.name) and p.is_dir():
                 out.append(int(p.name[1:]))
         return sorted(out)
 

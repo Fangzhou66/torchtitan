@@ -37,7 +37,8 @@ A round:
   4. fold, as soon as a rewrite is accepted: strip the harness files, rename
      package/ to r<N+1>/, rebuild the row (the replaced row's hook and size
      carried across) and publish a new mix version -- one per batch of
-     rewrites that finished together, after their freed slots are refilled.
+     rewrites that finished together, on a closer thread of its own so the
+     coordinator keeps collecting rewrites and refilling slots meanwhile.
      Then the lineage line, then the ledger line, last. A round of many
      concurrent rewrites runs for hours; folding on acceptance means a loop
      stopped mid-round loses only the rewrites still in flight.
@@ -707,10 +708,23 @@ def read_signal(path: Path) -> tuple[dict | None, str | None]:
         return None, f"unreadable: {type(e).__name__}: {e}"[:200]
 
 
+# Parsed signals by path. The trainer renames a signal into place and never
+# rewrites it (LAYOUT), so a pending signal is read once per loop, not once per
+# refill and status refresh: on the FUSE root each read is a round trip, and a
+# backlog of ~120 pending signals cost a minute per refill.
+_SIGNALS: dict[str, dict] = {}
+
+
 def discover(root: layout.Root, ledger: dict[str, dict]) -> list[Signal]:
     found = []
     for run, p, sid in _pending(root, ledger):
-        data, junk = read_signal(p)
+        cached = _SIGNALS.get(str(p))
+        if cached is not None:
+            data, junk = dict(cached), None
+        else:
+            data, junk = read_signal(p)
+            if data is not None:
+                _SIGNALS[str(p)] = dict(data)
         if data is None and junk is None:
             log.warning("signal %s does not parse yet (fresh, retrying)", sid)
             continue
@@ -1148,22 +1162,41 @@ def _rewrite_ref(root: layout.Root, rewrite: layout.RewriteDir) -> str:
     return str(rewrite.path.relative_to(root.evolution.path))
 
 
-def _ledger_line(root: layout.Root, sig: Signal, outcome: str, **extra) -> None:
+# The coordinator and the closer thread both append to the ledger; one writer
+# at a time keeps every line whole.
+_LEDGER_LOCK = threading.Lock()
+
+
+def _ledger_entry(sig: Signal, outcome: str, **extra) -> dict:
     d = sig.data or {}
-    layout.append_jsonl(
-        root.evolution.ledger,
-        {
-            "stamp": layout.stamp(),
-            "signal": sig.sid,
-            "task": sig.task,
-            "rev": d.get("rev"),
-            "run": sig.run.name,
-            "group": sig.group,
-            "direction": d.get("direction"),
-            "outcome": outcome,
-            **extra,
-        },
-    )
+    return {
+        "stamp": layout.stamp(),
+        "signal": sig.sid,
+        "task": sig.task,
+        "rev": d.get("rev"),
+        "run": sig.run.name,
+        "group": sig.group,
+        "direction": d.get("direction"),
+        "outcome": outcome,
+        **extra,
+    }
+
+
+def _append_ledger(root: layout.Root, entries: list[dict]) -> None:
+    """Ledger lines in one write: a refill closing 40 deferred signals used to
+    pay one FUSE append each."""
+    if not entries:
+        return
+    path = root.evolution.ledger
+    with _LEDGER_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries))
+            f.flush()
+
+
+def _ledger_line(root: layout.Root, sig: Signal, outcome: str, **extra) -> None:
+    _append_ledger(root, [_ledger_entry(sig, outcome, **extra)])
 
 
 def _close(root: layout.Root, h: dict, *, dry: bool) -> None:
@@ -1534,19 +1567,64 @@ def _replay_signal(root: layout.Root, sid: str) -> Signal:
     return Signal(run, path, sid, data, None)
 
 
+def _names(path: Path, listing: dict) -> frozenset[str]:
+    """A directory's entry names, listed once per call; empty when absent."""
+    key = ("names", path)
+    if key not in listing:
+        try:
+            listing[key] = frozenset(os.listdir(path))
+        except (FileNotFoundError, NotADirectoryError):
+            listing[key] = frozenset()
+    return listing[key]
+
+
 def _groups(run: layout.Run, task: str, listing: dict) -> dict[int, list[Path]]:
-    """A run's rollout records of one task by group, listed once per call."""
+    """A run's rollout records of one task by group, listed once per call.
+
+    One listing of the run's rollouts/ answers "has this run any record of the
+    task" for every task, instead of one is_dir() per task per run."""
     key = (run.path, task)
     if key not in listing:
         groups: dict[int, list[Path]] = {}
-        folder = run.rollouts / layout.safe(task)
-        if folder.is_dir():
-            for path in folder.glob("g*-r*.jsonl"):
-                group = path.name[1:].split("-r", 1)[0]
-                if group.isdigit():
-                    groups.setdefault(int(group), []).append(path)
+        name = layout.safe(task)
+        if name in _names(run.rollouts, listing):
+            folder = run.rollouts / name
+            for entry in _names(folder, listing):
+                if not (entry.startswith("g") and entry.endswith(".jsonl")):
+                    continue
+                group, sep, _ = entry[1:-len(".jsonl")].partition("-r")
+                if sep and group.isdigit():
+                    groups.setdefault(int(group), []).append(folder / entry)
         listing[key] = groups
     return listing[key]
+
+
+# A rollout record's mtime and the header fields _resolved_by reads, kept once
+# the record is older than FRESH_SEC. Records are renamed into place and never
+# rewritten (rollout_record.write_record), so a settled one is stat'ed and read
+# once per loop rather than on every refill and status refresh.
+_RECORD_MTIMES: dict[Path, float] = {}
+_RECORD_HEADERS: dict[Path, dict] = {}
+_HEADER_KEYS = ("rev", "infra_failed", "reward")
+
+
+def _record_mtime(path: Path, now: float) -> float:
+    mtime = _RECORD_MTIMES.get(path)
+    if mtime is None:
+        mtime = path.stat().st_mtime
+        if now - mtime >= FRESH_SEC:
+            _RECORD_MTIMES[path] = mtime
+    return mtime
+
+
+def _record_header(path: Path) -> dict:
+    head = _RECORD_HEADERS.get(path)
+    if head is None:
+        full = rollout_record.read_header(path)
+        head = {k: full[k] for k in _HEADER_KEYS if k in full}
+        if path in _RECORD_MTIMES:
+            _RECORD_HEADERS[path] = head
+    return head
 
 
 def _resolved_by(root: layout.Root, s: Signal, listing: dict) -> str | None:
@@ -1564,18 +1642,23 @@ def _resolved_by(root: layout.Root, s: Signal, listing: dict) -> str | None:
     if size < 2 or not created:
         return None
     since, now = layout.parse_stamp(created), time.time()
-    for run in root.run_dirs():
+    if "runs" not in listing:
+        listing["runs"] = root.run_dirs()
+    for run in listing["runs"]:
         for group, paths in sorted(_groups(run, task, listing).items()):
             if run.path == s.run.path and group == own:
                 continue
             # A whole group, finished after this signal and long enough ago
             # that a signal of its own would already be on disk.
-            if len(paths) != size or run.signal(task, group).exists():
+            if (
+                len(paths) != size
+                or run.signal(task, group).name in _names(run.signals, listing)
+            ):
                 continue
-            last = max(path.stat().st_mtime for path in paths)
+            last = max(_record_mtime(path, now) for path in paths)
             if last <= since or now - last < FRESH_SEC:
                 continue
-            headers = [rollout_record.read_header(path) for path in paths]
+            headers = [_record_header(path) for path in paths]
             if any(int(h.get("rev", -1)) != rev for h in headers):
                 continue
             scored = [
@@ -1653,8 +1736,10 @@ def select_work(
 
     Re-entrant by construction: discover() and choose() only read, and the
     ledger the caller passes decides what is still pending. Every path that
-    closes a signal writes its ledger line before this is called again.
+    closes a signal writes its ledger line before this returns, all in one
+    append.
     """
+    lines: list[dict] = []
     if signal:
         picks, rest = [_replay_signal(root, signal)], []
         found: list[Signal] = []
@@ -1670,7 +1755,7 @@ def select_work(
                 log.warning("junk signal %s: %s", s.sid, s.junk)
                 result["junk"] += 1
                 if not dry:
-                    _ledger_line(root, s, "junk", reason=s.junk)
+                    lines.append(_ledger_entry(s, "junk", reason=s.junk))
             elif s.data is not None:
                 why = _resolved_by(root, s, listing)
                 if why is None:
@@ -1679,9 +1764,10 @@ def select_work(
                 log.info("%s %s resolved: %s", s.task, s.sid, why)
                 result["resolved"] += 1
                 if not dry:
-                    _ledger_line(root, s, "resolved", reason=why)
+                    lines.append(_ledger_entry(s, "resolved", reason=why))
         picks, rest = choose(root, live)
     if not picks and not rest:
+        _append_ledger(root, lines)
         return None
 
     todo, deferred = [], []
@@ -1698,7 +1784,7 @@ def select_work(
         log.info("%s %s deferred: %s", s.task, s.sid, reason)
         result["deferred"] += 1
         if not dry:
-            _ledger_line(root, s, "deferred", reason=reason)
+            lines.append(_ledger_entry(s, "deferred", reason=reason))
     for s, why, pick in rest:
         # A signal yielding to a pick this round did not reach (--limit)
         # stays pending; one about a gone revision is closed now.
@@ -1707,8 +1793,155 @@ def select_work(
         log.info("%s %s superseded: %s", s.task, s.sid, why)
         result["superseded"] += 1
         if not dry:
-            _ledger_line(root, s, "superseded", reason=why)
+            lines.append(_ledger_entry(s, "superseded", reason=why))
+    _append_ledger(root, lines)
     return todo
+
+
+class _Closer:
+    """Folds and closes finished rewrites on one thread of its own, in order.
+
+    Folding a batch on the FUSE root takes minutes (strip, row build, the
+    renames, a 19 MB mix version, then the lineage and ledger lines); done on
+    the coordinator it held every finished rewrite and every free slot until
+    it was over. Batches are taken in the order they were handed over; batches
+    queued while a fold runs are folded together, still one mix version per
+    fold. A task stays in ``busy`` from hand-over until its ledger line is
+    written, so the coordinator never starts a second rewrite of it while its
+    signal is still pending. On an error the thread stops with its tasks still
+    busy and the coordinator re-raises; what it did not close stays open for
+    the next round, as before.
+    """
+
+    def __init__(self, root: layout.Root, *, dry: bool, result: dict) -> None:
+        self.root, self.dry, self.result = root, dry, result
+        self.error: BaseException | None = None
+        self._cv = threading.Condition()
+        self._queue: list[dict] = []
+        self._busy: set[str] = set()
+        self._working = False
+        self._stopping = False
+        self._thread = threading.Thread(target=self._run, name="evolve-closer", daemon=True)
+        self._thread.start()
+
+    def submit(self, batch: list[dict]) -> None:
+        if not batch:
+            return
+        with self._cv:
+            self._queue.extend(batch)
+            self._busy.update(h["meta"]["task"] for h in batch)
+            self._cv.notify_all()
+
+    def busy(self) -> frozenset[str]:
+        """Tasks handed over and not closed yet."""
+        with self._cv:
+            return frozenset(self._busy)
+
+    def idle(self) -> bool:
+        with self._cv:
+            return not self._queue and not self._working
+
+    def wait_idle(self, timeout: float | None) -> bool:
+        with self._cv:
+            return self._cv.wait_for(
+                lambda: (not self._queue and not self._working) or self.error is not None,
+                timeout,
+            )
+
+    def raise_if_failed(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+    def stop(self) -> None:
+        with self._cv:
+            self._stopping = True
+            self._cv.notify_all()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                self._cv.wait_for(lambda: self._queue or self._stopping)
+                if not self._queue:
+                    return
+                batch, self._queue = self._queue, []
+                self._working = True
+            try:
+                self._close_batch(batch)
+            except BaseException as error:  # noqa: BLE001 -- re-raised by the coordinator
+                log.exception("fold/close of %d rewrites failed: %s", len(batch), error)
+                with self._cv:
+                    self.error = error
+                    self._working = False
+                    self._cv.notify_all()
+                return
+            with self._cv:
+                self._busy.difference_update(h["meta"]["task"] for h in batch)
+                self._working = False
+                self._cv.notify_all()
+
+    def _close_batch(self, batch: list[dict]) -> None:
+        if not self.dry:
+            # fold() settles each rewrite one way or the other (accepted with
+            # a revision, or rejected/failed at the fold); closing them
+            # afterwards keeps the ledger line the last thing written.
+            accepted = [h for h in batch if h["status"] == "accepted"]
+            t0 = time.monotonic()
+            version = fold(self.root, accepted)
+            if version is not None:
+                self.result["mix_version"] = version
+            if accepted:
+                log.info(
+                    "fold of %d accepted rewrites took %.1fs (mix v%s)",
+                    len(accepted),
+                    time.monotonic() - t0,
+                    f"{version:04d}" if version is not None else " unchanged",
+                )
+        t0 = time.monotonic()
+        closed = 0
+        for h in batch:
+            if h["status"] != "accepted" or not self.dry:
+                _close(self.root, h, dry=self.dry)
+                closed += 1
+        if closed and not self.dry:
+            log.info("closed %d rewrites in %.1fs", closed, time.monotonic() - t0)
+
+
+class _StatusRefresher:
+    """The in-round status.json refresh on a thread of its own: a rebuild
+    scans every rewrite.json under the root, about two minutes on FUSE, and
+    the coordinator must not wait for a derived snapshot."""
+
+    def __init__(self, root: layout.Root) -> None:
+        self.root = root
+        self._thread: threading.Thread | None = None
+
+    def start(self, active_tasks: set[str]) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._refresh, args=(set(active_tasks),), name="evolve-status", daemon=True
+        )
+        self._thread.start()
+
+    def _refresh(self, active_tasks: set[str]) -> None:
+        t0 = time.monotonic()
+        _refresh_status_during_round(self.root, active_tasks=active_tasks)
+        log.info("in-round status refresh took %.1fs", time.monotonic() - t0)
+
+    def join(self) -> None:
+        # Before the end-of-round rebuild, which a late in-round one would
+        # otherwise overwrite with an older snapshot.
+        if self._thread is not None:
+            self._thread.join()
+
+
+def _mix_key(path: Path) -> tuple[int, int, int] | None:
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_ino, st.st_mtime_ns, st.st_size
 
 
 def run_round(
@@ -1762,135 +1995,160 @@ def run_round(
         ec.rewrite_budget_sec(root, refresh=True)
 
     # What box training gives each task and which pin hook it grades under,
-    # from the mix the trainer reads. The mix is 12 MB on GPFS, so this is read when work is
-    # about to be submitted rather than per completion -- and re-read then,
-    # because a fold during the round has already moved the mix on.
+    # from the mix the trainer reads. The mix is 19 MB on the FUSE root, so it
+    # is read when work is about to be submitted rather than per completion,
+    # and re-read only when a fold has published a new version since.
     handled: list[dict] = []
     refill = not signal and not limit and not dry
     last_status_refresh = time.monotonic()
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs: dict = {}
-        # Signals whose handle() raised before a rewrite existed: they close
-        # no ledger line, so a refill would otherwise pick them again forever.
-        stuck: set[str] = set()
-        # Rewrites handled in the current wait, folded and closed together.
-        finished: list[dict] = []
+    closer = _Closer(root, dry=dry, result=result)
+    status = _StatusRefresher(root)
+    declared_cache: dict = {}
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs: dict = {}
+            # Signals whose handle() raised before a rewrite existed: they close
+            # no ledger line, so a refill would otherwise pick them again forever.
+            stuck: set[str] = set()
 
-        def fill(batch: list[Signal]) -> None:
-            """Submit up to the free slots, newest mix in hand."""
-            if not admission_is_open(dry=dry):
-                return
-            batch = batch[: workers - len(futs)]
-            if not batch:
-                return
-            input_rows = {} if PolicyCanaryConfig.from_env().group_size else None
-            declared, pretests, protecteds = read_declared(root.mix.live, rows_out=input_rows)
-            for s in batch:
+            def declared_now():
+                canary = bool(PolicyCanaryConfig.from_env().group_size)
+                key = (_mix_key(root.mix.live), canary)
+                if declared_cache.get("key") != key:
+                    input_rows = {} if canary else None
+                    declared_cache["value"] = (
+                        *read_declared(root.mix.live, rows_out=input_rows),
+                        input_rows,
+                    )
+                    declared_cache["key"] = key
+                return declared_cache["value"]
+
+            def fill(batch: list[Signal]) -> None:
+                """Submit up to the free slots, newest mix in hand."""
                 if not admission_is_open(dry=dry):
-                    break
-                futs[
-                    ex.submit(
-                        handle,
-                        root,
-                        s,
-                        declared=declared,
-                        dry=dry,
-                        pretests=pretests,
-                        protecteds=protecteds,
-                        input_row=input_rows.get(s.task) if input_rows is not None else None,
-                    )
-                ] = s
+                    return
+                batch = batch[: workers - len(futs)]
+                if not batch:
+                    return
+                declared, pretests, protecteds, input_rows = declared_now()
+                for s in batch:
+                    if not admission_is_open(dry=dry):
+                        break
+                    futs[
+                        ex.submit(
+                            handle,
+                            root,
+                            s,
+                            declared=declared,
+                            dry=dry,
+                            pretests=pretests,
+                            protecteds=protecteds,
+                            input_row=input_rows.get(s.task) if input_rows is not None else None,
+                        )
+                    ] = s
 
-        def fill_free_slots(*, busy: set[str]) -> None:
-            """Take pending signals into the free slots. The ledger is re-read
-            because _close may have just added to it; ``busy`` are tasks whose
-            rewrite has ended but is not closed yet."""
-            more = select_work(
-                root,
-                load_ledger(root),
-                result,
-                only=only,
-                limit=limit,
-                dry=dry,
-                signal=None,
-                running=frozenset(s.task for s in futs.values()) | busy,
-                stuck=frozenset(stuck),
-            )
-            fill(more or [])
+            def fill_free_slots() -> None:
+                """Take pending signals into the free slots.
 
-        fill(todo)
-        while futs:
-            # A new signal can arrive while the first rewrite is still running.
-            # Poll only when there is an idle worker; otherwise wait for one to
-            # finish as before. The idle loop already watches signals every 5 s.
-            wait_timeout = (
-                FREE_SLOT_POLL_SEC if refill and len(futs) < workers else None
-            )
-            if not dry:
-                until_status_refresh = max(
-                    0.0,
-                    STATUS_REFRESH_SEC
-                    - (time.monotonic() - last_status_refresh),
+                The busy set is taken before the ledger is read: the closer
+                writes a task's ledger line before it lets go of the task, so
+                a task missing from the set has its line in the ledger read
+                below, and its finished signal is never handed out again."""
+                t0 = time.monotonic()
+                running = frozenset(s.task for s in futs.values()) | closer.busy()
+                more = select_work(
+                    root,
+                    load_ledger(root),
+                    result,
+                    only=only,
+                    limit=limit,
+                    dry=dry,
+                    signal=None,
+                    running=running,
+                    stuck=frozenset(stuck),
                 )
+                before = len(futs)
+                fill(more or [])
+                took = time.monotonic() - t0
+                if len(futs) > before or took >= 5:
+                    log.info(
+                        "refill took %.1fs: %d started, %d running, %d closing",
+                        took,
+                        len(futs) - before,
+                        len(futs),
+                        len(closer.busy()),
+                    )
+
+            fill(todo)
+            while True:
+                closer.raise_if_failed()
+                if not futs:
+                    # Nothing running: what is still being folded frees its
+                    # tasks when it is closed, and their signals start then.
+                    if not closer.idle():
+                        closer.wait_idle(FREE_SLOT_POLL_SEC if refill else None)
+                        closer.raise_if_failed()
+                    if refill and admission_is_open():
+                        fill_free_slots()
+                    if not futs and closer.idle():
+                        break
+                    continue
+                # A new signal can arrive while the first rewrite is still
+                # running. Poll only when there is an idle worker; otherwise
+                # wait for one to finish. The idle loop already watches signals
+                # every 5 s.
                 wait_timeout = (
-                    until_status_refresh
-                    if wait_timeout is None
-                    else min(wait_timeout, until_status_refresh)
+                    FREE_SLOT_POLL_SEC if refill and len(futs) < workers else None
                 )
-            done, _ = wait(
-                list(futs),
-                timeout=wait_timeout,
-                return_when=FIRST_COMPLETED,
-            )
-            for fut in done:
-                s = futs.pop(fut)
-                try:
-                    h = fut.result()
-                except NoSeed as e:
-                    log.warning("junk signal %s: %s", s.sid, e)
-                    result["junk"] += 1
-                    if not dry:
-                        _ledger_line(root, s, "junk", reason=str(e)[:200])
-                    continue
-                except Exception as e:  # noqa: BLE001 -- one signal, not the round
-                    log.exception(
-                        "%s: handling failed before a rewrite existed: %s", s.sid, e
+                if not dry:
+                    until_status_refresh = max(
+                        0.0,
+                        STATUS_REFRESH_SEC - (time.monotonic() - last_status_refresh),
                     )
-                    stuck.add(s.sid)
-                    continue
-                meta = h["meta"]
-                log.info(
-                    "%s %s r%s %s %s/%s -> %s (%s%s) %s",
-                    meta["task"],
-                    s.sid,
-                    meta["input_rev"],
-                    meta["job"],
-                    s.data.get("solved"),
-                    s.data.get("total"),
-                    h["status"],
-                    meta.get("stage") or "-",
-                    f": {meta['reason'][:200]}" if meta.get("reason") else "",
-                    _rewrite_ref(root, h["rewrite"]),
+                    wait_timeout = (
+                        until_status_refresh
+                        if wait_timeout is None
+                        else min(wait_timeout, until_status_refresh)
+                    )
+                done, _ = wait(
+                    list(futs),
+                    timeout=wait_timeout,
+                    return_when=FIRST_COMPLETED,
                 )
-                handled.append(h)
-                finished.append(h)
-            # A free slot takes the next pending signal now, including one
-            # written while all existing rewrites are still running, and
-            # before this batch is folded: folding one rewrite costs tens of
-            # seconds on GPFS, and a slot left empty until a batch of 60 was
-            # folded sat idle for half an hour. The tasks just finished count
-            # as running until they are closed below -- their signals are
-            # still pending in the ledger, and a second rewrite would race the
-            # fold for r<N+1>. Their remaining signals are judged against the
-            # new revision on a later refill.
-            #
-            # Not for a dry round, which closes no ledger line: the junk,
-            # deferred and superseded signals it reports are still pending on
-            # the next call, and refilling would count each of them once per
-            # refill. A dry round is a snapshot of one moment by design.
-            if refill and len(futs) < workers and admission_is_open():
-                fill_free_slots(busy={h["meta"]["task"] for h in finished})
-            if not dry:
+                # Rewrites handled in this wait, folded and closed together.
+                finished: list[dict] = []
+                for fut in done:
+                    s = futs.pop(fut)
+                    try:
+                        h = fut.result()
+                    except NoSeed as e:
+                        log.warning("junk signal %s: %s", s.sid, e)
+                        result["junk"] += 1
+                        if not dry:
+                            _ledger_line(root, s, "junk", reason=str(e)[:200])
+                        continue
+                    except Exception as e:  # noqa: BLE001 -- one signal, not the round
+                        log.exception(
+                            "%s: handling failed before a rewrite existed: %s", s.sid, e
+                        )
+                        stuck.add(s.sid)
+                        continue
+                    meta = h["meta"]
+                    log.info(
+                        "%s %s r%s %s %s/%s -> %s (%s%s) %s",
+                        meta["task"],
+                        s.sid,
+                        meta["input_rev"],
+                        meta["job"],
+                        s.data.get("solved"),
+                        s.data.get("total"),
+                        h["status"],
+                        meta.get("stage") or "-",
+                        f": {meta['reason'][:200]}" if meta.get("reason") else "",
+                        _rewrite_ref(root, h["rewrite"]),
+                    )
+                    handled.append(h)
+                    finished.append(h)
                 # Folded as soon as they are accepted, every rewrite that
                 # finished in this wait into one mix version, rather than once
                 # for the whole round. A round of 64 concurrent rewrites runs
@@ -1901,28 +2159,34 @@ def run_round(
                 # 87 more at risk. One version per batch rather than per
                 # rewrite: each version rewrites the whole mix, so N rewrites
                 # finishing together cost one write, not N in a queue.
-                # fold() settles each rewrite one way or the other (accepted
-                # with a revision, or rejected/failed at the fold); closing
-                # them afterwards keeps the ledger line the last thing written.
-                version = fold(root, [h for h in finished if h["status"] == "accepted"])
-                if version is not None:
-                    result["mix_version"] = version
-            for h in finished:
-                if h["status"] != "accepted" or not dry:
-                    _close(root, h, dry=dry)
-            # With nothing left running the loop would end here, before the
-            # tasks just closed are free again; their signals start now.
-            if refill and finished and not futs and admission_is_open():
-                fill_free_slots(busy=set())
-            finished.clear()
-            if (
-                not dry
-                and time.monotonic() - last_status_refresh >= STATUS_REFRESH_SEC
-            ):
-                _refresh_status_during_round(
-                    root, active_tasks={s.task for s in futs.values()}
-                )
-                last_status_refresh = time.monotonic()
+                #
+                # The closer does it on its own thread: a fold on the FUSE
+                # root takes minutes, and done here it held every other
+                # finished rewrite and every free slot until it was over
+                # (2026-10-14: finished rewrites collected in 5-minute bursts).
+                # The tasks handed over count as running until they are closed
+                # -- their signals are still pending in the ledger, and a second
+                # rewrite would race the fold for r<N+1>.
+                closer.submit(finished)
+                # A free slot takes the next pending signal now, including one
+                # written while all existing rewrites are still running.
+                #
+                # Not for a dry round, which closes no ledger line: the junk,
+                # deferred and superseded signals it reports are still pending on
+                # the next call, and refilling would count each of them once per
+                # refill. A dry round is a snapshot of one moment by design.
+                if refill and len(futs) < workers and admission_is_open():
+                    fill_free_slots()
+                if (
+                    not dry
+                    and time.monotonic() - last_status_refresh >= STATUS_REFRESH_SEC
+                ):
+                    status.start({s.task for s in futs.values()})
+                    last_status_refresh = time.monotonic()
+    finally:
+        closer.stop()
+        status.join()
+    closer.raise_if_failed()
 
     for h in handled:
         result["counts"][h["status"]] = result["counts"].get(h["status"], 0) + 1
