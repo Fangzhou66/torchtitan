@@ -206,6 +206,20 @@ class RewardObserverTest(unittest.TestCase):
                     values = dict(namespace["_evolution_metrics"](owner))
                     self.assertEqual(values["evolution/rewrites/accepted_harder"], 1)
                     self.assertEqual(values["evolution/flow/rewrites_accepted"], 1)
+                    logged = []
+                    wandb.log = lambda payload, **kwargs: logged.append(payload)
+                    wandb.plot = SimpleNamespace(
+                        line_series=lambda xs, ys, **kwargs: (xs, ys, kwargs["title"])
+                    )
+                    namespace["_evolution_metrics"](owner, step=2)
+                    self.assertEqual(
+                        sorted(logged[0]),
+                        ["evolution/flow/chart_easier", "evolution/flow/chart_harder"],
+                    )
+                    self.assertEqual(
+                        logged[0]["evolution/flow/chart_harder"][2],
+                        "Evolution flow, harder signals (cumulative)",
+                    )
                     observer.layout.write_json_atomic(
                         root.evolution.status,
                         {
@@ -566,6 +580,86 @@ class RewardObserverTest(unittest.TestCase):
             later = metrics.poll(step=10)
             self.assertEqual(later["evolution/flow/rewrites_trained"], 1)
             self.assertEqual(later["evolution/flow/train_latency_steps"], 7)
+
+    def test_flow_is_also_split_by_the_signals_direction(self):
+        stamp = observer.layout.stamp
+        with tempfile.TemporaryDirectory() as directory:
+            root = observer.layout.Root(Path(directory))
+            run = root.run("current")
+            events = run.trainer / "training_lineage/events.jsonl"
+            base = 1_790_000_000
+
+            def lineage(event, group, task, revision, at, **fields):
+                observer.layout.append_jsonl(
+                    events,
+                    {
+                        "event": event,
+                        "group_id": group,
+                        "task_id": task,
+                        "sample_revision": revision,
+                        "occurrence_id": f"s:{group}",
+                        "time_unix_ns": (base + at) * 10**9,
+                        **fields,
+                    },
+                )
+
+            signals = {}
+            for group, (task, direction) in enumerate(
+                [("a", "harder"), ("b", "easier"), ("c", "harder")], 1
+            ):
+                lineage("claimed", group, task, f"{task}@0", 0, generator_policy_version=1)
+                observer.layout.write_json_atomic(
+                    run.signal(task, group),
+                    {
+                        "task": task,
+                        "group": group,
+                        "direction": direction,
+                        "created": stamp(base + 100),
+                    },
+                )
+                signals[task] = observer.layout.signal_id(run.name, task, group)
+            metrics = outcome_metrics.EvolutionMetrics(run, root)
+            metrics.poll(step=1)
+
+            # a and b are consumed and accepted (b through repair_spec, which
+            # still counts under its signal's direction); c is still open.
+            for task, direction, route in [("a", "harder", None), ("b", "easier", "repair_spec")]:
+                observer.layout.append_jsonl(
+                    root.evolution.ledger, {"signal": signals[task], "outcome": "handled"}
+                )
+                outcome_metrics.record_outcome(
+                    root,
+                    root.evolution.task(task).rewrite(direction, "1"),
+                    {
+                        "signal": signals[task],
+                        "task": task,
+                        "job": direction,
+                        "status": "accepted",
+                        "route": route,
+                        "finished": stamp(base + 300),
+                    },
+                )
+            lineage("trained", 4, "a", "a@1", 900, train_step=3)
+            values = metrics.poll(step=3)
+
+            expected = {
+                "harder": {"signals_issued": 2, "signals_consumed": 1, "rewrites_accepted": 1, "rewrites_trained": 1},
+                "easier": {"signals_issued": 1, "signals_consumed": 1, "rewrites_accepted": 1, "rewrites_trained": 0},
+            }
+            for direction, counts in expected.items():
+                for key, count in counts.items():
+                    self.assertEqual(values[f"evolution/flow/{key}_{direction}"], count)
+                    self.assertEqual(
+                        values[f"evolution/flow/{key}"],
+                        sum(c[key] for c in expected.values()),
+                    )
+            self.assertNotIn("evolution/flow/signals_issued_unknown", values)
+
+            xs, ys, keys = metrics.flow_series("harder")
+            self.assertEqual((xs, keys), ([1, 3], list(outcome_metrics.FLOW_KEYS)))
+            self.assertEqual(ys, [[2, 2], [0, 1], [0, 1], [0, 1]])
+            self.assertEqual(metrics.flow_series("easier")[1], [[1, 1], [0, 1], [0, 1], [0, 0]])
+            self.assertEqual(metrics.flow_series()[1], [[3, 3], [0, 2], [0, 2], [0, 1]])
 
     def test_retried_signal_closes_once_and_counts_each_attempt(self):
         with tempfile.TemporaryDirectory() as directory:

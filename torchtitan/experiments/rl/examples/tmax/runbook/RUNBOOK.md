@@ -1047,8 +1047,14 @@ step; no separate observer command is needed. Every count is cumulative for
 this training run and taken when the trainer observes it, so a rate is the
 slope of its curve.
 
-`evolution/flow/chart` overlays the four flow counts as a cumulative flow
-diagram over training steps:
+`evolution/flow/chart_harder` and `evolution/flow/chart_easier` each overlay
+the four flow counts as a cumulative flow diagram over training steps, for the
+signals of one direction. The directions are charted apart because they mean
+opposite things -- `harder` comes from a group that all passed, `easier` from
+one that all failed -- and move opposite ways as the policy learns; summed,
+their gaps mix two queues and a flat total can hide both moving. A rewrite
+counts under the direction of the signal that asked for it, whichever route
+handled it:
 
 - `signals_issued`: signals this run wrote, counted once the group's claim is
   visible.
@@ -1077,11 +1083,11 @@ is the wait for the task's next draw.
 
 | Key | Count |
 | --- | --- |
-| `evolution/flow/signals_issued`, `signals_consumed`, `rewrites_accepted`, `rewrites_trained` | The four curves above, also logged as scalars. |
+| `evolution/flow/signals_issued`, `signals_consumed`, `rewrites_accepted`, `rewrites_trained` | The four curves, summed over both directions. |
+| `evolution/flow/<key>_<direction>` | The same four counts for `harder` and `easier` signals: the curves of the two charts. `signals_issued_unknown` appears only if a signal carried no direction. |
 | `evolution/flow/accept_latency_steps`, `train_latency_steps` | Median steps from issue to acceptance, and to the first training step on the accepted revision, over the last 20. |
 | `evolution/signals/<outcome>` | Consumed signals by ledger decision: `handled`, `deferred`, `superseded`, `resolved`, `junk`. They sum to `signals_consumed`. |
 | `evolution/rewrites/<outcome>` | Rewrite attempts by verdict: `accepted_harder`, `accepted_easier`, `kept`, `rejected`, `failed` (interrupted attempts included). |
-| `evolution/flow/signals_issued_<direction>` | `signals_issued` split by the signal's `harder` / `easier` direction. |
 | `evolution/rewrites_by_stage/<status>/<stage>` | Rewrite attempts by verdict and the stage it was decided at (`none` when the loop recorded no stage), so a run of rejections names its cause. |
 | `evolution/flow/rewrite_secs` | Median wall seconds of the last 20 finished rewrite attempts. |
 | `evolution/<route>/attempted`, `accepted`, `kept`, `rejected`, `failed`, `acceptance_rate` | Per route: `evolve` (harder), `simplify` (easier), `repair_spec`, `invalid_signal`. |

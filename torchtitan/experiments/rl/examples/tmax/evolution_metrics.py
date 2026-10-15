@@ -20,6 +20,13 @@ revision has been trained on at least once, and `train_latency_steps` is the
 wait from a signal's issue to that first training step: an accepted revision
 reaches training only when the epoch order next reaches its task.
 
+The two signal directions mean opposite things -- `harder` comes from a group
+that all passed, `easier` from one that all failed -- and move opposite ways as
+the policy learns, so each direction also gets its own four curves
+(`<key>_<direction>`, one overlay chart per direction). A signal's direction
+follows every stage, so a rewrite counts under the direction of the signal
+that asked for it whatever route handled it.
+
 `stale/*` counts the groups trained on a task's original while its rewrite was
 pending: claimed after one of this run's signals asked to rewrite that exact
 revision and before the loop consumed the signal. A group claimed before the
@@ -43,6 +50,7 @@ REWRITE_OUTCOMES = (
 )
 REWRITE_ROUTES = ("evolve", "simplify", "repair_spec", "invalid_signal")
 FLOW_KEYS = ("signals_issued", "signals_consumed", "rewrites_accepted", "rewrites_trained")
+DIRECTIONS = ("harder", "easier")
 # Merges the latency median looks back over: recent enough to move when the
 # loop speeds up or stalls, wide enough that one outlier does not set it.
 LATENCY_WINDOW = 20
@@ -102,21 +110,24 @@ class EvolutionMetrics:
         # for a run without attempts.
         self.claimed_origin: dict[tuple[str | None, int], int] = {}
         self.issued: dict[str, int] = {}
-        self.issued_by_direction: Counter[str] = Counter()
+        self.signal_direction: dict[str, str] = {}
         self.closed: dict[str, str] = {}
         self.rewrites: set[str] = set()
         self.outcomes: Counter[str] = Counter()
         self.routes: dict[str, Counter[str]] = {route: Counter() for route in REWRITE_ROUTES}
         self.latencies: list[int] = []
+        self.accepted_signals: list[str] = []
         # Why rewrites ended where they did, and how long each took.
         self.stages: Counter[tuple[str, str]] = Counter()
         self.rewrite_secs: list[float] = []
-        self.history: dict[int, tuple[int, ...]] = {}
+        # Flow counts at each logged step: None for all signals, else by direction.
+        self.history: dict[int, dict[str | None, tuple[int, ...]]] = {}
         # First training on an accepted revision: trained groups by task, and
         # accepted rewrites still waiting for one.
         self.trained: dict[str, list[tuple[float, str, int]]] = {}
-        self.awaiting_training: dict[str, tuple[str, str, float, int]] = {}
+        self.awaiting_training: dict[str, tuple[str, str, float, int, str]] = {}
         self.train_latencies: list[int] = []
+        self.trained_signals: list[str] = []
         # Staleness: every claim by task, each signal's revision and lifetime.
         self.claims: dict[str, list[tuple[float, str, str]]] = {}
         self.group_revision: dict[tuple[str | None, int], str] = {}
@@ -171,7 +182,7 @@ class EvolutionMetrics:
         # Counted once its claim is visible, so its issue step is known.
         if origin is not None:
             self.issued[identity] = origin
-            self.issued_by_direction[signal.get("direction") or "unknown"] += 1
+            self.signal_direction[identity] = signal.get("direction") or "unknown"
             revision = self.group_revision.get(key)
             if revision is not None and signal.get("created"):
                 self.signal_span[identity] = (
@@ -230,6 +241,7 @@ class EvolutionMetrics:
             if status == "accepted":
                 outcome = "accepted_repair_spec" if route == "repair_spec" else f"accepted_{event['direction']}"
                 self.outcomes[outcome] += 1
+                self.accepted_signals.append(event.get("signal"))
                 origin = self.issued.get(event.get("signal"))
                 if step is not None and origin is not None:
                     self.latencies.append(step - origin)
@@ -240,6 +252,7 @@ class EvolutionMetrics:
                         span[1],
                         layout.parse_stamp(event["finished"]),
                         origin,
+                        event["signal"],
                     )
             elif status == "interrupted":
                 self.outcomes["failed"] += 1
@@ -267,7 +280,7 @@ class EvolutionMetrics:
     def _match_training(self) -> None:
         """An accepted rewrite reaches training at the first trained group of
         its task on a revision other than the one its signal measured."""
-        for rewrite, (task, old, accepted_at, origin) in list(
+        for rewrite, (task, old, accepted_at, origin, signal) in list(
             self.awaiting_training.items()
         ):
             first = min(
@@ -280,6 +293,7 @@ class EvolutionMetrics:
             )
             if first is not None:
                 self.train_latencies.append(first - origin)
+                self.trained_signals.append(signal)
                 del self.awaiting_training[rewrite]
 
     def poll(self, *, step: int | None = None) -> dict[str, float]:
@@ -296,8 +310,17 @@ class EvolutionMetrics:
             self.outcomes["accepted_harder"] + self.outcomes["accepted_easier"] + self.outcomes["accepted_repair_spec"],
             len(self.train_latencies),
         )
+        by_direction = {
+            d: (
+                sum(v == d for v in self.signal_direction.values()),
+                sum(self.signal_direction[s] == d for s in self.closed if s in self.issued),
+                sum(self.signal_direction.get(s) == d for s in self.accepted_signals),
+                sum(self.signal_direction.get(s) == d for s in self.trained_signals),
+            )
+            for d in DIRECTIONS
+        }
         if step is not None:
-            self.history[step] = flow
+            self.history[step] = {None: flow, **by_direction}
         values = {
             **{f"evolution/flow/{k}": float(v) for k, v in zip(FLOW_KEYS, flow, strict=True)},
             **{f"evolution/signals/{o}": float(closed[o]) for o in SIGNAL_OUTCOMES},
@@ -315,8 +338,13 @@ class EvolutionMetrics:
                 for outcome in ("attempted", "accepted", "kept", "rejected", "failed")
             },
         }
-        for direction, count in self.issued_by_direction.items():
-            values[f"evolution/flow/signals_issued_{direction}"] = float(count)
+        for direction, counts in by_direction.items():
+            for key, count in zip(FLOW_KEYS, counts, strict=True):
+                values[f"evolution/flow/{key}_{direction}"] = float(count)
+        # A signal written without a direction still shows up as its own count.
+        unknown = sum(v not in DIRECTIONS for v in self.signal_direction.values())
+        if unknown:
+            values["evolution/flow/signals_issued_unknown"] = float(unknown)
         for (status, stage), count in self.stages.items():
             values[f"evolution/rewrites_by_stage/{status}/{stage}"] = float(count)
         if self.rewrite_secs:
@@ -336,11 +364,14 @@ class EvolutionMetrics:
             )
         return values
 
-    def flow_series(self) -> tuple[list[int], list[list[int]], list[str]]:
-        """The flow counts at every logged step, for one overlay chart."""
+    def flow_series(
+        self, direction: str | None = None
+    ) -> tuple[list[int], list[list[int]], list[str]]:
+        """The flow counts at every logged step, for one overlay chart: all
+        signals, or only those of one direction."""
         steps = sorted(self.history)
         return (
             steps,
-            [[self.history[s][i] for s in steps] for i in range(len(FLOW_KEYS))],
+            [[self.history[s][direction][i] for s in steps] for i in range(len(FLOW_KEYS))],
             list(FLOW_KEYS),
         )

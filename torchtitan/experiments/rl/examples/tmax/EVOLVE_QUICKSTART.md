@@ -222,7 +222,8 @@ starts, and `loop.log` has one `recovered local rewrite` line for each.
 - `runs/<run>/trainer/mix_versions.jsonl`: whether the trainer has picked the
   version up.
 - W&B: the training run logs the evolution flow (`evolution/flow/*`, with the
-  issued/consumed/accepted overlay in `evolution/flow/chart`), outcome counts
+  issued/consumed/accepted overlay per signal direction in
+  `evolution/flow/chart_harder` and `evolution/flow/chart_easier`), outcome counts
   (`evolution/signals/*`, `evolution/rewrites/*`) and the loop's queue
   (`evolution/queue/*`). See [the training runbook](runbook/RUNBOOK.md#evolution-charts-in-the-training-wb-run)
   for what each one counts and for the supplementary observer link.

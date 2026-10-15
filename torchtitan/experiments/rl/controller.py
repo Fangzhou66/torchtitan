@@ -1978,22 +1978,23 @@ class Controller(Configurable):
                     import wandb
 
                     if wandb.run is not None:
-                        xs, ys, keys = self._evolution_flow.flow_series()
-                        # One overlay: W&B draws each scalar in its own panel,
-                        # and the gaps between these lines are the point.
-                        wandb.log(
-                            {
-                                "evolution/flow/chart": wandb.plot.line_series(
+                        # One overlay per signal direction: W&B draws each
+                        # scalar in its own panel, and the gaps between these
+                        # lines are the point; summed across directions the
+                        # gaps mix two queues that move opposite ways.
+                        charts = {}
+                        for direction in ("harder", "easier"):
+                            xs, ys, keys = self._evolution_flow.flow_series(direction)
+                            charts[f"evolution/flow/chart_{direction}"] = (
+                                wandb.plot.line_series(
                                     xs,
                                     ys,
                                     keys=keys,
-                                    title="Evolution flow (cumulative)",
+                                    title=f"Evolution flow, {direction} signals (cumulative)",
                                     xname="Training step",
                                 )
-                            },
-                            step=step,
-                            commit=False,
-                        )
+                            )
+                        wandb.log(charts, step=step, commit=False)
                 except Exception:
                     logger.exception("failed to log the evolution flow chart")
         if run is not None and self.config.metrics.enable_wandb:
