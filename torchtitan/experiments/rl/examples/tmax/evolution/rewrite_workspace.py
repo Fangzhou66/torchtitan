@@ -346,7 +346,7 @@ def _pack_session_payloads(active: Path) -> None:
 
 
 def _unpublishable_name(name: str) -> bool:
-    # Manifold FUSE fails a name with a newline as ENOENT. Tab and the other
+    # The durable FUSE mount fails a name with a newline as ENOENT. Tab and the other
     # control characters pass today, but no file a tool means to create
     # carries one, so they are refused alike.
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
