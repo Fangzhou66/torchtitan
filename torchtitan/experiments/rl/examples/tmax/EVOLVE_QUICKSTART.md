@@ -181,8 +181,9 @@ enter training batches, create evolution signals or contribute to fixed
 validation rewards. Pending policy admission occupies an evolution-worker slot.
 The controller cancels its probes when optimization ends, before final evaluation.
 
-Track `evolution/simplify/*`, `evolution/repair_spec/*` and
-`evolution/invalid_signal/*` separately. Repairs are counted in
+Track `evolution/evolve/*`, `evolution/simplify/*`, `evolution/repair_spec/*`
+and `evolution/invalid_signal/*` separately; `evolution/rewrites_by_stage/*`
+says where each verdict was reached. Repairs are counted in
 `evolution/rewrites/accepted_repair_spec`, not `accepted_easier`.
 `evolution/policy_canary/active` and `waiting` show controller admission load.
 

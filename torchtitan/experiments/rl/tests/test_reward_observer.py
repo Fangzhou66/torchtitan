@@ -307,6 +307,50 @@ class RewardObserverTest(unittest.TestCase):
             self.assertEqual(metrics.poll(), first)
             self.assertEqual(outcome_metrics.EvolutionMetrics(run, root).poll(), first)
 
+    def test_evolve_route_stage_direction_and_duration_are_logged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = observer.layout.Root(Path(directory))
+            run = root.run("current")
+            metrics = outcome_metrics.EvolutionMetrics(run, root)
+            self._claim(run, 1, 0)
+            observer.layout.write_json_atomic(
+                run.signal("a", 1), {"task": "a", "group": 1, "direction": "harder"}
+            )
+            self._claim(run, 2, 0)
+            observer.layout.write_json_atomic(
+                run.signal("b", 2), {"task": "b", "group": 2, "direction": "easier"}
+            )
+            for name, status, stage in [
+                ("0", "accepted", None),
+                ("1", "rejected", "agent"),
+                ("2", "interrupted", "setup"),
+            ]:
+                outcome_metrics.record_outcome(
+                    root,
+                    root.evolution.task("a").rewrite("harder", name),
+                    {
+                        "signal": f"current/a--g{name}",
+                        "task": "a",
+                        "job": "harder",
+                        "status": status,
+                        "stage": stage,
+                        "started": "20261014-000000Z",
+                        "finished": "20261014-000100Z",
+                    },
+                )
+            values = metrics.poll(step=1)
+            # The harder route is "evolve"; it used to be dropped.
+            self.assertEqual(values["evolution/evolve/attempted"], 3)
+            self.assertEqual(values["evolution/evolve/accepted"], 1)
+            self.assertEqual(values["evolution/evolve/failed"], 1)
+            self.assertAlmostEqual(values["evolution/evolve/acceptance_rate"], 1 / 3)
+            self.assertEqual(values["evolution/rewrites_by_stage/rejected/agent"], 1)
+            self.assertEqual(values["evolution/rewrites_by_stage/failed/setup"], 1)
+            self.assertEqual(values["evolution/rewrites_by_stage/accepted/none"], 1)
+            self.assertEqual(values["evolution/flow/signals_issued_harder"], 1)
+            self.assertEqual(values["evolution/flow/signals_issued_easier"], 1)
+            self.assertEqual(values["evolution/flow/rewrite_secs"], 60)
+
     def test_flow_counts_issue_close_and_merge_with_latency(self):
         with tempfile.TemporaryDirectory() as directory:
             root = observer.layout.Root(Path(directory))

@@ -41,7 +41,7 @@ SIGNAL_OUTCOMES = ("handled", "deferred", "superseded", "resolved", "junk")
 REWRITE_OUTCOMES = (
     "accepted_harder", "accepted_easier", "accepted_repair_spec", "kept", "rejected", "failed"
 )
-REWRITE_ROUTES = ("simplify", "repair_spec", "invalid_signal")
+REWRITE_ROUTES = ("evolve", "simplify", "repair_spec", "invalid_signal")
 FLOW_KEYS = ("signals_issued", "signals_consumed", "rewrites_accepted", "rewrites_trained")
 # Merges the latency median looks back over: recent enough to move when the
 # loop speeds up or stalls, wide enough that one outlier does not set it.
@@ -102,11 +102,15 @@ class EvolutionMetrics:
         # for a run without attempts.
         self.claimed_origin: dict[tuple[str | None, int], int] = {}
         self.issued: dict[str, int] = {}
+        self.issued_by_direction: Counter[str] = Counter()
         self.closed: dict[str, str] = {}
         self.rewrites: set[str] = set()
         self.outcomes: Counter[str] = Counter()
         self.routes: dict[str, Counter[str]] = {route: Counter() for route in REWRITE_ROUTES}
         self.latencies: list[int] = []
+        # Why rewrites ended where they did, and how long each took.
+        self.stages: Counter[tuple[str, str]] = Counter()
+        self.rewrite_secs: list[float] = []
         self.history: dict[int, tuple[int, ...]] = {}
         # First training on an accepted revision: trained groups by task, and
         # accepted rewrites still waiting for one.
@@ -167,6 +171,7 @@ class EvolutionMetrics:
         # Counted once its claim is visible, so its issue step is known.
         if origin is not None:
             self.issued[identity] = origin
+            self.issued_by_direction[signal.get("direction") or "unknown"] += 1
             revision = self.group_revision.get(key)
             if revision is not None and signal.get("created"):
                 self.signal_span[identity] = (
@@ -210,6 +215,11 @@ class EvolutionMetrics:
                     started, self.rewrite_started.get(event["signal"], started)
                 )
             status = event["status"]
+            self.stages[("failed" if status == "interrupted" else status, event.get("stage") or "none")] += 1
+            if event.get("started") and event.get("finished"):
+                self.rewrite_secs.append(
+                    layout.parse_stamp(event["finished"]) - layout.parse_stamp(event["started"])
+                )
             route = event.get("route") or ("simplify" if event["direction"] == "easier" else "evolve")
             if route in self.routes:
                 self.routes[route]["attempted"] += 1
@@ -302,6 +312,14 @@ class EvolutionMetrics:
                 for outcome in ("attempted", "accepted", "kept", "rejected", "failed")
             },
         }
+        for direction, count in self.issued_by_direction.items():
+            values[f"evolution/flow/signals_issued_{direction}"] = float(count)
+        for (status, stage), count in self.stages.items():
+            values[f"evolution/rewrites_by_stage/{status}/{stage}"] = float(count)
+        if self.rewrite_secs:
+            values["evolution/flow/rewrite_secs"] = float(
+                statistics.median(self.rewrite_secs[-LATENCY_WINDOW:])
+            )
         for route, counts in self.routes.items():
             if counts["attempted"]:
                 values[f"evolution/{route}/acceptance_rate"] = counts["accepted"] / counts["attempted"]

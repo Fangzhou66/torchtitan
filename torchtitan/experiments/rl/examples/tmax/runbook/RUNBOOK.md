@@ -1081,6 +1081,10 @@ is the wait for the task's next draw.
 | `evolution/flow/accept_latency_steps`, `train_latency_steps` | Median steps from issue to acceptance, and to the first training step on the accepted revision, over the last 20. |
 | `evolution/signals/<outcome>` | Consumed signals by ledger decision: `handled`, `deferred`, `superseded`, `resolved`, `junk`. They sum to `signals_consumed`. |
 | `evolution/rewrites/<outcome>` | Rewrite attempts by verdict: `accepted_harder`, `accepted_easier`, `kept`, `rejected`, `failed` (interrupted attempts included). |
+| `evolution/flow/signals_issued_<direction>` | `signals_issued` split by the signal's `harder` / `easier` direction. |
+| `evolution/rewrites_by_stage/<status>/<stage>` | Rewrite attempts by verdict and the stage it was decided at (`none` when the loop recorded no stage), so a run of rejections names its cause. |
+| `evolution/flow/rewrite_secs` | Median wall seconds of the last 20 finished rewrite attempts. |
+| `evolution/<route>/attempted`, `accepted`, `kept`, `rejected`, `failed`, `acceptance_rate` | Per route: `evolve` (harder), `simplify` (easier), `repair_spec`, `invalid_signal`. |
 | `evolution/stale/while_waiting`, `while_rewriting` | Groups trained on a task's original while its rewrite was pending: claimed after one of this run's signals asked to rewrite that exact revision and before the loop consumed the signal, split by whether the rewrite had started. Each signal is counted when it is consumed. |
 | `evolution/queue/waiting_tasks` | Tasks a free worker could start now, one per task: pending signals after the loop's one-signal-per-task choice and its deferral rule, minus tasks already running. |
 | `evolution/queue/running` | Rewrites in progress. |
