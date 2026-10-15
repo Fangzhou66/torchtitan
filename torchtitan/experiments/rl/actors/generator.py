@@ -966,6 +966,11 @@ class VLLMGenerator(Actor, Configurable):
         """Extra engine ``additional_config`` forwarded to vLLM on the
         ``vllm_native`` path, e.g. ``{"gdn_prefill_backend": "triton"}``."""
 
+        vllm_skip_mm_profiling: bool = False
+        """Skip native vLLM's image/video encoder memory profile for text-only
+        workloads using multimodal checkpoints. Text model profiling remains
+        enabled. Do not enable for workloads that actually submit images/video."""
+
         gdn_trainer_parity: bool = False
         """torchtitan_wrapper only: run the GDN conv + recurrence on the trainer's
         external fla kernels so the generator's PREFILL logprobs match the trainer's
@@ -1296,6 +1301,8 @@ class VLLMGenerator(Actor, Configurable):
         # on BOTH the native and torchtitan_wrapper paths before LLMEngine init.
         _install_flashinfer_allreduce_import_stub()
         if native:
+            if config.vllm_skip_mm_profiling:
+                engine_kwargs["skip_mm_profiling"] = True
             # Match the trainer's fp32 lm_head on the native generator (default on;
             # SWE_GEN_NATIVE_FP32_LMHEAD=0 to disable for A/B).
             if os.environ.get("SWE_GEN_NATIVE_FP32_LMHEAD", "1") == "1":
