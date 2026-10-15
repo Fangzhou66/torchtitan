@@ -33,6 +33,7 @@ import os
 import shutil
 import socket
 import stat
+import tarfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,6 +164,7 @@ class RewriteWorkspace:
             f".{target.name}.incoming-{os.getpid()}-{uuid.uuid4().hex}"
         )
         try:
+            _pack_session_payloads(self.active.path)
             target.mkdir(parents=True, exist_ok=True)
             # Preserve links as links. Following a CLI credential link here
             # would copy private authentication into the durable record.
@@ -243,6 +245,30 @@ def _workspace(
         local_seed,
         local_seed,
     )
+
+
+def _pack_session_payloads(active: Path) -> None:
+    """Archive each session's subdirectories, ``codex/`` aside, into one file.
+
+    A verifier or probe session keeps its own package and replay copies, a few
+    hundred small files that nothing reads once the rewrite is finished. On
+    durable storage every file costs a round trip, so each such directory is
+    published as ``<name>.tar.gz``. The flat files (``session.json``,
+    prompt, stdout/stderr) and the codex transcripts stay readable in place.
+    Links are archived as links.
+    """
+    for session in active.glob("sessions/*"):
+        if not session.is_dir() or session.is_symlink():
+            continue
+        for child in sorted(session.iterdir()):
+            if child.name == "codex" or child.is_symlink() or not child.is_dir():
+                continue
+            archive = session / f"{child.name}.tar.gz"
+            partial = archive.with_name(f".{archive.name}.partial")
+            with tarfile.open(partial, "w:gz") as tar:
+                tar.add(child, arcname=child.name)
+            os.replace(partial, archive)
+            shutil.rmtree(child)
 
 
 def _prune_interrupted_codex_homes(active: Path) -> None:

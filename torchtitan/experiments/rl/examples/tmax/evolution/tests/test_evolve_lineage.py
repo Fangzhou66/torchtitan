@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor
 from pathlib import Path
@@ -894,6 +895,44 @@ def test_recover_drops_codex_caches_of_a_cut_short_session(
     home = durable.session("agent", "20260904-190001Z").codex_home
     assert sorted(p.name for p in home.iterdir()) == ["sessions"]
     assert (home / "sessions" / "thread.jsonl").read_text() == "{}\n"
+
+
+def test_publish_archives_session_payload_directories(tmp_path, monkeypatch) -> None:
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    durable = layout.RewriteDir(
+        root.evolution.task("tw_a").path / "rewrites" / "20260904-190000Z--harder"
+    )
+    workspace = rw_workspace.prepare_rewrite(root, durable, tmp_path)
+    meta = {"task": "tw_a", "status": "running", "sessions": []}
+    layout.write_json_atomic(workspace.active.meta, meta)
+    workspace.claim(meta)
+    (workspace.active.package / "tests").mkdir(parents=True)
+    (workspace.active.package / "tests" / "test_outputs.py").write_text("ok\n")
+    session = workspace.active.session("verifier", "20260904-190001Z")
+    (session.package / "tests").mkdir(parents=True)
+    (session.package / "tests" / "test_outputs.py").write_text("blind\n")
+    (session.path / "replay-x1").mkdir()
+    (session.path / "replay-x1" / "log.txt").write_text("replay\n")
+    (session.codex_home / "sessions").mkdir(parents=True)
+    (session.codex_home / "sessions" / "thread.jsonl").write_text("{}\n")
+    layout.write_json_atomic(session.meta, {"kind": "verifier"})
+
+    assert [d.path for d in rw_workspace.recover(root)] == [durable.path]
+
+    published = durable.session("verifier", "20260904-190001Z")
+    assert sorted(p.name for p in published.path.iterdir()) == [
+        "codex",
+        "package.tar.gz",
+        "replay-x1.tar.gz",
+        "session.json",
+    ]
+    assert (published.codex_home / "sessions" / "thread.jsonl").read_text() == "{}\n"
+    with tarfile.open(published.path / "package.tar.gz") as tar:
+        member = tar.extractfile("package/tests/test_outputs.py")
+        assert member is not None and member.read() == b"blind\n"
+    # The rewrite's own package, which fold() turns into a revision, stays a tree.
+    assert (durable.package / "tests" / "test_outputs.py").read_text() == "ok\n"
 
 
 def test_loop_refuses_to_start_when_the_budget_leaves_no_session_time(
