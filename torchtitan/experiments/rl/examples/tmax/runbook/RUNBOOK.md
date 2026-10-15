@@ -1085,6 +1085,9 @@ is the wait for the task's next draw.
 | `evolution/queue/waiting_tasks` | Tasks a free worker could start now, one per task: pending signals after the loop's one-signal-per-task choice and its deferral rule, minus tasks already running. |
 | `evolution/queue/running` | Rewrites in progress. |
 | `evolution/mix_version` | The live mix version. |
+| `evolution/mix_version_served`, `mix_version_lag` | The version this run's dataset serves (last line of `trainer/mix_versions.jsonl`), and how far the live version is ahead of it. |
+| `evolution/status_age_sec` | Seconds since the loop last rebuilt `status.json`. Climbing well past `EVOLVE_STATUS_REFRESH_SEC` means the queue gauges are frozen, not idle. |
+| `evolution/root/<path>` | Every number in `status.json`, by its JSON path: `pending`, `rewrites_running`, the root-wide ledger counts, `rejected/<stage>`, `routes/<route>/<status>`, and any field the loop adds later. |
 
 Rewrite counts are per attempt: a signal retried after an interrupted attempt
 is consumed once and can count two verdicts. The queue and mix version come from

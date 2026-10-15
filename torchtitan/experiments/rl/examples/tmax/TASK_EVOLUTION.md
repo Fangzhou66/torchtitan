@@ -94,7 +94,9 @@ Every consumed signal has a terminal line in `evolution/ledger.jsonl`:
 `handled`, `deferred`, `superseded`, `resolved`, or `junk`. The trainer counts these by
 training run in W&B as `evolution/signals/*`, alongside run-scoped
 `evolution/rewrites/*` counters. From the root-wide `evolution/status.json` it
-reads `evolution/mix_version` and the queue counts `evolution/queue/*`.
+reads `evolution/mix_version`, the queue counts `evolution/queue/*`, the file's
+age `evolution/status_age_sec`, and every other number in it as
+`evolution/root/*`.
 
 ## Enabling it, and keeping batch size fixed
 

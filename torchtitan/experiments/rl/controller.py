@@ -2012,13 +2012,23 @@ class Controller(Configurable):
                     pass
                 else:
                     wandb.run.summary["evolution/observer_url"] = observer["url"]
+        served = None
+        if run is not None:
+            try:
+                lines = run.mix_versions.read_text().splitlines()
+                served = json.loads(lines[-1]).get("version") if lines else None
+            except (OSError, ValueError):
+                pass
+        if served is not None:
+            metrics.append(
+                m.Metric("evolution/mix_version_served", m.NoReduce(float(served)))
+            )
         try:
             s = json.loads(status_path.read_text())
         except (OSError, ValueError):
             return metrics
         queue = s.get("queue") or {}
-        return [
-            *metrics,
+        metrics += [
             m.Metric(
                 "evolution/mix_version", m.NoReduce(float(s.get("mix_version") or 0))
             ),
@@ -2028,6 +2038,38 @@ class Controller(Configurable):
                 if key in queue
             ),
         ]
+        if served is not None and s.get("mix_version") is not None:
+            metrics.append(
+                m.Metric(
+                    "evolution/mix_version_lag",
+                    m.NoReduce(float(s["mix_version"] - served)),
+                )
+            )
+        if s.get("updated"):
+            # Gauges read from a status.json the loop stopped refreshing look
+            # live; its age tells a stalled loop from an idle one.
+            metrics.append(
+                m.Metric(
+                    "evolution/status_age_sec",
+                    m.NoReduce(time.time() - layout.parse_stamp(s["updated"])),
+                )
+            )
+
+        # Every other number in status.json, under evolution/root/: it covers
+        # the whole evolution root (all runs sharing it), and new fields the
+        # loop adds reach W&B without a change here.
+        def numeric_leaves(prefix: str, value: object):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    yield from numeric_leaves(f"{prefix}/{key}", child)
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                yield prefix, float(value)
+
+        metrics += [
+            m.Metric(key, m.NoReduce(value))
+            for key, value in numeric_leaves("evolution/root", s)
+        ]
+        return metrics
 
     async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
         """produces a RolloutGroupWork into group_buffer.

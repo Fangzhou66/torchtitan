@@ -11,6 +11,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -147,7 +148,8 @@ class RewardObserverTest(unittest.TestCase):
             if isinstance(n, ast.FunctionDef) and n.name == "_evolution_metrics"
         )
         namespace = {
-            "m": SimpleNamespace(Metric=lambda key, value: (key, value), NoReduce=float)
+            "m": SimpleNamespace(Metric=lambda key, value: (key, value), NoReduce=float),
+            "time": time,
         }
         exec(
             compile(
@@ -216,6 +218,31 @@ class RewardObserverTest(unittest.TestCase):
                     self.assertEqual(values["evolution/mix_version"], 4)
                     self.assertEqual(values["evolution/queue/waiting_tasks"], 7)
                     self.assertEqual(values["evolution/queue/running"], 3)
+                    # Every number in status.json reaches W&B, plus its age and
+                    # the version this run actually serves.
+                    observer.layout.write_json_atomic(
+                        root.evolution.status,
+                        {
+                            "updated": observer.layout.stamp(time.time() - 30),
+                            "mix_version": 5,
+                            "pending": 9,
+                            "rejected": {"agent": 2},
+                            "routes": {"evolve": {"accepted": 1}},
+                            "queue": {"waiting_tasks": 7, "running": 3},
+                        },
+                    )
+                    attempt = observer.layout.Run.from_env()
+                    observer.layout.append_jsonl(
+                        attempt.mix_versions, {"event": "boot", "version": 3}
+                    )
+                    values = dict(namespace["_evolution_metrics"](owner))
+                    self.assertEqual(values["evolution/root/pending"], 9)
+                    self.assertEqual(values["evolution/root/rejected/agent"], 2)
+                    self.assertEqual(values["evolution/root/routes/evolve/accepted"], 1)
+                    self.assertEqual(values["evolution/mix_version_served"], 3)
+                    self.assertEqual(values["evolution/mix_version_lag"], 2)
+                    self.assertGreaterEqual(values["evolution/status_age_sec"], 30)
+                    self.assertNotIn("evolution/root/updated", values)
 
     def _claim(self, run, group, origin):
         observer.layout.append_jsonl(
