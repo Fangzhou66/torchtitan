@@ -66,8 +66,8 @@ def append_jsonl(path: Path, value: dict) -> None:
         f.flush()
 
 
-def read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
+def read_jsonl(path: Path, *, missing_ok: bool = True) -> list[dict]:
+    if missing_ok and not path.exists():
         return []
     out = []
     with open(path, encoding="utf-8") as f:

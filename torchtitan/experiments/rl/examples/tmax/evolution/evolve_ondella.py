@@ -798,6 +798,21 @@ def unsolved(root: layout.Root, tid: str, rev: int) -> bool:
     return False
 
 
+def _read_live_mix(root: layout.Root, attempts: int = 10) -> list[dict]:
+    """The live mix, read again if a concurrent publish is swapping it in.
+
+    The closer thread publishes while workers read; on the durable mount the
+    replace of ``live.jsonl`` is briefly visible as a missing file."""
+    for attempt in range(attempts):
+        try:
+            return layout.read_jsonl(root.mix.live, missing_ok=False)
+        except FileNotFoundError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.5)
+    raise AssertionError("unreachable")
+
+
 def materialize_r0(root: layout.Root, task: layout.TaskDir, tid: str) -> Path:
     """r0 is the seed package, copied once from whichever corpus carries it.
     Copied whole into r0.incoming and renamed, so a crash mid-copy cannot
@@ -821,7 +836,7 @@ def materialize_r0(root: layout.Root, task: layout.TaskDir, tid: str) -> Path:
     incoming = dest.with_name("r0.incoming")
     shutil.rmtree(incoming, ignore_errors=True)
     shutil.copytree(src, incoming, ignore=SEED_IGNORE)
-    for row in layout.read_jsonl(root.mix.live):
+    for row in _read_live_mix(root):
         md = row.get("metadata") or {}
         if md.get("instance_id") != tid or not md.get("prebuilt_provenance"):
             continue

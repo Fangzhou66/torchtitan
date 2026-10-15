@@ -57,3 +57,25 @@ def test_cache_deletions_are_capped(monkeypatch, tmp_path) -> None:
         ec._delete_in_background(tmp_path / f"t{i}")
     ec.drain_cache_cleanup(tmp_path)
     assert state["peak"] <= 2
+
+
+def test_live_mix_read_retries_a_publish_swap(monkeypatch, tmp_path) -> None:
+    import evolve_ondella as od
+    from types import SimpleNamespace
+
+    live = tmp_path / "live.jsonl"
+    calls = []
+    real = od.layout.read_jsonl
+
+    def flaky(path, *, missing_ok=True):
+        calls.append(path)
+        if len(calls) == 1:
+            raise FileNotFoundError(path)
+        return [{"metadata": {"instance_id": "t"}}]
+
+    monkeypatch.setattr(od.layout, "read_jsonl", flaky)
+    monkeypatch.setattr(od.time, "sleep", lambda _s: None)
+    root = SimpleNamespace(mix=SimpleNamespace(live=live))
+    assert od._read_live_mix(root) == [{"metadata": {"instance_id": "t"}}]
+    assert len(calls) == 2
+    monkeypatch.setattr(od.layout, "read_jsonl", real)
