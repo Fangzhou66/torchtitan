@@ -166,6 +166,15 @@ An explicit JSON-number requirement still excludes strings. Stringifying numbers
 does not normalize numeric equality. Do not truncate or round away a real
 difference. Derive any tolerance from the public requirements and permitted
 encoding error, and record the bound and its basis in the replay contract.
+An inherited tolerance or accepted range is the task's standard and never
+widens. Where the revised instruction no longer fixes a choice the expected
+values depend on (a fitting window, a convention, a unit, a cutoff), so that a
+legal reading misses the inherited bound, the rewrite has made the answer
+ambiguous: write `BLOCKED: <the choice the instruction leaves open>` instead of
+widening the bound. A widened bound grades every later revision too, and nothing
+downstream knows it used to be tighter. Accepting another representation of the
+same value (a name, an encoding, an amplitude convention converted back to one
+quantity) is not widening.
 Encoding resolution alone does not justify an error allowance. Unless the public
 task permits error, preserve an exact expected value when the required operation
 and chosen encoding introduce no error; zero can remain exact across sample

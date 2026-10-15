@@ -683,3 +683,19 @@ def test_a_declaration_repair_that_edits_the_task_discards_the_rewrite(
     with pytest.raises(RuntimeError, match="declaration repair changed task files"):
         ec.evolve_agentic(rw, dict(SEED), "easier")
     assert [s["role"] for s in sessions] == ["author", "author"]
+
+
+def test_a_rewrite_that_leaves_the_answer_open_blocks_instead_of_widening(tmp_path):
+    """A hardening that deleted the fitting window raman's expected values were
+    computed with left several fits legal; the blind author widened the inherited
+    tolerances (gamma 1 -> 4, offset 30% -> 100%) and every later revision graded
+    against them. The bound now stays and the ambiguity blocks the rewrite."""
+    spec = ec.VERIFIER_SPEC.read_text()
+    assert "never\nwidens" in spec and "instead of\nwidening the bound" in spec
+    assert "part of the contract, not\na hint" in ec.SPEC.read_text()
+    before, after = tmp_path / "before", tmp_path / "after"
+    before.mkdir()
+    after.mkdir()
+    (before / "instruction.md").write_text("Fit the peak. Use the 2500-2900 window.\n")
+    (after / "instruction.md").write_text("Fit the peak.\n")
+    assert "removes no requirement" in ec._instruction_change_note(before, after)
