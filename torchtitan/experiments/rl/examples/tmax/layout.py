@@ -239,6 +239,20 @@ class MixDir:
     def live(self) -> Path:
         return self.path / "live.jsonl"
 
+    def read_live(self, attempts: int = 20) -> str:
+        """``live.jsonl``'s text, read again while a publish swaps it in.
+
+        The replace is not atomic on every mount: a reader can briefly see
+        the name missing. An absent mix after every attempt still raises."""
+        for attempt in range(attempts):
+            try:
+                return self.live.read_text()
+            except FileNotFoundError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(0.5)
+        raise AssertionError("unreachable")
+
     def version_path(self, version: int, stamp_: str | None = None) -> Path:
         return self.history / f"v{version:04d}--{stamp_ or stamp()}.jsonl"
 

@@ -60,22 +60,23 @@ def test_cache_deletions_are_capped(monkeypatch, tmp_path) -> None:
 
 
 def test_live_mix_read_retries_a_publish_swap(monkeypatch, tmp_path) -> None:
-    import evolve_ondella as od
-    from types import SimpleNamespace
+    from pathlib import Path
 
-    live = tmp_path / "live.jsonl"
+    from torchtitan.experiments.rl.examples.tmax import layout
+
+    mix = layout.MixDir(tmp_path)
+    mix.live.write_text('{"metadata": {"instance_id": "t"}}\n')
+    real = Path.read_text
     calls = []
-    real = od.layout.read_jsonl
 
-    def flaky(path, *, missing_ok=True):
-        calls.append(path)
-        if len(calls) == 1:
-            raise FileNotFoundError(path)
-        return [{"metadata": {"instance_id": "t"}}]
+    def flaky(self, *a, **k):
+        if self == mix.live:
+            calls.append(1)
+            if len(calls) < 3:
+                raise FileNotFoundError(self)
+        return real(self, *a, **k)
 
-    monkeypatch.setattr(od.layout, "read_jsonl", flaky)
-    monkeypatch.setattr(od.time, "sleep", lambda _s: None)
-    root = SimpleNamespace(mix=SimpleNamespace(live=live))
-    assert od._read_live_mix(root) == [{"metadata": {"instance_id": "t"}}]
-    assert len(calls) == 2
-    monkeypatch.setattr(od.layout, "read_jsonl", real)
+    monkeypatch.setattr(Path, "read_text", flaky)
+    monkeypatch.setattr(layout.time, "sleep", lambda _s: None)
+    assert '"t"' in mix.read_live()
+    assert len(calls) == 3

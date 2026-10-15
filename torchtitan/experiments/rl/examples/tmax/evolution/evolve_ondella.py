@@ -176,9 +176,11 @@ def read_declared(
     resources: dict[str, dict] = {}
     pretests: dict[str, tuple[str, str]] = {}
     protecteds: dict[str, "pack.Protected"] = {}
-    if not mix.exists():
+    try:
+        text = layout.MixDir(mix.parent).read_live() if mix.name == "live.jsonl" else mix.read_text()
+    except FileNotFoundError:
         return resources, pretests, protecteds
-    for ln in open(mix):
+    for ln in text.splitlines():
         if not ln.strip():
             continue
         row = json.loads(ln)
@@ -798,19 +800,9 @@ def unsolved(root: layout.Root, tid: str, rev: int) -> bool:
     return False
 
 
-def _read_live_mix(root: layout.Root, attempts: int = 10) -> list[dict]:
-    """The live mix, read again if a concurrent publish is swapping it in.
-
-    The closer thread publishes while workers read; on the durable mount the
-    replace of ``live.jsonl`` is briefly visible as a missing file."""
-    for attempt in range(attempts):
-        try:
-            return layout.read_jsonl(root.mix.live, missing_ok=False)
-        except FileNotFoundError:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(0.5)
-    raise AssertionError("unreachable")
+def _read_live_mix(root: layout.Root) -> list[dict]:
+    """The live mix rows, read again if a concurrent publish is swapping it in."""
+    return [json.loads(ln) for ln in root.mix.read_live().splitlines() if ln.strip()]
 
 
 def materialize_r0(root: layout.Root, task: layout.TaskDir, tid: str) -> Path:
@@ -1324,7 +1316,7 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
     mix = root.mix
     rows: dict[str, str] = {}
     order: list[str] = []
-    for ln in mix.live.read_text().splitlines():
+    for ln in mix.read_live().splitlines():
         if ln.strip():
             iid = json.loads(ln)["metadata"]["instance_id"]
             rows[iid] = ln

@@ -1513,7 +1513,10 @@ def rewrite_budget_sec(
     ):
         return _budget_cache["sec"]
     root = root or layout.Root.from_env()
-    rows = sum(1 for line in root.mix.live.open() if line.strip()) if root.mix.live.exists() else 0
+    try:
+        rows = sum(1 for line in root.mix.read_live().splitlines() if line.strip())
+    except FileNotFoundError:
+        rows = 0
     groups = int(os.environ.get("SWE_NUM_GROUPS_PER_TRAIN_STEP", "32"))
     runs = root.run_dirs()
     starts = _step_starts(runs[-1].path) if runs else []
