@@ -2322,8 +2322,22 @@ def main() -> None:
         # are marked. The earlier loop may have exited before restart_evolve.sh
         # could stop it and finalize its records. Local workspaces are published
         # first, so what they hold is marked with the rest.
-        rw_workspace.recover(root)
-        recovered = finalize_interrupted(root)
+        t0 = time.monotonic()
+        published = rw_workspace.recover(root)
+        log.info(
+            "startup: published %d local rewrites in %.1fs",
+            len(published),
+            time.monotonic() - t0,
+        )
+        t0 = time.monotonic()
+        # The ledger leaves open what may still read `running`; what recover
+        # just published is examined whatever the ledger says.
+        recovered = finalize_interrupted(root, include=published)
+        log.info(
+            "startup: finalized orphaned records in %.1fs: %s",
+            time.monotonic() - t0,
+            recovered,
+        )
         if recovered["failed"]:
             raise RuntimeError(f"could not finalize orphaned rewrites: {recovered}")
         if recovered["marked"]:

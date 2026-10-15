@@ -37,6 +37,7 @@ import socket
 import stat
 import tarfile
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -53,6 +54,8 @@ TOOL_BIN_ENV = "EVOLVE_TOOL_BIN"
 # Each write to the durable FUSE mount is a ~0.2-1 s round trip, but calls in
 # flight overlap: 16 threads write 48 files in ~8 s, against ~50 s serially.
 PUBLISH_WORKERS = 16
+# Local workspaces recover() publishes at once; each is independent.
+RECOVER_WORKERS = 8
 # Durable-store limits for one path component and for a whole path.
 _MAX_NAME_BYTES = 255
 _MAX_PATH_BYTES = 4095
@@ -530,11 +533,10 @@ def recover(root: layout.Root) -> list[layout.RewriteDir]:
         # versions left, including those of rewrites no longer local.
         _swept_roots.add(root.path)
         _remove_stale_incoming(root.evolution.path, "tasks/*/rewrites/.*.incoming-*")
-    published = []
     active_root = work_root / "active"
-    for active in sorted(active_root.glob("tasks/*/rewrites/*")):
-        if not active.is_dir():
-            continue
+    actives = [p for p in sorted(active_root.glob("tasks/*/rewrites/*")) if p.is_dir()]
+
+    def one(active: Path) -> layout.RewriteDir | None:
         durable = layout.RewriteDir(
             root.evolution.path / active.relative_to(active_root)
         )
@@ -547,21 +549,35 @@ def recover(root: layout.Root) -> list[layout.RewriteDir]:
                 durable.path.rmdir()
             except OSError:
                 pass
-            continue
+            return None
+        t0 = time.monotonic()
         _prune_interrupted_codex_homes(active)
         try:
             workspace.publish()
         except UnpublishableRewrite as exc:
             log.warning("could not recover local rewrite %s: %s", active, exc)
-            published.append(durable)
-            continue
+            return durable
         except (WorkspaceTransferError, RuntimeError) as exc:
             log.warning("could not recover local rewrite %s: %s", active, exc)
-            continue
+            return None
         workspace.cleanup()
-        log.warning("recovered local rewrite %s into %s", active, durable.path)
-        published.append(durable)
-    return published
+        log.warning(
+            "recovered local rewrite %s into %s in %.1fs",
+            active,
+            durable.path,
+            time.monotonic() - t0,
+        )
+        return durable
+
+    if not actives:
+        return []
+    # Workspaces are independent; each keeps prune -> publish -> cleanup in
+    # order. Their file copies share the process-wide publish pool.
+    with ThreadPoolExecutor(
+        min(RECOVER_WORKERS, len(actives)), thread_name_prefix="recover"
+    ) as pool:
+        results = list(pool.map(one, actives))
+    return [d for d in results if d is not None]
 
 
 def _tool_digest(path: Path) -> str:
