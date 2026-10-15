@@ -1448,3 +1448,11 @@ def test_blind_verifier_is_told_how_the_instruction_changed(tmp_path):
 
 def test_easier_rewrites_every_sentence_of_a_narrowed_requirement():
     assert "edit every sentence of\ninstruction.md that states or implies it" in so.prompt("vague")
+
+
+def test_hardening_bisects_after_an_underpredicted_withdrawal():
+    """A withdrawal predicted to bite that came back all-solved forces the next
+    hardening, ordinary or calibration, to take back at least half the help."""
+    for g in (ec._STUDENT_HARDER_GUIDANCE, ec._CALIBRATION_GUIDANCE):
+        assert "withdraws at least half of the help that still separates" in g
+        assert "including help the\nattempts still use" in g

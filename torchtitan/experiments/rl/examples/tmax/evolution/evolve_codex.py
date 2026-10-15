@@ -1582,7 +1582,17 @@ rewrite, which counts as one change. Withdraw only part of the help the
 attempts visibly depend on: reduce a shipped file to its structure, replace it
 with a short description, or drop one part of it. A failure measured when that
 help was absent entirely, under an earlier policy, does not show that a
-withdrawal would fail now. Existing method requirements remain part of the original task;
+withdrawal would fail now.
+When `traces/history` shows that the previous hardening of this task predicted a
+mixed result and the student then solved every attempt, that step was too small
+for this student, and repeating its size repeats the miss. This rewrite then
+withdraws at least half of the help that still separates the current revision
+from the original task (`traces/history/since-original.diff`), counted in
+decisions the help makes for the student rather than in lines, including help the
+attempts still use: an all-solved measurement after a withdrawal predicted to
+bite is the evidence that they no longer need it. Overshooting to all-failed
+costs one easier rewrite that restores half of it; undershooting again costs
+another round of epochs at all-solved. Existing method requirements remain part of the original task;
 repair missing checks for validity, but do not count stricter enforcement of
 an unchanged requirement as the hardening mechanism.
 Aim for a modest reduction in this student's solve rate toward mixed success,
@@ -1613,6 +1623,16 @@ after many epochs of training on it, so a withdrawal the traces already show
 to be too small costs those epochs and buys nothing. Keep
 the change within the earlier task's requirements; do not introduce another
 obligation or a new difficulty dimension.
+When `traces/history` shows that the previous hardening of this task predicted a
+mixed result and the student then solved every attempt, that step was too small
+for this student, and repeating its size repeats the miss. This rewrite then
+withdraws at least half of the help that still separates the current revision
+from the original task (`traces/history/since-original.diff`), counted in
+decisions the help makes for the student rather than in lines, including help the
+attempts still use: an all-solved measurement after a withdrawal predicted to
+bite is the evidence that they no longer need it. Overshooting to all-failed
+costs one easier rewrite that restores half of it; undershooting again costs
+another round of epochs at all-solved.
 
 Before editing, write `run/hardening.md` with the prior intervention, the
 portion being restored, the supporting attempts, and the predicted effect as
