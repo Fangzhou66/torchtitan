@@ -38,8 +38,10 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -80,6 +82,11 @@ _INFRA_RE = re.compile(
 
 RESOURCE_KEYS = ("cpu", "mem_gb", "disk_gb")
 DAYTONA_PROBE_TIMEOUT_SEC = 2400
+# How long a cancelled probe gets to delete its sandbox after SIGINT (asyncio
+# cancels the probe task and the sandbox context deletes the box) before it is
+# sent SIGTERM and then SIGKILL.
+DAYTONA_CANCEL_GRACE_SEC = 90
+DAYTONA_KILL_GRACE_SEC = 5
 
 AGENTIC_ARMS = ("codex", "claude")
 
@@ -99,8 +106,12 @@ def daytona_probe(
     require_paths: list[str] | None = None,
     pretest_file: Path | None = None,
     deadline: RewriteDeadline | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict | None:
     """Run daytona_revalidate.py on this package; None when unconfigured.
+
+    ``cancel``, when set, stops the probe: the subprocess is interrupted so it
+    deletes its sandbox, no retry starts, and a ``cancelled`` verdict returns.
 
     `resources` is the box to run it in: the size the row is provisioned at in
     training, so an oracle pass here is a pass where the task will be run. A
@@ -176,7 +187,9 @@ def daytona_probe(
                     DAYTONA_PROBE_TIMEOUT_SEC,
                     reserve_final_validation=False,
                 )
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            p = _run_probe(cmd, timeout, cancel)
+            if p is None:
+                return dict(_CANCELLED)
             lines = p.stdout.strip().splitlines()
             if not lines:
                 # The script died before its JSON verdict; splitlines()[-1]
@@ -221,8 +234,66 @@ def daytona_probe(
                 if deadline is not None
                 else 20
             )
-            time.sleep(delay)
+            if cancel is None:
+                time.sleep(delay)
+            elif cancel.wait(delay):
+                return dict(_CANCELLED)
     return last
+
+
+_CANCELLED = {"ok": False, "stage": "cancelled", "why": "probe cancelled"}
+
+
+def _run_probe(cmd: list[str], timeout: float, cancel: threading.Event | None):
+    """subprocess.run, or with ``cancel`` a Popen that is stopped (and None
+    returned) once the event is set."""
+    if cancel is None:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if cancel.is_set():
+        return None
+    p = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    give_up = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                out, err = p.communicate(timeout=1.0)
+                return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                pass
+            if cancel.is_set():
+                _stop_probe(p)
+                return None
+            if time.monotonic() >= give_up:
+                p.kill()
+                p.communicate()
+                raise subprocess.TimeoutExpired(cmd, timeout)
+    except BaseException:
+        if p.poll() is None:
+            p.kill()
+            p.communicate()
+        raise
+
+
+def _stop_probe(p: subprocess.Popen) -> None:
+    """Stop a probe so it cleans up: SIGINT makes asyncio.run cancel the probe
+    and the sandbox context delete the box; SIGTERM, then SIGKILL, if it does
+    not exit in time. Always reaped."""
+    for sig, grace in (
+        (signal.SIGINT, DAYTONA_CANCEL_GRACE_SEC),
+        (signal.SIGTERM, DAYTONA_KILL_GRACE_SEC),
+    ):
+        if p.poll() is not None:
+            break
+        p.send_signal(sig)
+        try:
+            p.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            continue
+    if p.poll() is None:
+        p.kill()
+    p.communicate()
 
 
 CONTEXT_FILE_MAX = 256 * 1024
@@ -334,11 +405,13 @@ def _probe_pair(
     dark: list[str],
     pretest_file: Path | None,
     deadline: RewriteDeadline | None,
+    cancel: threading.Event | None = None,
 ) -> tuple[dict | None, dict | None]:
     """The oracle and the null probe, each in its own fresh container.
 
     Both read the same package; both are joined before returning so a repair
     cannot edit their inputs mid-run."""
+    extra = {"cancel": cancel} if cancel is not None else {}
     with ThreadPoolExecutor(max_workers=2) as pool:
         oracle_future = pool.submit(
             daytona_probe,
@@ -347,6 +420,7 @@ def _probe_pair(
             require_paths=dark,
             pretest_file=pretest_file,
             deadline=deadline,
+            **extra,
         )
         null_future = pool.submit(
             daytona_probe,
@@ -355,22 +429,29 @@ def _probe_pair(
             resources=resources,
             pretest_file=pretest_file,
             deadline=deadline,
+            **extra,
         )
         return oracle_future.result(), null_future.result()
 
 
-def _probe_inputs_digest(work: Path, pretest_file: Path | None) -> str:
+def _probe_inputs_digest(work: Path, pretest_file: Path | None) -> str | None:
     """One hash over every file the Daytona probes read: the package minus
-    the harness's run/ and traces/, and the pin-hook snapshot."""
+    the harness's run/ and traces/, and the pin-hook snapshot. None when the
+    package holds a directory symlink, whose contents the walk does not read:
+    such a package never reuses an early result."""
     h = hashlib.sha256()
     for dirpath, dirnames, filenames in os.walk(work):
         rel = Path(dirpath).relative_to(work)
         if rel == Path("."):
             dirnames[:] = [d for d in dirnames if d not in ("run", "traces")]
+        if any((Path(dirpath) / d).is_symlink() for d in dirnames):
+            return None
         dirnames.sort()
         for name in sorted(filenames):
             path = Path(dirpath) / name
             h.update(str(rel / name).encode() + b"\0")
+            if path.is_symlink():
+                h.update(b"link:" + os.readlink(path).encode() + b"\0")
             h.update(path.read_bytes() if path.is_file() else b"<not a file>")
             h.update(b"\0")
     if pretest_file is not None and pretest_file.is_file():
@@ -392,7 +473,9 @@ class EarlyProbes:
     verdicts only if the box, the required paths, the pin hook and every
     package byte are what the probes started from, and the package did not
     move while they ran. Otherwise they are dropped and the probes run again
-    on the final package, as before.
+    on the final package, as before. A dropped run is cancelled, as is any
+    run still going when ``close`` is called: its sandboxes are deleted
+    rather than left to run out their timeout.
     """
 
     def __init__(self, work: Path, orig: dict, floor: dict | None,
@@ -404,44 +487,72 @@ class EarlyProbes:
         self._valid = False
         self._key = None
         self._future = None
+        self._cancel: threading.Event | None = None
+
+    @property
+    def dropped(self) -> bool:
+        """Started, and its verdicts not used."""
+        return self.started and not self.used
+
+    def _drop(self) -> None:
+        if self._cancel is not None:
+            self._cancel.set()
+        self._future = None
+        self._valid = False
+
+    def close(self) -> None:
+        """Cancel a run whose verdicts were not taken."""
+        self._drop()
 
     def __call__(self, pre: dict | None) -> None:
+        self._drop()
         if pre is None:
-            self._valid = False
             return
         if _instruction_only(pre, self.orig, _changed(self.orig, pre)):
+            return
+        start = _probe_inputs_digest(self.work, self.pretest_file)
+        if start is None:
+            log.info("early Daytona probes not started: a directory symlink")
             return
         box = _probe_box(pre, self.floor)
         dark = new_dark_paths(self.work, pre, self.orig)
         self._key = (_box_key(box), list(dark), self.pretest_file)
-        start = _probe_inputs_digest(self.work, self.pretest_file)
+        self._cancel = threading.Event()
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="early-probes")
-        self._future = pool.submit(self._run, start, box, dark)
+        self._future = pool.submit(self._run, start, box, dark, self._cancel)
         pool.shutdown(wait=False)
         self._valid = self.started = True
         log.info("early Daytona probes started for %s", self.work)
 
-    def _run(self, start: str, box: dict | None, dark: list[str]):
-        pair = _probe_pair(self.work, box, dark, self.pretest_file, self.deadline)
+    def _run(self, start: str, box: dict | None, dark: list[str],
+             cancel: threading.Event):
+        pair = _probe_pair(self.work, box, dark, self.pretest_file, self.deadline,
+                           cancel)
         return start, _probe_inputs_digest(self.work, self.pretest_file), pair
 
     def take(self, work: Path, resources: dict | None, dark: list[str],
              pretest_file: Path | None):
         """The early (oracle, null) verdicts if they answer for exactly these
         inputs, else None. Used at most once."""
-        future, self._future = self._future, None
-        if future is None or not self._valid or work != self.work:
+        future, valid = self._future, self._valid
+        if future is None or not valid or work != self.work:
+            self._drop()
             return None
         if self._key != (_box_key(resources), list(dark), pretest_file):
             log.info("early Daytona probes dropped: box or required paths moved")
+            self._drop()
             return None
         try:
             start, end, pair = future.result()
         except Exception as error:  # noqa: BLE001 -- rerun reproduces a real failure
             log.info("early Daytona probes not used: %s", str(error)[:200])
+            self._drop()
             return None
-        if not start == end == _probe_inputs_digest(work, pretest_file):
+        self._future = None
+        current = _probe_inputs_digest(work, pretest_file)
+        if start is None or current is None or not start == end == current:
             log.info("early Daytona probes dropped: the package moved")
+            self._drop()
             return None
         self.used = True
         return pair
@@ -867,6 +978,7 @@ def process_one(
     # reconcile, daytona_oracle, daytona_repair, publish, total) for rewrite.json.
     timings: dict = {}
     mark = dict(llm.USAGE)
+    early: EarlyProbes | None = None
     try:
         if not graded:
             return _done(
@@ -1007,6 +1119,7 @@ def process_one(
         )
         timings["daytona_oracle"] = round(time.monotonic() - started, 1)
         timings["daytona_early"] = early.used
+        timings["daytona_early_dropped"] = early.dropped
         rec["revalidate"] = v
         _size_from_probe(rec, v, resources)
         # Repair-and-revalidate iterations. Each one hands the failure back to
@@ -1108,6 +1221,11 @@ def process_one(
     except Exception as e:  # noqa: BLE001
         return _failed(rec, stage="error", error=e)
     finally:
+        if early is not None:
+            early.close()
+            if early.started:
+                timings.setdefault("daytona_early", early.used)
+                timings["daytona_early_dropped"] = early.dropped
         # Pruned session caches are deleted in the background; the loop
         # publishes this directory next.
         drain = getattr(sys.modules.get("evolve_codex"), "drain_cache_cleanup", None)

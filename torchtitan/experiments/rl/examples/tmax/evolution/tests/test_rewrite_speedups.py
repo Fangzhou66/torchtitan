@@ -58,7 +58,6 @@ def test_session_exit_moves_caches_out_and_does_not_wait_for_their_deletion(
         assert gate.wait(5)
         real_rmtree(path, ignore_errors=ignore_errors)
 
-    monkeypatch.setattr(ec, "_TRASH_POOL", ThreadPoolExecutor(max_workers=1))
     monkeypatch.setattr(ec.shutil, "rmtree", held_rmtree)
     with ec.session(rw, "agent", timeout=5) as run:
         home = run.dir.codex_home
@@ -258,7 +257,7 @@ def _probes(monkeypatch):
     calls = []
 
     def probe(package, shortcut=None, resources=None, require_paths=None,
-              pretest_file=None, deadline=None):
+              pretest_file=None, deadline=None, cancel=None):
         calls.append({"shortcut": shortcut,
                       "box": tuple((resources or {}).get(k) for k in fb.RESOURCE_KEYS)})
         if shortcut:

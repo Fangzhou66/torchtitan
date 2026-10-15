@@ -270,21 +270,35 @@ def _prune_private_home(home: Path) -> None:
         else:
             child.unlink(missing_ok=True)
     if trash is not None:
-        with _TRASH_LOCK:
-            _TRASH[trash] = _TRASH_POOL.submit(
-                shutil.rmtree, trash, ignore_errors=True
-            )
+        _delete_in_background(trash)
 
 
 # Session-directory entries holding a pruned home's caches until deleted.
 CACHE_TRASH_PREFIX = ".codex-cache-"
-_TRASH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="codex-cache")
 _TRASH_LOCK = threading.Lock()
 _TRASH: dict[Path, Future] = {}
 
 
+def _delete_in_background(trash: Path) -> None:
+    """Delete one trash directory on its own thread. A shared pool queued every
+    rewrite's deletions behind every other's, so a rewrite's drain waited for
+    the whole backlog."""
+    done: Future = Future()
+
+    def delete() -> None:
+        try:
+            shutil.rmtree(trash, ignore_errors=True)
+        finally:
+            done.set_result(None)
+
+    with _TRASH_LOCK:
+        _TRASH[trash] = done
+    threading.Thread(target=delete, name="codex-cache").start()
+
+
 def drain_cache_cleanup(under: Path) -> None:
-    """Wait for the background cache deletions of session homes below ``under``."""
+    """Wait for the background cache deletions of session homes below ``under``
+    (this rewrite's own; other rewrites' deletions are not waited for)."""
     with _TRASH_LOCK:
         pending = [(p, f) for p, f in _TRASH.items() if p.is_relative_to(under)]
     for path, future in pending:
@@ -2357,9 +2371,12 @@ _LAYOUT_RUN_INPUTS = (
 )
 
 
-def _replay_inputs(vpkg: Path, probe: Path) -> tuple[dict, dict]:
+def _replay_inputs(vpkg: Path, probe: Path) -> tuple[dict, dict] | None:
     """Hashes of everything an independent replay reads: what _blind_layout
-    copies from the verifier's package, and the probe author's controls."""
+    copies from the verifier's package, and the probe author's controls. Each
+    file carries its content, executable bits and symlink target. None when
+    the package holds a directory symlink, whose contents the walk does not
+    read: such inputs never reuse an early replay."""
     files = {}
     for dirpath, dirnames, filenames in os.walk(vpkg):
         rel_dir = Path(dirpath).relative_to(vpkg)
@@ -2367,15 +2384,26 @@ def _replay_inputs(vpkg: Path, probe: Path) -> tuple[dict, dict]:
             dirnames[:] = [d for d in dirnames if d != "run"]
             names = filenames
             names = names + [
-                f"run/{n}" for n in _LAYOUT_RUN_INPUTS if (vpkg / "run" / n).is_file()
+                f"run/{n}"
+                for n in _LAYOUT_RUN_INPUTS
+                if (vpkg / "run" / n).is_file() or (vpkg / "run" / n).is_symlink()
             ]
+            if (vpkg / "run").is_symlink():
+                return None
         else:
             names = filenames
+        if any((Path(dirpath) / d).is_symlink() for d in dirnames):
+            return None
         for name in names:
             path = Path(dirpath) / name
+            link = os.readlink(path) if path.is_symlink() else None
             if path.is_file():
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                files[str(rel_dir / name)] = digest
+                files[str(rel_dir / name)] = (
+                    digest, path.stat().st_mode & 0o111, link
+                )
+            elif link is not None:
+                files[str(rel_dir / name)] = (None, None, link)
     return files, _probe_hashes(probe / "run/verifier-probes")
 
 
@@ -2398,19 +2426,27 @@ def _replay_independent(
 
 
 def _early_independent_replay(
-    probe_future: Future, vsession: layout.SessionDir, deadline: RewriteDeadline
+    probe_future: Future,
+    vsession: layout.SessionDir,
+    deadline: RewriteDeadline,
+    cancel: threading.Event | None = None,
 ) -> tuple[tuple, SemanticProbeMisses | None] | None:
     """The first independent replay, run beside the original-probe replay.
 
     Both read the verifier's finished package and neither writes outside its
     own run/, so neither can change the other's inputs. Returns the inputs it
-    replayed and its outcome, or None if they moved while it ran;
+    replayed and its outcome, or None if they moved while it ran (or it was
+    cancelled, or its inputs cannot be hashed in full);
     _independent_verifier uses it only if those inputs are still current.
     """
     probe_future.result()
+    if cancel is not None and cancel.is_set():
+        return None
     pointer = vsession.path / "independent-probes.json"
     probe = Path(json.loads(pointer.read_text())["package"])
     before = _replay_inputs(vsession.package, probe)
+    if before is None:
+        return None
     try:
         _replay_independent(vsession.package, probe, deadline)
     except SemanticProbeMisses as error:
@@ -2434,7 +2470,10 @@ def _early_outcome(early: Future | None, vpkg: Path, probe: Path):
     except Exception as error:  # noqa: BLE001 -- rerun reproduces a real failure
         log.info("early independent replay not used: %s", str(error)[:200])
         return _RERUN
-    if got is None or got[0] != _replay_inputs(vpkg, probe):
+    if got is None:
+        return _RERUN
+    current = _replay_inputs(vpkg, probe)
+    if current is None or got[0] != current:
         return _RERUN
     return got[1]
 
@@ -2650,8 +2689,17 @@ def _blind_verifier(
                 _sandbox_down(vpkg)
         _check_verdict(vpkg)
         sessions_done = time.monotonic()
-        early = pool.submit(_early_independent_replay, probe_future, run.dir, deadline)
-        _verify_original_probes(run.dir, rewrite, deadline)
+        cancel_early = threading.Event()
+        early = pool.submit(
+            _early_independent_replay, probe_future, run.dir, deadline, cancel_early
+        )
+        try:
+            _verify_original_probes(run.dir, rewrite, deadline)
+        except BaseException:
+            # Rejected: the early replay's verdict will never be read.
+            cancel_early.set()
+            early.cancel()
+            raise
         probe_future.result()
     _independent_verifier(rewrite, run.dir, deadline=deadline, early=early)
     _add_time(timings, "blind_verifier", sessions_done - started)
