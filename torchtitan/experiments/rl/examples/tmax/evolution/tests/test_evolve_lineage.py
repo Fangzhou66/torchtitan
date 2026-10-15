@@ -1047,6 +1047,36 @@ def test_unpublishable_name_fails_the_rewrite_once(tmp_path, monkeypatch) -> Non
     assert json.loads(durable.meta.read_text()) == meta
 
 
+def test_unpublishable_rewrite_closes_its_signal_in_the_round(
+    tmp_path, monkeypatch
+) -> None:
+    root = _root(tmp_path, monkeypatch)
+    sid = _signal(root)
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    _stub(monkeypatch)
+    process_one = od.fb.process_one
+
+    def leave_junk(rewrite, signal, *, job, seed_dir, resources=None):
+        rec = process_one(
+            rewrite, signal, job=job, seed_dir=seed_dir, resources=resources
+        )
+        (rewrite.package / "cat <<'EOF'\necho hi\nEOF").write_text("junk\n")
+        return rec
+
+    monkeypatch.setattr(od.fb, "process_one", leave_junk)
+
+    result = od.run_round(root, workers=1)
+
+    assert result["handled"] == 1 and result["accepted"] == 0
+    assert root.mix.live_version()[0] == 1
+    [line] = [x for x in _ledger(root) if x["signal"] == sid]
+    assert line["outcome"] == "handled"
+    [rewrite] = root.evolution.task("tw_a").rewrite_dirs()
+    assert json.loads(rewrite.meta.read_text())["stage"] == "publish"
+    # Closed, so the next round has nothing to redo.
+    assert od.run_round(root, workers=1)["handled"] == 0
+
+
 def test_recover_publishes_an_unpublishable_rewrite_as_failed(
     tmp_path, monkeypatch
 ) -> None:

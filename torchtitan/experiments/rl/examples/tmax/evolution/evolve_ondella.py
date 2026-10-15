@@ -655,7 +655,10 @@ class NoSeed(Exception):  # noqa: N818 - Preserve the existing exception name.
 def load_ledger(root: layout.Root) -> dict[str, dict]:
     """The latest ledger line per signal id."""
     latest: dict[str, dict] = {}
-    for line in layout.read_jsonl(root.evolution.ledger):
+    # The closer thread appends while the coordinator and status thread read.
+    with _LEDGER_LOCK:
+        lines = layout.read_jsonl(root.evolution.ledger)
+    for line in lines:
         sid = line.get("signal")
         if sid:
             latest[sid] = line
@@ -1143,13 +1146,24 @@ def handle(
         meta["finished"] = layout.stamp()
     layout.write_json_atomic(rewrite.meta, meta)
     published = time.monotonic()
-    rewrite = workspace.publish()
+    try:
+        rewrite = workspace.publish()
+    except rw_workspace.UnpublishableRewrite:
+        # publish() committed a failed record; close the signal on it once
+        # rather than leaving it open for the next round to redo.
+        rewrite = workspace.durable
+        meta = json.loads(rewrite.meta.read_text())
+        return {"signal": sig, "rewrite": rewrite, "meta": meta, "status": "failed"}
     workspace.cleanup()
     if isinstance(meta.get("timings"), dict):
         meta["timings"]["publish"] = round(time.monotonic() - published, 1)
-        # An accepted rewrite's record is written again by the fold.
+        # An accepted rewrite's record is written again by the fold. The
+        # record is already committed, so a failed rewrite of it is cosmetic.
         if meta["status"] != "running":
-            layout.write_json_atomic(rewrite.meta, meta)
+            try:
+                layout.write_json_atomic(rewrite.meta, meta)
+            except OSError as exc:
+                log.warning("could not record publish time in %s: %s", rewrite.meta, exc)
     return {"signal": sig, "rewrite": rewrite, "meta": meta, "status": status}
 
 
@@ -1582,6 +1596,10 @@ def _names(path: Path, listing: dict) -> frozenset[str]:
             listing[key] = frozenset(os.listdir(path))
         except (FileNotFoundError, NotADirectoryError):
             listing[key] = frozenset()
+        except OSError as exc:
+            # A transient storage error: treat as empty now, list again next call.
+            log.warning("could not list %s: %s", path, exc)
+            return frozenset()
     return listing[key]
 
 
@@ -1960,6 +1978,11 @@ def run_round(
     dry: bool = False,
     signal: str | None = None,
 ) -> dict:
+    # A resumed trainer can reuse a signal or record path; trust the caches
+    # for one round, not for the life of the process.
+    _SIGNALS.clear()
+    _RECORD_MTIMES.clear()
+    _RECORD_HEADERS.clear()
     ledger = load_ledger(root)
     # A replay is inspection: it must not fold a rewrite of a revision the
     # task has moved past, or close a signal the ledger already closed.

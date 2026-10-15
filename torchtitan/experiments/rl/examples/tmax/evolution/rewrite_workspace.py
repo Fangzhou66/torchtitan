@@ -67,7 +67,8 @@ class UnpublishableRewrite(WorkspaceTransferError):
     """The rewrite holds a path durable storage cannot represent.
 
     publish() has already committed a ``failed`` record and moved the local
-    workspace aside when this is raised, so it happens once per rewrite.
+    workspace aside when this is raised; handle() closes the signal on that record,
+    so it happens once per rewrite.
     """
 
 
