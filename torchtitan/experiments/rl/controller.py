@@ -2012,13 +2012,16 @@ class Controller(Configurable):
                     pass
                 else:
                     wandb.run.summary["evolution/observer_url"] = observer["url"]
+        # These run inside the training step: a malformed file the loop or the
+        # dataset wrote must cost a metric, never the step.
         served = None
         if run is not None:
             try:
                 lines = run.mix_versions.read_text().splitlines()
                 served = json.loads(lines[-1]).get("version") if lines else None
-            except (OSError, ValueError):
-                pass
+                served = None if served is None else float(served)
+            except (OSError, ValueError, TypeError, AttributeError):
+                served = None
         if served is not None:
             metrics.append(
                 m.Metric("evolution/mix_version_served", m.NoReduce(float(served)))
@@ -2038,22 +2041,28 @@ class Controller(Configurable):
                 if key in queue
             ),
         ]
-        if served is not None and s.get("mix_version") is not None:
-            metrics.append(
-                m.Metric(
-                    "evolution/mix_version_lag",
-                    m.NoReduce(float(s["mix_version"] - served)),
+        try:
+            if served is not None and s.get("mix_version") is not None:
+                metrics.append(
+                    m.Metric(
+                        "evolution/mix_version_lag",
+                        m.NoReduce(float(s["mix_version"]) - served),
+                    )
                 )
-            )
-        if s.get("updated"):
-            # Gauges read from a status.json the loop stopped refreshing look
-            # live; its age tells a stalled loop from an idle one.
-            metrics.append(
-                m.Metric(
-                    "evolution/status_age_sec",
-                    m.NoReduce(time.time() - layout.parse_stamp(s["updated"])),
+        except (TypeError, ValueError):
+            pass
+        try:
+            if s.get("updated"):
+                # Gauges read from a status.json the loop stopped refreshing look
+                # live; its age tells a stalled loop from an idle one.
+                metrics.append(
+                    m.Metric(
+                        "evolution/status_age_sec",
+                        m.NoReduce(time.time() - layout.parse_stamp(s["updated"])),
+                    )
                 )
-            )
+        except (TypeError, ValueError):
+            pass
 
         # Every other number in status.json, under evolution/root/: it covers
         # the whole evolution root (all runs sharing it), and new fields the

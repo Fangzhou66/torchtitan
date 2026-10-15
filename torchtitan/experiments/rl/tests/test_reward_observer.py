@@ -243,6 +243,18 @@ class RewardObserverTest(unittest.TestCase):
                     self.assertEqual(values["evolution/mix_version_lag"], 2)
                     self.assertGreaterEqual(values["evolution/status_age_sec"], 30)
                     self.assertNotIn("evolution/root/updated", values)
+                    # A malformed stamp or a half-written mix_versions line costs
+                    # those metrics, not the training step.
+                    observer.layout.write_json_atomic(
+                        root.evolution.status,
+                        {"updated": "not-a-stamp", "mix_version": 5, "pending": 1},
+                    )
+                    with attempt.mix_versions.open("a") as stream:
+                        stream.write('{"version": ')
+                    values = dict(namespace["_evolution_metrics"](owner))
+                    self.assertEqual(values["evolution/root/pending"], 1)
+                    self.assertNotIn("evolution/status_age_sec", values)
+                    self.assertNotIn("evolution/mix_version_lag", values)
 
     def _claim(self, run, group, origin):
         observer.layout.append_jsonl(
