@@ -196,9 +196,10 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
             "dense" if os.environ.get("SWE_REWARD_DENSE", "0") == "1" else "sparse"
         ),
         # Grade unsubmitted rollouts for the record only (reward unchanged): how
-        # many context/time/turn-limit zeros were actually solved.
+        # many context/time/turn-limit zeros were actually solved. On by default;
+        # TMAX_SHADOW_GRADE_UNSUBMITTED=0 skips the extra verifier run.
         shadow_grade_unsubmitted=(
-            os.environ.get("TMAX_SHADOW_GRADE_UNSUBMITTED", "0") == "1"
+            os.environ.get("TMAX_SHADOW_GRADE_UNSUBMITTED", "1") == "1"
         ),
         # MiMo-style in-group length penalty on solves (TMaxRollouter.Config.
         # length_penalty*), off unless SWE_LENGTH_PENALTY=1. Defaults are MiMo's
