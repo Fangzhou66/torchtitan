@@ -245,6 +245,32 @@ def _workspace(
     )
 
 
+def _prune_interrupted_codex_homes(active: Path) -> None:
+    """Drop the client caches a cut-short Codex session left in its home.
+
+    A session that ends normally keeps only ``sessions/`` (evolve_codex
+    ``_prune_private_home``); one stopped mid-run still holds the CLI's plugin
+    and skill caches, ~4k small files per session, which publication would
+    copy one by one into the durable root. Claude Code keeps its transcript
+    elsewhere in its home, so its homes are left whole.
+    """
+    agent = os.environ.get("EVOLVE_AGENT") or (
+        "claude" if os.environ.get("SWE_RETUNE_AGENT") == "claude" else "codex"
+    )
+    if agent == "claude":
+        return
+    for home in active.glob("sessions/*/codex"):
+        if not home.is_dir() or home.is_symlink():
+            continue
+        for child in home.iterdir():
+            if child.name == "sessions":
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
+
 def recover(root: layout.Root) -> list[layout.RewriteDir]:
     """Publish every local rewrite a stopped loop or a failed publication left.
 
@@ -275,6 +301,7 @@ def recover(root: layout.Root) -> list[layout.RewriteDir]:
             except OSError:
                 pass
             continue
+        _prune_interrupted_codex_homes(active)
         try:
             workspace.publish()
         except (WorkspaceTransferError, RuntimeError) as exc:

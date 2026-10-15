@@ -868,6 +868,34 @@ def test_recover_publishes_a_workspace_a_stopped_loop_left(
     assert rw_workspace.recover(root) == []
 
 
+def test_recover_drops_codex_caches_of_a_cut_short_session(
+    tmp_path, monkeypatch
+) -> None:
+    root = _root(tmp_path, monkeypatch)
+    monkeypatch.setenv("EVOLVE_WORK_ROOT", str(tmp_path / "node-local"))
+    monkeypatch.delenv("EVOLVE_AGENT", raising=False)
+    monkeypatch.delenv("SWE_RETUNE_AGENT", raising=False)
+    durable = layout.RewriteDir(
+        root.evolution.task("tw_a").path / "rewrites" / "20260904-190000Z--harder"
+    )
+    workspace = rw_workspace.prepare_rewrite(root, durable, tmp_path)
+    meta = {"task": "tw_a", "status": "running", "sessions": []}
+    layout.write_json_atomic(workspace.active.meta, meta)
+    workspace.claim(meta)
+    session = workspace.active.session("agent", "20260904-190001Z")
+    (session.codex_home / "sessions").mkdir(parents=True)
+    (session.codex_home / "sessions" / "thread.jsonl").write_text("{}\n")
+    (session.codex_home / ".tmp" / "plugins").mkdir(parents=True)
+    (session.codex_home / ".tmp" / "plugins" / "SKILL.md").write_text("cache\n")
+    (session.codex_home / "config.toml").write_text("model = 'x'\n")
+
+    assert [d.path for d in rw_workspace.recover(root)] == [durable.path]
+
+    home = durable.session("agent", "20260904-190001Z").codex_home
+    assert sorted(p.name for p in home.iterdir()) == ["sessions"]
+    assert (home / "sessions" / "thread.jsonl").read_text() == "{}\n"
+
+
 def test_loop_refuses_to_start_when_the_budget_leaves_no_session_time(
     tmp_path, monkeypatch
 ) -> None:
