@@ -297,9 +297,12 @@ become a task requirement, and a false positive may remain in the recorded advic
 discarded whole, and the task goes back into training exactly as it was, so an
 edit you were confident about but did not verify is worth nothing. Each check
 rebuilds the image and takes minutes; `exec` takes seconds, so do the looking
-there and save `check` for the end.
+there and save `check` for the end. Once `oracle` passes, re-check verifier
+edits with `grade` rather than `check`, unless `solution/` or `environment/`
+changed.
 
-Run it in the foreground and wait for it to print. Minutes is the expected
+Run it in the foreground and wait for it to print: start it with a long wait
+on the command (codex: yield_time_ms 600000) rather than polling it. Minutes is the expected
 cost and you have hours, so waiting for it costs you nothing. Do not send it
 to the background, do not poll for it and give up, and do not end your turn
 while it is still running: this is one batch turn, nothing will wake you when

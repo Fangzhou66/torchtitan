@@ -69,6 +69,11 @@ oracle and grade re-read the package every time, so an edited verifier or
 solution is picked up without a reset; an edited Dockerfile needs `reset`, and
 so does an edited tests/protected_paths.json: grade refuses until the baseline
 is retaken at up.
+oracle and check reuse an earlier passing result when everything they read
+(_inputs_digest: environment/, solution/, tests/, task.toml, the pin hook, the
+harness code) is byte-identical and the box and timeout match, print that they
+did, and record it; --fresh forces a rerun. A non-passing run with the same
+inputs drops the earlier pass. The entries live in run/result-cache.json.
 Every check's verdict is appended to run/checks.jsonl, which the caller reads
 to learn whether the agent ever saw its own rewrite pass, and what the
 reference solution cost when it did: that measurement, not a number anyone
@@ -176,6 +181,160 @@ def _append_check(pkg: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+# --------------------------------------------------------------------------
+# result reuse
+# --------------------------------------------------------------------------
+
+# Passing oracle/check outcomes, keyed by a digest of everything the run reads.
+# The harness deletes it wherever an independent revalidation failed.
+REUSE_FILE = "result-cache.json"
+# Package entries no oracle or grade reads: the harness's own files, and the
+# instruction (it reaches the row only as the agent's prompt).
+_UNREAD = ("AGENTS.md", "sandbox", "run", "traces", "instruction.md")
+# run/ files the server reads at boot or per request; the box is compared apart.
+_RUN_INPUTS = ("pretest.json",)
+_HARNESS_FILES = (
+    "agent_sandbox.py",
+    "daytona_revalidate.py",
+    "terminus_validation.py",
+    "pack_to_dataset.py",
+    "recorded_solution.py",
+    "../grading.py",
+    "../integrity_baseline.py",
+    "../prepare_rts_data.py",
+    "../prepare_tmax_data.py",
+)
+
+
+def _reuse_enabled() -> bool:
+    return os.environ.get("EVOLVE_SANDBOX_REUSE", "1") != "0"
+
+
+def _hash_tree(h, root: Path, rel: str, seen: set[str]) -> None:
+    """Feed every entry under ``root`` into ``h``: path, mode, symlink target,
+    and content. A symlinked directory is walked through once."""
+    real = os.path.realpath(root)
+    if real in seen:
+        h.update(f"loop {rel}\0".encode())
+        return
+    seen.add(real)
+    for child in sorted(root.iterdir(), key=lambda p: p.name):
+        crel = f"{rel}/{child.name}" if rel else child.name
+        if (not rel and child.name in _UNREAD) or child.name == "__pycache__":
+            continue
+        if child.is_symlink():
+            h.update(f"link {crel} {os.readlink(child)}\0".encode())
+        try:
+            st = child.stat()
+        except OSError:
+            h.update(f"dangling {crel}\0".encode())
+            continue
+        if child.is_dir():
+            h.update(f"dir {crel}\0".encode())
+            _hash_tree(h, child, crel, seen)
+        else:
+            h.update(f"file {crel} {st.st_mode & 0o777:o} {st.st_size}\0".encode())
+            with child.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+
+
+def _inputs_digest(pkg: Path, solve_timeout: int) -> str:
+    """What decides an oracle or check outcome, as one hash: every package
+    file except _UNREAD (environment/ with its Dockerfile and context,
+    solution/, tests/, task.toml, anything else the agent added), the pin hook
+    and protected lists under run/, the solve timeout, and the harness code
+    that builds, runs and grades."""
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(f"solve_timeout {solve_timeout}\0".encode())
+    here = Path(__file__).resolve().parent
+    for name in _HARNESS_FILES:
+        p = here / name
+        h.update(f"harness {name}\0".encode())
+        if p.is_file():
+            h.update(hashlib.sha256(p.read_bytes()).digest())
+    for name in _RUN_INPUTS:
+        p = pkg / "run" / name
+        h.update(f"run {name}\0".encode())
+        if p.is_file():
+            h.update(p.read_bytes())
+    if pkg.is_dir():
+        _hash_tree(h, pkg, "", set())
+    return h.hexdigest()
+
+
+def _box_key(box: dict | None) -> list:
+    return [(box or {}).get(k) for k in ("cpu", "mem_gb", "disk_gb")]
+
+
+def _read_reuse(pkg: Path) -> list[dict]:
+    try:
+        got = json.loads((pkg / "run" / REUSE_FILE).read_text())
+    except (OSError, ValueError):
+        return []
+    return [e for e in got if isinstance(e, dict)] if isinstance(got, list) else []
+
+
+def _write_reuse(pkg: Path, entries: list[dict]) -> None:
+    path = pkg / "run" / REUSE_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    incoming = path.with_suffix(".json.incoming")
+    incoming.write_text(json.dumps(entries[-20:], sort_keys=True) + "\n")
+    os.replace(incoming, path)
+
+
+def _remember(pkg: Path, entry: dict) -> None:
+    _write_reuse(pkg, [*_read_reuse(pkg), {"time": _now(), **entry}])
+
+
+def _forget(pkg: Path, digest: str | None) -> None:
+    """A run with these inputs did not pass: no earlier pass with the same
+    inputs may stand in for a rerun."""
+    if digest is None:
+        return
+    entries = _read_reuse(pkg)
+    kept = [e for e in entries if e.get("digest") != digest]
+    if len(kept) != len(entries):
+        _write_reuse(pkg, kept)
+
+
+def _reusable_check(pkg: Path, digest: str, box: dict, at_max: bool) -> dict | None:
+    """The newest passing check with these inputs, at this box."""
+    for e in reversed(_read_reuse(pkg)):
+        if (
+            e.get("kind") == "check"
+            and e.get("digest") == digest
+            and bool(e.get("at_max")) == at_max
+            and e.get("requested_box") == _box_key(box)
+        ):
+            return e
+    return None
+
+
+def _reusable_oracle(pkg: Path, digest: str, state: dict) -> dict | None:
+    """The newest passing oracle run with these inputs in a container of the
+    current one's size: a check's (a fresh container), or an earlier oracle in
+    this very container."""
+    box = _box_key(state.get("resources"))
+    sandbox_id = state.get("sandbox_id") if state.get("status") == "ready" else None
+    for e in reversed(_read_reuse(pkg)):
+        if e.get("digest") != digest or _box_key(e.get("resources")) != box:
+            continue
+        if e.get("kind") == "check" or (
+            e.get("kind") == "oracle" and sandbox_id and e.get("sandbox_id") == sandbox_id
+        ):
+            return e
+    return None
+
+
+def _oracle_summary(r: dict) -> dict:
+    return {
+        k: r.get(k) for k in ("reward", "solve_exit", "measured", "grading")
+    } | {"tail": (r.get("tail") or "")[-2000:]}
 
 
 # --------------------------------------------------------------------------
@@ -498,7 +657,30 @@ def _print_oracle(r: dict) -> None:
         print(tail)
 
 
-def cmd_oracle(pkg: Path, solve_timeout: int) -> int:
+def _passed(r: dict) -> bool:
+    return float(r.get("reward") or 0) >= 1.0 and r.get("solve_exit") == 0
+
+
+def cmd_oracle(pkg: Path, solve_timeout: int, fresh: bool = False) -> int:
+    digest = _inputs_digest(pkg, solve_timeout) if _reuse_enabled() else None
+    hit = None if fresh or digest is None else _reusable_oracle(
+        pkg, digest, _read_state(pkg)
+    )
+    if hit is not None:
+        where = (
+            "the passing ./sandbox check"
+            if hit["kind"] == "check"
+            else "the passing ./sandbox oracle in this container"
+        )
+        print(
+            f"oracle: REUSED the result of {where} at {hit['time']}: solution/, "
+            f"tests/, environment/ and task.toml are byte-identical to that run. "
+            f"Nothing ran, and the container is as you left it, so a following "
+            f"`grade` grades that state, not a fresh solve. "
+            f"./sandbox oracle --fresh replays it."
+        )
+        _print_oracle(hit["oracle"])
+        return 0
     state = _ready_state(pkg)
     if state is None:
         return 2
@@ -507,7 +689,21 @@ def cmd_oracle(pkg: Path, solve_timeout: int) -> int:
         print(f"sandbox error: {r.get('error')}", file=sys.stderr)
         return 2
     _print_oracle(r)
-    return 0 if float(r.get("reward") or 0) >= 1.0 and r.get("solve_exit") == 0 else 1
+    if digest is not None:
+        if _passed(r):
+            _remember(
+                pkg,
+                {
+                    "kind": "oracle",
+                    "digest": digest,
+                    "sandbox_id": state.get("sandbox_id"),
+                    "resources": state.get("resources"),
+                    "oracle": _oracle_summary(r),
+                },
+            )
+        else:
+            _forget(pkg, digest)
+    return 0 if _passed(r) else 1
 
 
 def cmd_grade(pkg: Path) -> int:
@@ -573,7 +769,9 @@ def _step_audit(pkg: Path) -> list[str]:
     )
 
 
-def cmd_check(pkg: Path, solve_timeout: int, at_max: bool = False) -> int:
+def cmd_check(
+    pkg: Path, solve_timeout: int, at_max: bool = False, fresh: bool = False
+) -> int:
     """The whole verdict on a fresh container: rebuild, null probe, oracle.
 
     The oracle run is measured, and that measurement decides which box the
@@ -588,8 +786,32 @@ def cmd_check(pkg: Path, solve_timeout: int, at_max: bool = False) -> int:
     That is a superset of what the seed campaign read (solution only) and it
     errs on the side the box has to hold anyway: the training sandbox runs the
     verifier too.
+
+    A check whose inputs (_inputs_digest), box and timeout are byte-identical
+    to an earlier passing one reuses that run's null probe and oracle and says
+    so; ``fresh`` reruns it. The size and names audits are always recomputed.
     """
     started = time.time()
+    digest = _inputs_digest(pkg, solve_timeout) if _reuse_enabled() else None
+    requested = _box(pkg, at_max)
+    hit = None if fresh or digest is None else _reusable_check(
+        pkg, digest, requested, at_max
+    )
+    if hit is not None:
+        # The same bytes, box and timeout already passed reset + null probe +
+        # oracle in a fresh container; the audits below are recomputed.
+        print(
+            f"check: REUSED the passing check from {hit['time']}: solution/, "
+            f"tests/, environment/ and task.toml are byte-identical to that run, "
+            f"at the same box and --solve-timeout. Nothing was rebuilt or "
+            f"replayed and the container was left as it is. "
+            f"./sandbox check --fresh reruns it."
+        )
+        box, null_reward, r = hit["resources"] or {}, hit["null_reward"], hit["oracle"]
+        return _check_verdict(
+            pkg, started, solve_timeout, at_max, box, null_reward, r,
+            reused_from=hit["time"],
+        )
     if _read_state(pkg).get("status") not in (None, "down"):
         cmd_down(pkg)
     if cmd_up(pkg, at_max=at_max) != 0:
@@ -617,6 +839,7 @@ def cmd_check(pkg: Path, solve_timeout: int, at_max: bool = False) -> int:
                 "at_max": at_max,
             },
         )
+        _forget(pkg, digest)
         print(f"VERDICT: fail   stage=null_probe   null_reward={null_reward}")
         print(
             "The verifier passes on the untouched workspace: it pays for nothing.\n"
@@ -627,8 +850,40 @@ def cmd_check(pkg: Path, solve_timeout: int, at_max: bool = False) -> int:
     if not r.get("ok"):
         print(f"VERDICT: error   stage=oracle ({r.get('error')})")
         return 2
+    if digest is not None:
+        if _passed(r):
+            _remember(
+                pkg,
+                {
+                    "kind": "check",
+                    "digest": digest,
+                    "at_max": at_max,
+                    "requested_box": _box_key(requested),
+                    "sandbox_id": state.get("sandbox_id"),
+                    "resources": box,
+                    "null_reward": null_reward,
+                    "oracle": _oracle_summary(r),
+                },
+            )
+        else:
+            _forget(pkg, digest)
+    return _check_verdict(pkg, started, solve_timeout, at_max, box, null_reward, r)
+
+
+def _check_verdict(
+    pkg: Path,
+    started: float,
+    solve_timeout: int,
+    at_max: bool,
+    box: dict,
+    null_reward: float,
+    r: dict,
+    *,
+    reused_from: str | None = None,
+) -> int:
+    """Record and print a check's verdict from its null probe and oracle run."""
     reward = float(r.get("reward") or 0)
-    oracle_ok = reward >= 1.0 and r.get("solve_exit") == 0
+    oracle_ok = _passed(r)
     starved = "" if oracle_ok else _starved(r, solve_timeout)
     # The reference solution passing says the verifier and the solution agree.
     # It says nothing about whether an agent that reads only the instruction
@@ -657,6 +912,7 @@ def cmd_check(pkg: Path, solve_timeout: int, at_max: bool = False) -> int:
             "dark_literals": names,
             "step_size": step,
             "elapsed_s": round(time.time() - started),
+            **({"reused_from": reused_from} if reused_from else {}),
         },
     )
     if oracle_ok and step:
@@ -1057,11 +1313,14 @@ def main() -> None:
     p = sub.add_parser("exec")
     p.add_argument("command")
     p.add_argument("--timeout", type=int, default=EXEC_TIMEOUT)
+    fresh_help = "rerun even when an earlier passing result has byte-identical inputs"
     p = sub.add_parser("oracle")
     p.add_argument("--solve-timeout", type=int, default=SOLVE_TIMEOUT)
+    p.add_argument("--fresh", action="store_true", help=fresh_help)
     p = sub.add_parser("check")
     p.add_argument("--solve-timeout", type=int, default=SOLVE_TIMEOUT)
     p.add_argument("--max", action="store_true", help=max_help)
+    p.add_argument("--fresh", action="store_true", help=fresh_help)
     p = sub.add_parser("probes")
     p.add_argument(
         "--timeout",
@@ -1103,11 +1362,13 @@ def main() -> None:
     if args.cmd == "exec":
         sys.exit(cmd_exec(pkg, args.command, args.timeout))
     if args.cmd == "oracle":
-        sys.exit(cmd_oracle(pkg, args.solve_timeout))
+        sys.exit(cmd_oracle(pkg, args.solve_timeout, fresh=args.fresh))
     if args.cmd == "grade":
         sys.exit(cmd_grade(pkg))
     if args.cmd == "check":
-        sys.exit(cmd_check(pkg, args.solve_timeout, at_max=args.max))
+        sys.exit(
+            cmd_check(pkg, args.solve_timeout, at_max=args.max, fresh=args.fresh)
+        )
     if args.cmd == "probes":
         sys.exit(cmd_probes(pkg, args.timeout))
 

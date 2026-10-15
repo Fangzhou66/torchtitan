@@ -745,6 +745,31 @@ def _agent_failure_type(stdout: str, stderr: str) -> str:
     return f"{EVOLVE_AGENT}_exit_nonzero"
 
 
+_RUNTIME_INTERFACE = """
+
+Package runtime interface:
+- The image builds from environment/Dockerfile. Local COPY/ADD sources are
+  relative to environment/, not the package root. A top-level setup.sh is not
+  automatically executed; environment setup must be in the image recipe.
+- Host edits stay on the host unless copied by the Dockerfile or loaded by a
+  sandbox command. oracle reloads solution/; grade reloads tests/. Dockerfile
+  and build-context edits require reset. exec preserves container state.
+- check, oracle, grade, reset and up can each take minutes. Start them with a
+  long wait on the command (codex: yield_time_ms 600000) so the call returns
+  with the result; polling a running command spends a turn per poll.
+- Once oracle has passed, re-check verifier edits with grade rather than check,
+  which rebuilds and replays everything; run check again when solution/ or
+  environment/ changed, and to confirm at the end. oracle and check reuse an
+  earlier passing result whose inputs are byte-identical, and say so; --fresh
+  forces a rerun.
+- When the reference solution is present, ./sandbox size reports the current
+  size, seed bounds and size violations locally, without booting a container.
+  It does not replace ./sandbox check.
+- Use these interfaces for routine package work. Inspect harness source only
+  when an observed failure cannot be explained by its documented behavior.
+"""
+
+
 def _run_codex(
     run: SessionRun, cwd: Path, prompt: str, *, resume: str | None = None
 ) -> subprocess.CompletedProcess:
@@ -763,21 +788,7 @@ def _run_codex(
         "create, including run/verdict.txt, before reporting that they "
         "exist.\n"
     )
-    prompt += """
-
-Package runtime interface:
-- The image builds from environment/Dockerfile. Local COPY/ADD sources are
-  relative to environment/, not the package root. A top-level setup.sh is not
-  automatically executed; environment setup must be in the image recipe.
-- Host edits stay on the host unless copied by the Dockerfile or loaded by a
-  sandbox command. oracle reloads solution/; grade reloads tests/. Dockerfile
-  and build-context edits require reset. exec preserves container state.
-- When the reference solution is present, ./sandbox size reports the current
-  size, seed bounds and size violations locally, without booting a container.
-  It does not replace ./sandbox check.
-- Use these interfaces for routine package work. Inspect harness source only
-  when an observed failure cannot be explained by its documented behavior.
-"""
+    prompt += _RUNTIME_INTERFACE
     if (ACCOUNT_HOME or EVOLVE_AGENT == "claude") and (cwd / "AGENTS.md").is_file():
         # Automatic document discovery is off (codex), or the role file has a
         # name this CLI does not look for (claude): either way the experiment's
@@ -988,6 +999,7 @@ def _prepare_package(pkg: Path, task: dict) -> dict:
     # mode before a prompt or a session sits beside it.
     pkg.chmod(0o700)
     (pkg / "run").mkdir(exist_ok=True)
+    (pkg / "run" / "result-cache.json").unlink(missing_ok=True)
     fmap = ev.file_map(task)
     _write_seed_literals(
         pkg, fmap["test_state_py"], require_growth=False
@@ -3237,7 +3249,8 @@ def _resume_author_blind(
     _write_resources(pkg, task)
     _write_pretest(pkg, task)
     (pkg / "run" / "failure.txt").write_text(observed or "(no output captured)")
-    for stale in ("verdict.txt", "checks.jsonl"):
+    # The caller's revalidation failed: no earlier pass may stand in for a rerun.
+    for stale in ("verdict.txt", "checks.jsonl", "result-cache.json"):
         (pkg / "run" / stale).unlink(missing_ok=True)
     timeout = _session_timeout(deadline, "blind author repair")
     with session(rewrite, "repair-author", timeout=timeout, resumes=prior) as run:
@@ -3320,7 +3333,8 @@ def resume_agentic(
     _write_resources(pkg, task)
     _write_pretest(pkg, task)
     (pkg / "run" / "failure.txt").write_text(observed or "(no output captured)")
-    for stale in ("verdict.txt", "checks.jsonl"):
+    # The caller's revalidation failed: no earlier pass may stand in for a rerun.
+    for stale in ("verdict.txt", "checks.jsonl", "result-cache.json"):
         (pkg / "run" / stale).unlink(missing_ok=True)
     agent_error = None
     timeout = _session_timeout(deadline, "author repair")
