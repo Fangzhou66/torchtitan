@@ -389,3 +389,81 @@ def test_size_string_parsing(size, expected):
     got = _size_to_gb(None, size)
     # 512M rounds up to 1GiB, then the caller clamps to the 2GiB floor.
     assert got == (1 if size == "512M" else expected)
+
+
+_PATCHED = ("qemu-startup", "qemu-alpine-ssh", "build-cython-ext")
+
+
+def test_env_patches_touch_only_the_listed_tasks(tmp_path):
+    root = tmp_path / "tasks"
+    root.mkdir()
+    for task_id in (*_PATCHED, "mcmc-sampling-stan", "build-pov-ray", "fix-git"):
+        _write_task(root, task_id, binary=None)
+
+    rows = {row["label"]: row for row in build_rows(tasks_root=str(root))[0]}
+    plain = {
+        row["label"]: row
+        for row in build_rows(tasks_root=str(root), env_patches=False)[0]
+    }
+
+    assert len(rows) == len(plain) == 6
+    for task_id in ("build-pov-ray", "fix-git"):
+        assert rows[task_id] == plain[task_id]
+    # stan's patch lives in the image layer only; its verifier is untouched.
+    assert rows["mcmc-sampling-stan"]["metadata"]["tmax"] == (
+        plain["mcmc-sampling-stan"]["metadata"]["tmax"]
+    )
+    assert rows["mcmc-sampling-stan"]["metadata"]["env_patch"].endswith("#72")
+    for task_id in _PATCHED:
+        test_sh = rows[task_id]["metadata"]["tmax"]["test_sh"]
+        assert test_sh.startswith(
+            "#!/bin/bash\n# --- injected by prepare_tb2_1_data.py"
+        )
+        # The upstream verifier body follows the block, byte for byte.
+        assert test_sh.endswith(_TEST_SH.split("\n", 1)[1])
+        assert "env_patch" not in plain[task_id]["metadata"]
+        subprocess.run(["bash", "-n"], input=test_sh, text=True, check=True)
+    assert "archive.debian.org" in rows["qemu-startup"]["metadata"]["tmax"]["test_sh"]
+    assert "planarity==0.6" in rows["build-cython-ext"]["metadata"]["tmax"]["test_sh"]
+
+
+def test_env_patches_are_idempotent(tmp_path):
+    from torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data import (
+        apply_env_patches,
+    )
+
+    root = tmp_path / "tasks"
+    root.mkdir()
+    _write_task(root, "qemu-alpine-ssh", binary=None)
+    (row,), _ = build_rows(tasks_root=str(root))
+    once = json.dumps(row, sort_keys=True)
+    assert json.dumps(apply_env_patches(row), sort_keys=True) == once
+
+
+def test_runtime_image_layer_precedes_tmux_for_patched_tasks(tmp_path, monkeypatch):
+    built = {}
+
+    @asynccontextmanager
+    async def boot(image, **kwargs):
+        built[image] = kwargs["dockerfile"]
+
+        async def execute(command, **kwargs):
+            return 0, "tmux 3.4", ""
+
+        yield types.SimpleNamespace(sandbox_id="box", exec=execute)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torchtitan.experiments.rl.harness.agents.claude_code",
+        types.SimpleNamespace(boot_agent_sandbox=boot),
+    )
+    rows = [
+        {"metadata": {"instance_id": tid, "image": f"{tid}@sha256:{'0' * 64}"}}
+        for tid in ("mcmc-sampling-stan", "qemu-startup", "fix-git")
+    ]
+    asyncio.run(verify_runtime(rows, str(tmp_path)))
+    stan, qemu, plain = (row["metadata"]["dockerfile"] for row in rows)
+    assert stan.index("install -y --no-install-recommends cmake") < stan.index("tmux")
+    assert qemu.index("archive.debian.org") < qemu.index("tmux")
+    assert plain == f"FROM fix-git@sha256:{'0' * 64}\n" + plain.split("\n", 1)[1]
+    assert "cmake" not in plain and "archive.debian.org" not in plain

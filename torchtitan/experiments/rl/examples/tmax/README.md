@@ -152,7 +152,13 @@ python -m torchtitan.experiments.rl.examples.tmax.prepare_tb2_data \
 > old file) and emits per-task `daytona_cpu/mem_gb/disk_gb`. Each row also carries its
 > declared `verifier_timeout_sec` (360s to 12000s across the 89) and the rollouter
 > grades on it, floored at `TMAX_EVAL_TIMEOUT_SEC`, so nothing needs setting for a
-> full-suite eval. Both JSONLs feed the same
+> full-suite eval. Four tasks whose own reference solution now fails on rotted
+> external resources (qemu-startup, qemu-alpine-ssh, build-cython-ext,
+> mcmc-sampling-stan) get an environment-only patch that follows the upstream fix PR.
+> mcmc-sampling-stan's patch, and the qemu tasks' agent-side apt fix, land only in
+> the `--verify-runtime` image. `--no-env-patches` emits the published tree as is.
+> build-pov-ray stays unpatched: povray.org 403s datacenter clients, and that
+> download is part of the task. Both JSONLs feed the same
 > `SWE_TB2_DATA` / `SWE_TB2_VAL_DATA` path; a 2.0 number and a 2.1 number are not
 > directly comparable.
 
