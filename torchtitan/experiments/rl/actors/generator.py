@@ -992,6 +992,12 @@ class VLLMGenerator(Actor, Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
+        cpu_staged_weight_pull: bool = False
+        """torchtitan_wrapper only: pull weights into a persistent CPU copy, then copy
+        it into the live model, instead of RDMA-writing GPU params directly. Needed for
+        several single-GPU generators per host: monarch before 2026-08 ignores
+        ``CUDA_VISIBLE_DEVICES`` when picking the NIC for GPU memory."""
+
         overlap_weight_fetch: bool = False
         """Overlap the weight-pull FETCH (network -> staging buffer) with ongoing
         generation, so only the APPLY (staging -> live model) pauses the engine.
@@ -1418,6 +1424,8 @@ class VLLMGenerator(Actor, Configurable):
             backend="gloo", timeout=timedelta(days=7)
         )
         self._dp_weight_broadcaster: DPWeightBroadcaster | None = None
+        # cpu_staged_weight_pull: CPU copy of the state dict reused across pulls.
+        self._cpu_pull_buffer: dict | None = None
         if config.enable_dp_weight_broadcast:
             unsupported_reason = dp_weight_broadcast_unsupported_reason(
                 data_parallel_degree=config.parallelism.data_parallel_degree,
@@ -2127,8 +2135,16 @@ class VLLMGenerator(Actor, Configurable):
             )
             return
 
+        cpu_staged = None
+        if self.config.cpu_staged_weight_pull and self._backend != "vllm_native":
+            if self._cpu_pull_buffer is None:
+                self._cpu_pull_buffer = {
+                    k: v.detach().to("cpu", copy=True)
+                    for k, v in self._get_model().model.state_dict().items()
+                }
+            cpu_staged = self._cpu_pull_buffer
         staged, get_secs, gib = await self._fetch_model_state_dict(
-            version, overlap_safe=False
+            version, overlap_safe=False, staged=cpu_staged
         )
         self._apply_model_state_dict(version, staged, get_secs=get_secs, gib=gib)
 

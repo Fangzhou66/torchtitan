@@ -883,6 +883,11 @@ def rl_grpo_qwen3_5_9b_tmax(
         # (fused-qkv merge under broadcast) before trusting a run to it.
         enable_dp_weight_broadcast=os.environ.get("SWE_DP_WEIGHT_BROADCAST", "0")
         == "1",
+        # SWE_CPU_STAGED_WEIGHT_PULL=1: pull into CPU, then copy to GPU. Needed when
+        # several single-GPU generators share a host (SWE_PACK_GENERATORS): the
+        # installed monarch picks the wrong NIC for their GPU memory.
+        cpu_staged_weight_pull=os.environ.get("SWE_CPU_STAGED_WEIGHT_PULL", "0")
+        == "1",
     )
     # 32 chunks keeps per-chunk fp32 lm_head logits ~1.2 GiB at seq_len 65536
     # (16 chunks -> ~2.3 GiB, an OOM risk); 65536 % 32 == 0 for the chunk split.
