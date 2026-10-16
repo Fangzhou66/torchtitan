@@ -201,7 +201,22 @@ def apply_fsdp_to_decoder(
                 assert edp_mesh is not None
                 efsdp_ep_size = edp_mesh["efsdp"].size() * ep_degree
             else:
-                efsdp_ep_size = fsdp_config["mesh"].size()
+                # FSDP cuts dim 0 only over its shard axes: ``dp_shard``,
+                # plus ``cp`` when CP is on (see ``resolve_fsdp_mesh``), or
+                # the flattened ``fsdp`` axis (``dp_shard * cp``) that the
+                # model parallelize functions pass. ``dp_replicate``
+                # replicates, and ``tp`` shards other dims via the TP plan,
+                # so neither divides dim 0.
+                dp_storage_mesh = fsdp_config["mesh"]
+                mesh_dim_names = dp_storage_mesh.mesh_dim_names or ()
+                if "dp_shard" in mesh_dim_names:
+                    efsdp_ep_size = dp_storage_mesh["dp_shard"].size()
+                    if "cp" in mesh_dim_names:
+                        efsdp_ep_size *= dp_storage_mesh["cp"].size()
+                elif "fsdp" in mesh_dim_names:
+                    efsdp_ep_size = dp_storage_mesh["fsdp"].size()
+                else:
+                    efsdp_ep_size = dp_storage_mesh.size()
 
             if efsdp_ep_size > num_experts:
                 expert_shard_placement = Shard(1)
