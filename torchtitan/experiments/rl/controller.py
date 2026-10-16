@@ -450,6 +450,10 @@ class Controller(Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         """torch.compile config shared by trainer and generator."""
 
+        generator_compile: CompileConfig | None = None
+        """torch.compile config for the torchtitan_wrapper generators only. ``None``
+        uses ``compile``. Lets the generator compile while the trainer stays eager."""
+
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
         )
@@ -993,6 +997,7 @@ class Controller(Configurable):
             )
 
             # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
+            generator_compile = config.generator_compile or config.compile
             generators = []
             for idx, generator_mesh in enumerate(generator_meshes):
                 actor_name = (
@@ -1004,7 +1009,7 @@ class Controller(Configurable):
                     config.generator,
                     model_spec=config.model_spec,
                     model_path=config.hf_assets_path,
-                    compile_config=config.compile,
+                    compile_config=generator_compile,
                     max_num_seqs=max_num_seqs,
                     output_dir=config.dump_folder,
                 )
@@ -1097,7 +1102,7 @@ class Controller(Configurable):
                         eval_generator_config,
                         model_spec=config.model_spec,
                         model_path=config.hf_assets_path,
-                        compile_config=config.compile,
+                        compile_config=generator_compile,
                         max_num_seqs=async_loop.generator_max_num_seqs
                         or min(
                             math.ceil(
