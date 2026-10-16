@@ -106,11 +106,15 @@ _TMUX_PROBE = (
 # (package sources, a version pin); no instruction, solution or test assertion
 # changes. Each follows an open upstream fix in harbor-framework/terminal-bench-2.
 # Tasks not listed here are untouched. Two kinds of patch:
-#   "test_sh"      inserted at the top of the verifier, after the shebang. Applies
-#                  to every row, including rows read back with --input-jsonl.
-#   "image_layer"  Dockerfile lines placed before the tmux layer in the derived
-#                  image that --verify-runtime builds. A row built without
-#                  --verify-runtime runs the published image and does not get it.
+#   "test_sh"      inserted at the top of the verifier, after the shebang. The
+#                  rollouter writes metadata.tmax.test_sh to /tests/test.sh verbatim
+#                  (grading.grade_tmax), so the row is the only place it can go.
+#   "image_layer"  Dockerfile lines on top of the task image. A plain build gives
+#                  the row ``dockerfile = FROM <image> + layer``, which the sandbox
+#                  builds in place of pulling ``image`` (harness/sandbox/daytona.py).
+#                  --verify-runtime replaces that with FROM <digest pin> + layer +
+#                  the tmux layer.
+# Both kinds apply to plain builds and to rows read back with --input-jsonl.
 # build-pov-ray is not listed. Its dead resource (povray.org returns 403 to
 # datacenter clients) is the download the agent itself is asked to find, so no
 # environment-only patch exists. Upstream PR #77 changes only its solve.sh.
@@ -198,6 +202,8 @@ def apply_env_patches(row: dict) -> dict:
     if patch is None:
         return row
     tmax = md["tmax"]
+    if "image_layer" in patch and "dockerfile" not in md:
+        md["dockerfile"] = _patch_dockerfile(md)
     if "test_sh" in patch and _ENV_PATCH_BEGIN not in tmax["test_sh"]:
         tmax["test_sh"] = _after_shebang(
             tmax["test_sh"], _ENV_PATCH_BEGIN + patch["test_sh"] + _ENV_PATCH_END
@@ -209,6 +215,18 @@ def apply_env_patches(row: dict) -> dict:
 def _image_layer(task_id: str) -> str:
     """Dockerfile lines this task's environment patch adds to the derived image."""
     return _ENV_PATCHES.get(task_id, {}).get("image_layer", "")
+
+
+def _patch_dockerfile(md: dict) -> str:
+    """The Dockerfile a plain build gives a row whose patch has an image layer."""
+    return f"FROM {md['image']}\n" + _image_layer(md["instance_id"])
+
+
+def _has_own_dockerfile(md: dict) -> bool:
+    """True when the row carries a Dockerfile other than its env-patch one."""
+    return "dockerfile" in md and not (
+        _image_layer(md["instance_id"]) and md["dockerfile"] == _patch_dockerfile(md)
+    )
 
 
 async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
@@ -254,7 +272,8 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
             tid = md["instance_id"]
             event(tid, "prepare", source_image=md["image"], **provenance)
             # Pin each source before building so a resumed run cannot switch bases.
-            if "dockerfile" not in md:
+            # A plain env-patch Dockerfile is rebuilt here on the pinned base.
+            if not _has_own_dockerfile(md):
                 source_image = md["image"]
                 pin_file = root / (
                     hashlib.sha256(source_image.encode()).hexdigest() + ".pin"
@@ -732,7 +751,7 @@ def main() -> None:
             )
         with open(args.input_jsonl) as source:
             rows = [json.loads(line) for line in source if line.strip()]
-        if any("dockerfile" in row["metadata"] for row in rows):
+        if any(_has_own_dockerfile(row["metadata"]) for row in rows):
             ap.error("--input-jsonl expects original image rows, without a Dockerfile")
         if args.limit:
             rows = rows[: args.limit]

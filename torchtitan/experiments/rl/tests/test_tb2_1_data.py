@@ -425,6 +425,15 @@ def test_env_patches_touch_only_the_listed_tasks(tmp_path):
         subprocess.run(["bash", "-n"], input=test_sh, text=True, check=True)
     assert "archive.debian.org" in rows["qemu-startup"]["metadata"]["tmax"]["test_sh"]
     assert "planarity==0.6" in rows["build-cython-ext"]["metadata"]["tmax"]["test_sh"]
+    # A plain build carries the image layer as a Dockerfile on the task image, which
+    # the sandbox builds instead of pulling the image.
+    image = "docker.io/alexgshaw/demo:20260403"
+    stan = rows["mcmc-sampling-stan"]["metadata"]["dockerfile"]
+    assert stan.startswith(f"FROM {image}\nRUN apt-get update") and "cmake" in stan
+    assert "archive.debian.org" in rows["qemu-startup"]["metadata"]["dockerfile"]
+    for task_id in ("build-cython-ext", "build-pov-ray", "fix-git"):
+        assert "dockerfile" not in rows[task_id]["metadata"]
+    assert not any("dockerfile" in row["metadata"] for row in plain.values())
 
 
 def test_env_patches_are_idempotent(tmp_path):
@@ -457,10 +466,21 @@ def test_runtime_image_layer_precedes_tmux_for_patched_tasks(tmp_path, monkeypat
         "torchtitan.experiments.rl.harness.agents.claude_code",
         types.SimpleNamespace(boot_agent_sandbox=boot),
     )
+    from torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data import (
+        _has_own_dockerfile,
+        apply_env_patches,
+    )
+
     rows = [
         {"metadata": {"instance_id": tid, "image": f"{tid}@sha256:{'0' * 64}"}}
         for tid in ("mcmc-sampling-stan", "qemu-startup", "fix-git")
     ]
+    # The plain-build env-patch Dockerfile is not a Dockerfile of the row's own, so
+    # --verify-runtime still pins the base and adds the tmux layer.
+    for row in rows:
+        row["metadata"]["tmax"] = {"test_sh": "#!/bin/bash\n"}
+        apply_env_patches(row)
+        assert not _has_own_dockerfile(row["metadata"])
     asyncio.run(verify_runtime(rows, str(tmp_path)))
     stan, qemu, plain = (row["metadata"]["dockerfile"] for row in rows)
     assert stan.index("install -y --no-install-recommends cmake") < stan.index("tmux")
