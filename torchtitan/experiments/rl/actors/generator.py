@@ -852,6 +852,17 @@ class RequestDispatcher:
             self._rank0_drain_task = None
 
 
+def use_assigned_physical_gpu() -> None:
+    """Bind this process to ``RL_GPU_INDEX`` (set by PerHostProvisioner with
+    physical_ordinal) before any CUDA use: every GPU stays visible, so cuda:k is
+    physical GPU k. vLLM's external launcher takes its device from LOCAL_RANK."""
+    gpu_index = os.environ.get("RL_GPU_INDEX")
+    if gpu_index is None:
+        return
+    os.environ["LOCAL_RANK"] = gpu_index
+    torch.cuda.set_device(int(gpu_index))
+
+
 class VLLMGenerator(Actor, Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
 
@@ -1094,6 +1105,7 @@ class VLLMGenerator(Actor, Configurable):
         max_num_seqs: int,
         output_dir: str,
     ):
+        use_assigned_physical_gpu()
         init_logger()
         sl.init_structured_logger(
             source="rl_generator",

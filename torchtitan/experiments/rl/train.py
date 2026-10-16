@@ -78,7 +78,14 @@ class PerHostProvisioner:
     def available(self) -> int:
         return self.total_gpus - self.next_gpu
 
-    def allocate(self, num_gpus: int) -> Callable[[], None]:
+    def allocate(
+        self, num_gpus: int, *, physical_ordinal: bool = False
+    ) -> Callable[[], None]:
+        """``physical_ordinal`` (single GPU only): leave every GPU visible and pass
+        the assigned physical index as ``RL_GPU_INDEX`` instead of narrowing
+        ``CUDA_VISIBLE_DEVICES``, so the process's CUDA ordinal equals the
+        physical GPU. Monarch builds before 2026-08 pick the RDMA NIC for GPU
+        memory by treating the ordinal as the physical index."""
         if num_gpus > self.available:
             raise RuntimeError(
                 f"Requested {num_gpus} GPUs but only {self.available} "
@@ -88,6 +95,9 @@ class PerHostProvisioner:
         self.next_gpu += num_gpus
 
         devices = self.devices
+
+        if physical_ordinal and num_gpus != 1:
+            raise ValueError("physical_ordinal applies to single-GPU meshes only")
 
         def _bootstrap():
             # RL_GPUS wins when set and is used verbatim, which is what lets a run
@@ -99,7 +109,16 @@ class PerHostProvisioner:
             else:
                 offset = int(os.environ.get("RL_GPU_OFFSET", "0"))
                 visible = [str(g + offset) for g in gpu_ids]
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(visible)
+            if physical_ordinal:
+                if not visible[0].isdigit():
+                    raise ValueError(
+                        f"physical_ordinal needs a numeric GPU index, got {visible[0]!r}"
+                    )
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+                os.environ["RL_GPU_INDEX"] = visible[0]
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(visible)
             # TODO: Remove once Monarch/PyTorch fixes concurrent import during
             # unpickling. Messages can reference torch and TorchStore's storage
             # volume, so load both here, before concurrent unpickling starts.
@@ -161,9 +180,18 @@ def _spawn_proc_mesh(
     if id(host_mesh) not in provisioners:
         provisioners[id(host_mesh)] = PerHostProvisioner(total_gpus=gpus_per_node)
     provisioner = provisioners[id(host_mesh)]
+    # SWE_PACKED_GPU_ORDINAL_FIX=1: single-GPU generators keep their physical CUDA
+    # ordinal (see PerHostProvisioner.allocate) so RDMA uses each GPU's own NIC.
+    physical_ordinal = (
+        os.environ.get("SWE_PACKED_GPU_ORDINAL_FIX", "0") == "1"
+        and role in ("generator", "eval_generator")
+        and role_gpus_per_node == 1
+    )
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
-        bootstrap=provisioner.allocate(role_gpus_per_node),
+        bootstrap=provisioner.allocate(
+            role_gpus_per_node, physical_ordinal=physical_ordinal
+        ),
     )
 
 
