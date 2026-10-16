@@ -2143,9 +2143,31 @@ class VLLMGenerator(Actor, Configurable):
                     for k, v in self._get_model().model.state_dict().items()
                 }
             cpu_staged = self._cpu_pull_buffer
-        staged, get_secs, gib = await self._fetch_model_state_dict(
-            version, overlap_safe=False, staged=cpu_staged
-        )
+        try:
+            staged, get_secs, gib = await self._fetch_model_state_dict(
+                version, overlap_safe=False, staged=cpu_staged
+            )
+        except Exception as error:
+            if cpu_staged is None:
+                raise
+            # Packed single-GPU generators share one NIC for CPU memory, and an
+            # RDMA pull occasionally exhausts its retries; refetch this one over gloo
+            # instead of failing the weight sync.
+            logger.warning(
+                f"[pull] RDMA pull of version {version} failed "
+                f"({type(error).__name__}: {error}); retrying over gloo"
+            )
+            previous = os.environ.get("TORCHSTORE_RDMA_ENABLED")
+            os.environ["TORCHSTORE_RDMA_ENABLED"] = "0"
+            try:
+                staged, get_secs, gib = await self._fetch_model_state_dict(
+                    version, overlap_safe=False, staged=cpu_staged
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("TORCHSTORE_RDMA_ENABLED", None)
+                else:
+                    os.environ["TORCHSTORE_RDMA_ENABLED"] = previous
         self._apply_model_state_dict(version, staged, get_secs=get_secs, gib=gib)
 
     @endpoint
