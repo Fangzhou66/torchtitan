@@ -140,6 +140,12 @@ class Batcher(Configurable):
         metrics are computed before the batcher and read the unscaled values.
         """
 
+        packing: str = "next_fit"
+        """How samples are assigned to ``seq_len`` rows. ``next_fit`` (default) keeps
+        arrival order; ``first_fit_decreasing`` sorts by length and fills the first
+        row with room, which leaves fewer padded rows (fewer microbatches). Only the
+        sample-to-row assignment changes; per-sample loss terms do not."""
+
     def __init__(
         self,
         config: Config,
@@ -153,6 +159,9 @@ class Batcher(Configurable):
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
+        if config.packing not in ("next_fit", "first_fit_decreasing"):
+            raise ValueError(f"unknown packing {config.packing!r}")
+        self._packing = config.packing
         self._skip_zero_advantage_samples = config.skip_zero_advantage_samples
         self._zero_advantage_tokens_in_loss_denominator = (
             config.zero_advantage_tokens_in_loss_denominator
@@ -451,8 +460,10 @@ class Batcher(Configurable):
             # seq_len=10, training_sample effective lengths [5, 5, 5]
             _assign_training_samples_to_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
         """
-        # TODO(async-rl): assignment is greedy next-fit. Swap in smarter algorithms here -- e.g. best-fit,
-        #   DP/CP/PP load balancing, or balancing tokens across DP rows on a seq_len**2 budget.
+        if self._packing == "first_fit_decreasing":
+            return self._first_fit_decreasing(training_samples)
+        # TODO(async-rl): DP/CP/PP load balancing, or balancing tokens across DP rows
+        #   on a seq_len**2 budget.
         rows: list[list[TrainingSample]] = []
         current_row: list[TrainingSample] = []
         current_len = 0
@@ -470,6 +481,33 @@ class Batcher(Configurable):
         if current_row:
             rows.append(current_row)
 
+        return rows
+
+    def _first_fit_decreasing(
+        self, training_samples: list[TrainingSample]
+    ) -> list[list[TrainingSample]]:
+        """Longest first, each into the first row it fits (stable for equal lengths).
+
+        Example:
+
+            # seq_len=10, lengths [3, 6, 4, 7]
+            _first_fit_decreasing(...)  # -> [[e7, e3], [e6, e4]]  (next-fit: 3 rows)
+        """
+        sized = sorted(
+            ((self.num_tokens_to_pack(s), i, s) for i, s in enumerate(training_samples)),
+            key=lambda x: (-x[0], x[1]),
+        )
+        rows: list[list[TrainingSample]] = []
+        row_lens: list[int] = []
+        for num_tokens, _, sample in sized:
+            for r, row_len in enumerate(row_lens):
+                if row_len + num_tokens <= self.seq_len:
+                    rows[r].append(sample)
+                    row_lens[r] += num_tokens
+                    break
+            else:
+                rows.append([sample])
+                row_lens.append(num_tokens)
         return rows
 
     def num_tokens_to_pack(self, training_sample: TrainingSample) -> int:
