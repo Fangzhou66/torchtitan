@@ -162,6 +162,25 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         self.assertEqual(_get_expert_shard_dim(model), 0)
 
+    @with_comms
+    def test_no_ep_hsdp_flattened_fsdp_axis(self):
+        """Same as above with the (dp_replicate, fsdp) mesh parallelize passes."""
+        dp_mesh = init_device_mesh(
+            self.device_type, (2, 4), mesh_dim_names=("dp_replicate", "fsdp")
+        )
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=1,
+        )
+
+        self.assertEqual(_get_expert_shard_dim(model), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
