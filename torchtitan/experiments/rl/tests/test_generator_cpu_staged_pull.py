@@ -57,3 +57,21 @@ def test_failed_gloo_retry_still_raises(monkeypatch) -> None:
         asyncio.run(gen._pull_model_state_dict(3))
     assert "TORCHSTORE_RDMA_ENABLED" not in os.environ
     assert gen.applied == []
+
+
+def test_failed_gpu_direct_pull_falls_back_to_gloo_into_cpu_copy(monkeypatch) -> None:
+    monkeypatch.setenv("TORCHSTORE_RDMA_ENABLED", "1")
+    calls = []
+
+    async def fetch(version, *, overlap_safe, staged):
+        calls.append((os.environ.get("TORCHSTORE_RDMA_ENABLED"), staged))
+        if len(calls) == 1:
+            raise RuntimeError("RdmaAction.submit failed: 964/964 ops failed")
+        return staged, 1.0, 17.5
+
+    gen = _generator(fetch)
+    gen.config.cpu_staged_weight_pull = False
+    asyncio.run(gen._pull_model_state_dict(4))
+    assert calls[0] == ("1", None)  # GPU-direct first
+    assert calls[1] == ("0", gen._cpu_pull_buffer)  # then gloo into the CPU copy
+    assert gen.applied == [(4, gen._cpu_pull_buffer)]

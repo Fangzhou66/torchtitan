@@ -2149,26 +2149,22 @@ class VLLMGenerator(Actor, Configurable):
 
         cpu_staged = None
         if self.config.cpu_staged_weight_pull and self._backend != "vllm_native":
-            if self._cpu_pull_buffer is None:
-                self._cpu_pull_buffer = {
-                    k: v.detach().to("cpu", copy=True)
-                    for k, v in self._get_model().model.state_dict().items()
-                }
-            cpu_staged = self._cpu_pull_buffer
+            cpu_staged = self._get_cpu_pull_buffer()
         try:
             staged, get_secs, gib = await self._fetch_model_state_dict(
                 version, overlap_safe=False, staged=cpu_staged
             )
         except Exception as error:
-            if cpu_staged is None:
+            if self._backend == "vllm_native":
                 raise
-            # Packed single-GPU generators share one NIC for CPU memory, and an
-            # RDMA pull occasionally exhausts its retries; refetch this one over gloo
-            # instead of failing the weight sync.
+            # An RDMA pull can exhaust its retries (seen with packed single-GPU
+            # generators); refetch this one over gloo into a CPU copy instead of
+            # failing the weight sync.
             logger.warning(
                 f"[pull] RDMA pull of version {version} failed "
                 f"({type(error).__name__}: {error}); retrying over gloo"
             )
+            cpu_staged = self._get_cpu_pull_buffer()
             previous = os.environ.get("TORCHSTORE_RDMA_ENABLED")
             os.environ["TORCHSTORE_RDMA_ENABLED"] = "0"
             try:
@@ -2181,6 +2177,15 @@ class VLLMGenerator(Actor, Configurable):
                 else:
                     os.environ["TORCHSTORE_RDMA_ENABLED"] = previous
         self._apply_model_state_dict(version, staged, get_secs=get_secs, gib=gib)
+
+    def _get_cpu_pull_buffer(self) -> dict:
+        """CPU copy of the state dict, created once and reused across pulls."""
+        if self._cpu_pull_buffer is None:
+            self._cpu_pull_buffer = {
+                k: v.detach().to("cpu", copy=True)
+                for k, v in self._get_model().model.state_dict().items()
+            }
+        return self._cpu_pull_buffer
 
     @endpoint
     async def close(self) -> None:
