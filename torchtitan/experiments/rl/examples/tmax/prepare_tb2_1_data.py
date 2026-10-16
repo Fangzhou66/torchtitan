@@ -23,6 +23,11 @@ Also: real TOML parsing, ``newline=""`` on text reads (universal-newline
 translation silently ate 310 bytes of sparql-university's CRLF .ttl), and the run
 aborts unless the tree yields 89 tasks.
 
+Four tasks whose own reference solution now fails because an external resource
+rotted (qemu-startup, qemu-alpine-ssh, build-cython-ext, mcmc-sampling-stan) get an
+environment-only patch keyed by task id; see ``_ENV_PATCHES``. ``--no-env-patches``
+emits the published tree unchanged.
+
 Rows are what ``TMaxDataset`` (data.py) consumes -- same keys as the 2.0 script
 plus agent/verifier timeouts, the daytona_* trio, and tb_version/task_source.
 
@@ -93,6 +98,179 @@ _TMUX_PROBE = (
     "&& tmux -L tb-runtime-check kill-server"
 )
 
+# --------------------------------------------------------------------------- #
+# Environment patches for tasks whose own reference solution fails
+# --------------------------------------------------------------------------- #
+# Something outside these tasks rotted after TB-2.1 was cut, so their reference
+# solution scores 0 on the published image. Each patch repairs the environment only
+# (package sources, a version pin); no instruction, solution or test assertion
+# changes. Each is based on an open upstream fix in harbor-framework/terminal-bench-2;
+# where it departs from that fix, the entry and its ``upstream`` field say how.
+# Tasks not listed here are untouched. Two kinds of patch:
+#   "test_sh"      inserted at the top of the verifier, after the shebang. The
+#                  rollouter writes metadata.tmax.test_sh to /tests/test.sh verbatim
+#                  (grading.grade_tmax), so the row is the only place it can go.
+#   "image_layer"  Dockerfile lines on top of the task image. A plain build gives
+#                  the row ``dockerfile = FROM <image> + layer``, which the sandbox
+#                  builds in place of pulling ``image`` (harness/sandbox/daytona.py).
+#                  --verify-runtime replaces that with FROM <digest pin> + layer +
+#                  the tmux layer.
+# Both kinds apply to plain builds and to rows read back with --input-jsonl.
+# build-pov-ray is not listed. povray.org blocked the download for a period
+# (upstream issue #76). Fetching it is part of what the agent is asked to do, and it
+# is reachable from Daytona again as of 2026-10-16, so it is left unpatched.
+_ENV_PATCH_BEGIN = (
+    "# --- injected by prepare_tb2_1_data.py: TB-2.1 environment patch ------------\n"
+)
+_ENV_PATCH_END = (
+    "# --- end injected block -----------------------------------------------------\n"
+)
+
+# Debian 11 left LTS on 2026-08-31. Around 09-07 bullseye-security's Release file
+# expired and its pool started returning 404, so `apt-get update && apt-get install`
+# fails on both qemu images. Dropping that suite and pointing the rest at
+# archive.debian.org follows terminal-bench-2 PR #82, which does this in both
+# tests/test.sh and environment/Dockerfile.
+_BULLSEYE_TO_ARCHIVE = (
+    "sed -i -e '/bullseye-security/d' "
+    "-e 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' "
+    "/etc/apt/sources.list"
+)
+_BULLSEYE_PATCH = {
+    "upstream": "harbor-framework/terminal-bench-2#82",
+    "test_sh": (
+        "# Debian 11 is EOL: drop the expired bullseye-security suite and use\n"
+        "# archive.debian.org so the verifier's apt-get works (terminal-bench-2 PR #82).\n"
+        f"{_BULLSEYE_TO_ARCHIVE}\n"
+    ),
+    "image_layer": f"RUN {_BULLSEYE_TO_ARCHIVE}\n",
+}
+
+_ENV_PATCHES: dict[str, dict[str, str]] = {
+    "qemu-startup": _BULLSEYE_PATCH,
+    "qemu-alpine-ssh": _BULLSEYE_PATCH,
+    # pyknotid 0.5.3 declares an unpinned `planarity`. PyPI's planarity 1.0.0
+    # (2026-06-29) is a different project that took over the name and renamed the
+    # node attributes pyknotid reads (data['pos'] -> 'vertex_position'), so the
+    # upstream suite this verifier runs fails even for the reference solution.
+    # terminal-bench-2 PR #73 pins planarity 0.6 in solve.sh. Here the same pin is
+    # applied in the verifier instead, so it also covers agent builds. It applies
+    # only when 1.x is installed and pyknotid's representation.py reads data['pos']
+    # without handling 'vertex_position', so a build adapted to 1.x keeps it. The
+    # sdist is fetched from its content-addressed PyPI URL and checked against its
+    # sha256, then installed from the local file: the name now belongs to another
+    # project, so neither a different upload nor a wheel can be picked up. A failed
+    # install leaves grading unchanged but prints TB21_ENV_PATCH_FAILED and writes
+    # /logs/verifier/tb21_env_patch_failed, so the 0 is not read as the agent's.
+    "build-cython-ext": {
+        "upstream": (
+            "harbor-framework/terminal-bench-2#73 (its solve.sh planarity pin, "
+            "applied in the verifier)"
+        ),
+        "test_sh": r"""# planarity 1.0.0 is a different project under the old PyPI name; restore the
+# 0.6 that pyknotid 0.5.3 was written against (terminal-bench-2 PR #73's pin).
+_tb_rep=/app/pyknotid/pyknotid/representations/representation.py
+if python -c 'import importlib.metadata as m, sys; sys.exit(int(m.version("planarity").split(".")[0] == "0"))' 2>/dev/null \
+    && grep -qs "data\['pos'\]" "$_tb_rep" && ! grep -qs vertex_position "$_tb_rep"; then
+  python - <<'TB21_PIN' || { echo "TB21_ENV_PATCH_FAILED: build-cython-ext could not install planarity==0.6; a 0 below reflects the environment, not the agent" >&2; mkdir -p /logs/verifier && echo "planarity==0.6 install failed" > /logs/verifier/tb21_env_patch_failed; }
+import hashlib, os, subprocess, sys, tempfile, urllib.request
+url = ("https://files.pythonhosted.org/packages/5b/17/"
+       "9a822cf44b9cad016def3085013edd2b2d7e7d6347778c00f4a835e33cc9/planarity-0.6.tar.gz")
+sha = "9852691d9c0d05e26a2fcbf2fce5a2632e8847ec462e816fa02e72d35013da68"
+path = os.path.join(tempfile.mkdtemp(), "planarity-0.6.tar.gz")
+urllib.request.urlretrieve(url, path)
+if hashlib.sha256(open(path, "rb").read()).hexdigest() != sha:
+    sys.exit("planarity-0.6.tar.gz: sha256 mismatch")
+sys.exit(subprocess.call([sys.executable, "-m", "pip", "install", "--no-deps", path]))
+TB21_PIN
+fi
+""",
+    },
+    # The reference solution pins Rcpp, RcppEigen, BH, StanHeaders 2.32.10 and
+    # rstan 2.32.7 with remotes::install_version, which in a non-interactive R
+    # upgrades every dependency that is already installed. Two releases made after
+    # the image was built break that:
+    #   RcppParallel 6.x (from 2026-07-23) needs cmake, which the image lacks, so
+    #     the rstan chain fails to build.
+    #   StanHeaders 2.39.1 (2026-09-02) replaces the pinned 2.32.10 when rstan is
+    #     installed. rstan compiles models with StanHeaders' stanc.js, and stanc
+    #     2.39 rejects the old array syntax that stanc 2.32 accepted.
+    # With cmake alone (terminal-bench-2 PR #72), rstan installs but the model
+    # no longer parses. The fix restores the image-era resolution instead:
+    #   - preinstall RcppParallel 5.1.11-1, the release terminal-bench-2 PR #73
+    #     pins in solve.sh (newest on the image date, needs no cmake);
+    #   - set R_REMOTES_UPGRADE=never in R's Renviron.site, so install_version
+    #     installs missing dependencies but no longer upgrades installed ones.
+    #     This part is this patch's own; no upstream fix has it.
+    # rstan itself, the package step 1 of the task asks for, is not preinstalled.
+    # This must be in the image because the verifier runs after the install.
+    "mcmc-sampling-stan": {
+        "upstream": (
+            "harbor-framework/terminal-bench-2#73 (its RcppParallel pin, as an image "
+            "layer) + R_REMOTES_UPGRADE=never (added here)"
+        ),
+        "image_layer": (
+            "RUN cd /tmp && curl -fsSL -o RcppParallel_5.1.11-1.tar.gz "
+            "https://cran.r-project.org/src/contrib/Archive/RcppParallel/"
+            "RcppParallel_5.1.11-1.tar.gz "
+            "&& echo 'e18c83548212cbd52f6629131564a392b870399343a5867d512dbca2a27a6362"
+            "  RcppParallel_5.1.11-1.tar.gz' | sha256sum -c - "
+            "&& R CMD INSTALL RcppParallel_5.1.11-1.tar.gz "
+            "&& rm RcppParallel_5.1.11-1.tar.gz "
+            "&& Rscript -e \"stopifnot(packageVersion('RcppParallel') == '5.1.11.1')\"\n"
+            "RUN echo 'R_REMOTES_UPGRADE=never' >> \"$(R RHOME)/etc/Renviron.site\" "
+            '&& Rscript -e \'stopifnot(Sys.getenv("R_REMOTES_UPGRADE") == "never")\'\n'
+        ),
+    },
+}
+
+
+def _after_shebang(test_sh: str, block: str) -> str:
+    """Insert ``block`` after ``test_sh``'s shebang line (or at the top if none)."""
+    lines = test_sh.split("\n")
+    if lines and lines[0].startswith("#!"):
+        return lines[0] + "\n" + block + "\n".join(lines[1:])
+    return block + test_sh
+
+
+def apply_env_patches(row: dict) -> dict:
+    """Apply this task's ``_ENV_PATCHES`` entry to ``row`` in place.
+
+    This is a no-op for any task without an entry. It is idempotent: a ``test_sh``
+    that already carries the injected block is left alone. The patched row also
+    records its upstream source in ``metadata.env_patch``.
+    """
+    md = row["metadata"]
+    patch = _ENV_PATCHES.get(md.get("instance_id"))
+    if patch is None:
+        return row
+    tmax = md["tmax"]
+    if "image_layer" in patch and "dockerfile" not in md:
+        md["dockerfile"] = _patch_dockerfile(md)
+    if "test_sh" in patch and _ENV_PATCH_BEGIN not in tmax["test_sh"]:
+        tmax["test_sh"] = _after_shebang(
+            tmax["test_sh"], _ENV_PATCH_BEGIN + patch["test_sh"] + _ENV_PATCH_END
+        )
+    md["env_patch"] = patch["upstream"]
+    return row
+
+
+def _image_layer(task_id: str) -> str:
+    """Dockerfile lines this task's environment patch adds to the derived image."""
+    return _ENV_PATCHES.get(task_id, {}).get("image_layer", "")
+
+
+def _patch_dockerfile(md: dict) -> str:
+    """The Dockerfile a plain build gives a row whose patch has an image layer."""
+    return f"FROM {md['image']}\n" + _image_layer(md["instance_id"])
+
+
+def _has_own_dockerfile(md: dict) -> bool:
+    """True when the row carries a Dockerfile other than its env-patch one."""
+    return "dockerfile" in md and not (
+        _image_layer(md["instance_id"]) and md["dockerfile"] == _patch_dockerfile(md)
+    )
+
 
 async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
     """Build and check two fresh sandboxes per task; resume from exact-row evidence."""
@@ -137,7 +315,8 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
             tid = md["instance_id"]
             event(tid, "prepare", source_image=md["image"], **provenance)
             # Pin each source before building so a resumed run cannot switch bases.
-            if "dockerfile" not in md:
+            # A plain env-patch Dockerfile is rebuilt here on the pinned base.
+            if not _has_own_dockerfile(md):
                 source_image = md["image"]
                 pin_file = root / (
                     hashlib.sha256(source_image.encode()).hexdigest() + ".pin"
@@ -162,7 +341,10 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
                     pending_pin = pin_file.with_suffix(".incoming")
                     pending_pin.write_text(pinned_image)
                     pending_pin.replace(pin_file)
-                md["dockerfile"] = f"FROM {pinned_image}\n" + _TMUX_INSTALL
+                # The layer goes only on rows that carry the patch, so
+                # --no-env-patches yields the published environment.
+                layer = _image_layer(tid) if md.get("env_patch") else ""
+                md["dockerfile"] = f"FROM {pinned_image}\n" + layer + _TMUX_INSTALL
             digest = hashlib.sha256(
                 json.dumps(row, sort_keys=True).encode()
             ).hexdigest()
@@ -436,10 +618,7 @@ def _wrap_test_sh(test_sh: str) -> str:
     grading.py invokes ``bash /tests/test.sh`` explicitly, so the shebang is inert --
     it is preserved anyway so the emitted script still reads like the upstream one.
     """
-    lines = test_sh.split("\n")
-    if lines and lines[0].startswith("#!"):
-        return lines[0] + "\n" + _BINARY_DECODE_PREAMBLE + "\n".join(lines[1:])
-    return _BINARY_DECODE_PREAMBLE + test_sh
+    return _after_shebang(test_sh, _BINARY_DECODE_PREAMBLE)
 
 
 # --------------------------------------------------------------------------- #
@@ -519,11 +698,13 @@ def build_rows(
     limit: int | None = None,
     image_prefix: str = _DEFAULT_IMAGE_PREFIX,
     include_binary: bool = True,
+    env_patches: bool = True,
 ) -> tuple[list[dict], dict[str, str]]:
     """Convert every TB-2.1 task dir to a row. Returns ``(rows, {task_id: reason})``.
 
     ``tasks_root`` is a local checkout (repo root, ``tasks/`` dir, or a 2.0-style flat
-    root); when None the HF mirror is downloaded.
+    root); when None the HF mirror is downloaded. ``env_patches`` applies
+    ``_ENV_PATCHES`` (a no-op for every task without an entry).
     """
     root = _resolve_tasks_root(tasks_root or _download())
     rows: list[dict] = []
@@ -542,7 +723,7 @@ def build_rows(
         if row is None:
             skipped[entry] = reason
             continue
-        rows.append(row)
+        rows.append(apply_env_patches(row) if env_patches else row)
         if limit is not None and len(rows) >= limit:
             break
     return rows, skipped
@@ -562,7 +743,8 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="output tb2_1_eval.jsonl path")
     ap.add_argument(
         "--input-jsonl",
-        help="preserve the exact existing eval rows; requires --verify-runtime",
+        help="preserve the existing eval rows (environment patches still apply unless "
+        "--no-env-patches); requires --verify-runtime",
     )
     ap.add_argument(
         "--tasks-root",
@@ -592,6 +774,13 @@ def main() -> None:
         "never score -- this is the TB-2.0 script's behaviour)",
     )
     ap.add_argument(
+        "--no-env-patches",
+        action="store_true",
+        help="emit the published tree unchanged: skip the environment patches for the "
+        "tasks whose reference solution fails on rotted external resources "
+        "(see _ENV_PATCHES)",
+    )
+    ap.add_argument(
         "--expect-tasks",
         type=int,
         default=_EXPECTED_TASKS,
@@ -606,10 +795,12 @@ def main() -> None:
             )
         with open(args.input_jsonl) as source:
             rows = [json.loads(line) for line in source if line.strip()]
-        if any("dockerfile" in row["metadata"] for row in rows):
+        if any(_has_own_dockerfile(row["metadata"]) for row in rows):
             ap.error("--input-jsonl expects original image rows, without a Dockerfile")
         if args.limit:
             rows = rows[: args.limit]
+        if not args.no_env_patches:
+            rows = [apply_env_patches(row) for row in rows]
         skipped = {}
     else:
         rows, skipped = build_rows(
@@ -617,6 +808,7 @@ def main() -> None:
             limit=args.limit,
             image_prefix=args.image_prefix,
             include_binary=not args.no_binary_fixtures,
+            env_patches=not args.no_env_patches,
         )
     if skipped:
         for tid, reason in sorted(skipped.items()):
