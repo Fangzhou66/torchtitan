@@ -165,18 +165,36 @@ if python -c 'import importlib.metadata as m, sys; sys.exit(int(m.version("plana
 fi
 """,
     },
-    # RcppParallel 6.2.0 (2026-07-30), an unpinned transitive dependency of
-    # StanHeaders/rstan, now needs cmake, which the image lacks. Installing rstan
-    # (step 1 of the task) therefore fails for the reference solution and for any
-    # agent that does not go and find cmake itself. The verifier cannot fix this.
-    # It has to be in the agent's image, as terminal-bench-2 PR #72 does in the
-    # Dockerfile.
+    # The reference solution pins Rcpp, RcppEigen, BH, StanHeaders 2.32.10 and
+    # rstan 2.32.7 with remotes::install_version, which in a non-interactive R
+    # upgrades every dependency that is already installed. Two releases made after
+    # the image was built break that:
+    #   RcppParallel 6.x (from 2026-07-23) needs cmake, which the image lacks, so
+    #     the rstan chain fails to build.
+    #   StanHeaders 2.39.1 (2026-09-02) replaces the pinned 2.32.10 when rstan is
+    #     installed. rstan compiles models with StanHeaders' stanc.js, and stanc
+    #     2.39 rejects the old array syntax that stanc 2.32 accepted.
+    # With cmake alone (terminal-bench-2 PR #72), rstan installs but the model
+    # no longer parses. The fix restores the image-era resolution instead:
+    #   - preinstall RcppParallel 5.1.11-1, the release terminal-bench-2 PR #73
+    #     pins (newest on the image date, needs no cmake);
+    #   - set R_REMOTES_UPGRADE=never in R's Renviron.site, so install_version
+    #     installs missing dependencies but no longer upgrades installed ones.
+    # rstan itself, the package step 1 of the task asks for, is not preinstalled.
+    # This must be in the image because the verifier runs after the install.
     "mcmc-sampling-stan": {
-        "upstream": "harbor-framework/terminal-bench-2#72",
+        "upstream": "harbor-framework/terminal-bench-2#73",
         "image_layer": (
-            "RUN apt-get update && DEBIAN_FRONTEND=noninteractive "
-            "apt-get install -y --no-install-recommends cmake "
-            "&& rm -rf /var/lib/apt/lists/*\n"
+            "RUN cd /tmp && curl -fsSL -o RcppParallel_5.1.11-1.tar.gz "
+            "https://cran.r-project.org/src/contrib/Archive/RcppParallel/"
+            "RcppParallel_5.1.11-1.tar.gz "
+            "&& echo 'e18c83548212cbd52f6629131564a392b870399343a5867d512dbca2a27a6362"
+            "  RcppParallel_5.1.11-1.tar.gz' | sha256sum -c - "
+            "&& R CMD INSTALL RcppParallel_5.1.11-1.tar.gz "
+            "&& rm RcppParallel_5.1.11-1.tar.gz "
+            "&& Rscript -e \"stopifnot(packageVersion('RcppParallel') == '5.1.11.1')\"\n"
+            "RUN echo 'R_REMOTES_UPGRADE=never' >> \"$(R RHOME)/etc/Renviron.site\" "
+            '&& Rscript -e \'stopifnot(Sys.getenv("R_REMOTES_UPGRADE") == "never")\'\n'
         ),
     },
 }

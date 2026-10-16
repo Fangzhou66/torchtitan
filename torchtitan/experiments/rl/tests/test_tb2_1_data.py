@@ -413,7 +413,7 @@ def test_env_patches_touch_only_the_listed_tasks(tmp_path):
     assert rows["mcmc-sampling-stan"]["metadata"]["tmax"] == (
         plain["mcmc-sampling-stan"]["metadata"]["tmax"]
     )
-    assert rows["mcmc-sampling-stan"]["metadata"]["env_patch"].endswith("#72")
+    assert rows["mcmc-sampling-stan"]["metadata"]["env_patch"].endswith("#73")
     for task_id in _PATCHED:
         test_sh = rows[task_id]["metadata"]["tmax"]["test_sh"]
         assert test_sh.startswith(
@@ -429,7 +429,11 @@ def test_env_patches_touch_only_the_listed_tasks(tmp_path):
     # the sandbox builds instead of pulling the image.
     image = "docker.io/alexgshaw/demo:20260403"
     stan = rows["mcmc-sampling-stan"]["metadata"]["dockerfile"]
-    assert stan.startswith(f"FROM {image}\nRUN apt-get update") and "cmake" in stan
+    assert (
+        stan.startswith(f"FROM {image}\nRUN cd /tmp && curl")
+        and "RcppParallel_5.1.11-1" in stan
+    )
+    assert "R_REMOTES_UPGRADE=never" in stan
     assert "archive.debian.org" in rows["qemu-startup"]["metadata"]["dockerfile"]
     for task_id in ("build-cython-ext", "build-pov-ray", "fix-git"):
         assert "dockerfile" not in rows[task_id]["metadata"]
@@ -483,7 +487,7 @@ def test_runtime_image_layer_precedes_tmux_for_patched_tasks(tmp_path, monkeypat
         assert not _has_own_dockerfile(row["metadata"])
     asyncio.run(verify_runtime(rows, str(tmp_path)))
     stan, qemu, plain = (row["metadata"]["dockerfile"] for row in rows)
-    assert stan.index("install -y --no-install-recommends cmake") < stan.index("tmux")
+    assert stan.index("R_REMOTES_UPGRADE=never") < stan.index("tmux")
     assert qemu.index("archive.debian.org") < qemu.index("tmux")
     assert plain == f"FROM fix-git@sha256:{'0' * 64}\n" + plain.split("\n", 1)[1]
-    assert "cmake" not in plain and "archive.debian.org" not in plain
+    assert "RcppParallel" not in plain and "archive.debian.org" not in plain
