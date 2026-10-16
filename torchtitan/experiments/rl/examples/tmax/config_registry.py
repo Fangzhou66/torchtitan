@@ -723,9 +723,10 @@ def rl_grpo_qwen3_5_9b_tmax(
             # failed, context-limited ones -- carries several times the gradient of
             # a short one. SWE_LOSS_AGG=token_mean restores the old weighting.
             loss_aggregation=os.environ.get("SWE_LOSS_AGG", "prompt_mean"),
-            # SWE_PACKING=first_fit_decreasing packs rows tighter (fewer
-            # microbatches); only the sample-to-row assignment changes.
-            packing=os.environ.get("SWE_PACKING", "next_fit"),
+            # First-fit-decreasing packs rows tighter (fewer microbatches); only the
+            # sample-to-row assignment changes, loss and gradients do not.
+            # SWE_PACKING=next_fit restores arrival-order packing.
+            packing=os.environ.get("SWE_PACKING", "first_fit_decreasing"),
         ),
         # Periodic held-out eval every 20 steps (+ start/end): the trained-batch reward is
         # locked near ~0.5 by drop_zero_std, so it is NOT a learning signal; a greedy
