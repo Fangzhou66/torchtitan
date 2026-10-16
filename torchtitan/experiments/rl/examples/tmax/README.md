@@ -158,8 +158,9 @@ python -m torchtitan.experiments.rl.examples.tmax.prepare_tb2_data \
 > mcmc-sampling-stan's patch, and the qemu tasks' agent-side apt fix, are a
 > Dockerfile layer on the task image, so those rows carry `dockerfile`.
 > `--no-env-patches` emits the published tree as is.
-> build-pov-ray stays unpatched: povray.org 403s datacenter clients, and that
-> download is part of the task. Both JSONLs feed the same
+> build-pov-ray stays unpatched: povray.org blocked its download for a period, the
+> download is part of the task, and it is reachable from Daytona again as of
+> 2026-10-16. Both JSONLs feed the same
 > `SWE_TB2_DATA` / `SWE_TB2_VAL_DATA` path; a 2.0 number and a 2.1 number are not
 > directly comparable.
 

@@ -413,7 +413,9 @@ def test_env_patches_touch_only_the_listed_tasks(tmp_path):
     assert rows["mcmc-sampling-stan"]["metadata"]["tmax"] == (
         plain["mcmc-sampling-stan"]["metadata"]["tmax"]
     )
-    assert rows["mcmc-sampling-stan"]["metadata"]["env_patch"].endswith("#73")
+    assert rows["mcmc-sampling-stan"]["metadata"]["env_patch"].startswith(
+        "harbor-framework/terminal-bench-2#73"
+    )
     for task_id in _PATCHED:
         test_sh = rows[task_id]["metadata"]["tmax"]["test_sh"]
         assert test_sh.startswith(
@@ -472,6 +474,7 @@ def test_runtime_image_layer_precedes_tmux_for_patched_tasks(tmp_path, monkeypat
     )
     from torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data import (
         _has_own_dockerfile,
+        _TMUX_INSTALL,
         apply_env_patches,
     )
 
@@ -489,5 +492,90 @@ def test_runtime_image_layer_precedes_tmux_for_patched_tasks(tmp_path, monkeypat
     stan, qemu, plain = (row["metadata"]["dockerfile"] for row in rows)
     assert stan.index("R_REMOTES_UPGRADE=never") < stan.index("tmux")
     assert qemu.index("archive.debian.org") < qemu.index("tmux")
-    assert plain == f"FROM fix-git@sha256:{'0' * 64}\n" + plain.split("\n", 1)[1]
+    assert plain == f"FROM fix-git@sha256:{'0' * 64}\n" + _TMUX_INSTALL
     assert "RcppParallel" not in plain and "archive.debian.org" not in plain
+
+
+def _stub_boot(monkeypatch):
+    @asynccontextmanager
+    async def boot(image, **kwargs):
+        async def execute(command, **kwargs):
+            return 0, "tmux 3.4", ""
+
+        yield types.SimpleNamespace(sandbox_id="box", exec=execute)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torchtitan.experiments.rl.harness.agents.claude_code",
+        types.SimpleNamespace(boot_agent_sandbox=boot),
+    )
+
+
+_PIN = f"registry-1.docker.io/alexgshaw/demo@sha256:{'1' * 64}"
+
+
+def _pin_evidence(evidence, image="docker.io/alexgshaw/demo:20260403"):
+    """Pre-resolve the image pin so verify_runtime needs no registry."""
+    import hashlib
+
+    evidence.mkdir()
+    (evidence / (hashlib.sha256(image.encode()).hexdigest() + ".pin")).write_text(_PIN)
+
+
+def _plain_rows(tmp_path, task_ids):
+    root = tmp_path / "tasks"
+    root.mkdir()
+    for task_id in task_ids:
+        _write_task(root, task_id, binary=None)
+    rows, _ = build_rows(tasks_root=str(root), env_patches=False)
+    return rows
+
+
+def test_runtime_without_env_patches_adds_no_image_layer(tmp_path, monkeypatch):
+    from torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data import _TMUX_INSTALL
+
+    _stub_boot(monkeypatch)
+    rows = _plain_rows(tmp_path, ("mcmc-sampling-stan", "qemu-startup", "fix-git"))
+    base = json.loads(json.dumps(rows))
+    _pin_evidence(tmp_path / "evidence")
+    asyncio.run(verify_runtime(rows, str(tmp_path / "evidence")))
+    for row, before in zip(rows, base):
+        assert row["metadata"].pop("dockerfile") == f"FROM {_PIN}\n" + _TMUX_INSTALL
+        assert row == before
+
+
+def test_input_jsonl_rows_get_patches_unless_disabled(tmp_path, monkeypatch):
+    from torchtitan.experiments.rl.examples.tmax import prepare_tb2_1_data as B
+
+    _stub_boot(monkeypatch)
+    ids = ("build-cython-ext", "mcmc-sampling-stan", "qemu-startup", "fix-git")
+    source = tmp_path / "old.jsonl"
+    rows = _plain_rows(tmp_path, ids)
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def run(name, *extra):
+        _pin_evidence(tmp_path / name)
+        out = tmp_path / f"{name}.jsonl"
+        argv = ["prepare_tb2_1_data", "--input-jsonl", str(source)]
+        argv += ["--verify-runtime", str(tmp_path / name), "--expect-tasks", "0"]
+        monkeypatch.setattr(sys, "argv", argv + ["--out", str(out), *extra])
+        B.main()
+        return {r["label"]: r for r in map(json.loads, out.read_text().splitlines())}
+
+    patched, plain = run("patched"), run("plain", "--no-env-patches")
+    base = {row["label"]: row for row in rows}
+    for task_id in ids:
+        md = plain[task_id]["metadata"]
+        assert md.pop("dockerfile") == f"FROM {_PIN}\n" + B._TMUX_INSTALL
+        assert plain[task_id] == base[task_id]
+    for task_id in ids[:3]:
+        md = patched[task_id]["metadata"]
+        assert md["env_patch"] == B._ENV_PATCHES[task_id]["upstream"]
+        assert md["dockerfile"] == (
+            f"FROM {_PIN}\n" + B._image_layer(task_id) + B._TMUX_INSTALL
+        )
+    assert "planarity" in patched["build-cython-ext"]["metadata"]["tmax"]["test_sh"]
+    assert patched["fix-git"]["metadata"].pop("dockerfile") == (
+        f"FROM {_PIN}\n" + B._TMUX_INSTALL
+    )
+    assert patched["fix-git"] == base["fix-git"]

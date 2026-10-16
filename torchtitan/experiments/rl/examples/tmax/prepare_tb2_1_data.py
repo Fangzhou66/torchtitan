@@ -104,7 +104,8 @@ _TMUX_PROBE = (
 # Something outside these tasks rotted after TB-2.1 was cut, so their reference
 # solution scores 0 on the published image. Each patch repairs the environment only
 # (package sources, a version pin); no instruction, solution or test assertion
-# changes. Each follows an open upstream fix in harbor-framework/terminal-bench-2.
+# changes. Each is based on an open upstream fix in harbor-framework/terminal-bench-2;
+# where it departs from that fix, the entry and its ``upstream`` field say how.
 # Tasks not listed here are untouched. Two kinds of patch:
 #   "test_sh"      inserted at the top of the verifier, after the shebang. The
 #                  rollouter writes metadata.tmax.test_sh to /tests/test.sh verbatim
@@ -115,9 +116,9 @@ _TMUX_PROBE = (
 #                  --verify-runtime replaces that with FROM <digest pin> + layer +
 #                  the tmux layer.
 # Both kinds apply to plain builds and to rows read back with --input-jsonl.
-# build-pov-ray is not listed. Its dead resource (povray.org returns 403 to
-# datacenter clients) is the download the agent itself is asked to find, so no
-# environment-only patch exists. Upstream PR #77 changes only its solve.sh.
+# build-pov-ray is not listed. povray.org blocked the download for a period
+# (upstream issue #76). Fetching it is part of what the agent is asked to do, and it
+# is reachable from Daytona again as of 2026-10-16, so it is left unpatched.
 _ENV_PATCH_BEGIN = (
     "# --- injected by prepare_tb2_1_data.py: TB-2.1 environment patch ------------\n"
 )
@@ -152,16 +153,36 @@ _ENV_PATCHES: dict[str, dict[str, str]] = {
     # (2026-06-29) is a different project that took over the name and renamed the
     # node attributes pyknotid reads (data['pos'] -> 'vertex_position'), so the
     # upstream suite this verifier runs fails even for the reference solution.
-    # Pin the pre-takeover 0.6, as terminal-bench-2 PR #73 does in solve.sh. The
-    # pin applies only when 1.x is installed and the build still reads the 0.x
-    # attribute, so an agent build that already handles 1.x is left as it is.
+    # terminal-bench-2 PR #73 pins planarity 0.6 in solve.sh. Here the same pin is
+    # applied in the verifier instead, so it also covers agent builds. It applies
+    # only when 1.x is installed and pyknotid's representation.py reads data['pos']
+    # without handling 'vertex_position', so a build adapted to 1.x keeps it. The
+    # sdist is fetched from its content-addressed PyPI URL and checked against its
+    # sha256, then installed from the local file: the name now belongs to another
+    # project, so neither a different upload nor a wheel can be picked up. A failed
+    # install leaves grading unchanged but prints TB21_ENV_PATCH_FAILED and writes
+    # /logs/verifier/tb21_env_patch_failed, so the 0 is not read as the agent's.
     "build-cython-ext": {
-        "upstream": "harbor-framework/terminal-bench-2#73",
+        "upstream": (
+            "harbor-framework/terminal-bench-2#73 (its solve.sh planarity pin, "
+            "applied in the verifier)"
+        ),
         "test_sh": r"""# planarity 1.0.0 is a different project under the old PyPI name; restore the
-# 0.6 that pyknotid 0.5.3 was written against (terminal-bench-2 PR #73).
+# 0.6 that pyknotid 0.5.3 was written against (terminal-bench-2 PR #73's pin).
+_tb_rep=/app/pyknotid/pyknotid/representations/representation.py
 if python -c 'import importlib.metadata as m, sys; sys.exit(int(m.version("planarity").split(".")[0] == "0"))' 2>/dev/null \
-    && grep -qs "data\['pos'\]" /app/pyknotid/pyknotid/representations/representation.py; then
-  python -m pip install --no-deps 'planarity==0.6' || echo "WARNING: could not pin planarity==0.6" >&2
+    && grep -qs "data\['pos'\]" "$_tb_rep" && ! grep -qs vertex_position "$_tb_rep"; then
+  python - <<'TB21_PIN' || { echo "TB21_ENV_PATCH_FAILED: build-cython-ext could not install planarity==0.6; a 0 below reflects the environment, not the agent" >&2; mkdir -p /logs/verifier && echo "planarity==0.6 install failed" > /logs/verifier/tb21_env_patch_failed; }
+import hashlib, os, subprocess, sys, tempfile, urllib.request
+url = ("https://files.pythonhosted.org/packages/5b/17/"
+       "9a822cf44b9cad016def3085013edd2b2d7e7d6347778c00f4a835e33cc9/planarity-0.6.tar.gz")
+sha = "9852691d9c0d05e26a2fcbf2fce5a2632e8847ec462e816fa02e72d35013da68"
+path = os.path.join(tempfile.mkdtemp(), "planarity-0.6.tar.gz")
+urllib.request.urlretrieve(url, path)
+if hashlib.sha256(open(path, "rb").read()).hexdigest() != sha:
+    sys.exit("planarity-0.6.tar.gz: sha256 mismatch")
+sys.exit(subprocess.call([sys.executable, "-m", "pip", "install", "--no-deps", path]))
+TB21_PIN
 fi
 """,
     },
@@ -177,13 +198,17 @@ fi
     # With cmake alone (terminal-bench-2 PR #72), rstan installs but the model
     # no longer parses. The fix restores the image-era resolution instead:
     #   - preinstall RcppParallel 5.1.11-1, the release terminal-bench-2 PR #73
-    #     pins (newest on the image date, needs no cmake);
+    #     pins in solve.sh (newest on the image date, needs no cmake);
     #   - set R_REMOTES_UPGRADE=never in R's Renviron.site, so install_version
     #     installs missing dependencies but no longer upgrades installed ones.
+    #     This part is this patch's own; no upstream fix has it.
     # rstan itself, the package step 1 of the task asks for, is not preinstalled.
     # This must be in the image because the verifier runs after the install.
     "mcmc-sampling-stan": {
-        "upstream": "harbor-framework/terminal-bench-2#73",
+        "upstream": (
+            "harbor-framework/terminal-bench-2#73 (its RcppParallel pin, as an image "
+            "layer) + R_REMOTES_UPGRADE=never (added here)"
+        ),
         "image_layer": (
             "RUN cd /tmp && curl -fsSL -o RcppParallel_5.1.11-1.tar.gz "
             "https://cran.r-project.org/src/contrib/Archive/RcppParallel/"
@@ -316,9 +341,10 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
                     pending_pin = pin_file.with_suffix(".incoming")
                     pending_pin.write_text(pinned_image)
                     pending_pin.replace(pin_file)
-                md["dockerfile"] = (
-                    f"FROM {pinned_image}\n" + _image_layer(tid) + _TMUX_INSTALL
-                )
+                # The layer goes only on rows that carry the patch, so
+                # --no-env-patches yields the published environment.
+                layer = _image_layer(tid) if md.get("env_patch") else ""
+                md["dockerfile"] = f"FROM {pinned_image}\n" + layer + _TMUX_INSTALL
             digest = hashlib.sha256(
                 json.dumps(row, sort_keys=True).encode()
             ).hexdigest()
