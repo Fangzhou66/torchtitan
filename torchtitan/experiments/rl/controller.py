@@ -88,6 +88,7 @@ _trainer_loop
 """
 
 import asyncio
+import atexit
 import copy
 import logging
 import math
@@ -276,6 +277,19 @@ def _will_validate_after_step(
     return validation.num_samples > 0 and (
         step == num_training_steps
         or (validation.interval > 0 and step % validation.interval == 0)
+    )
+
+
+def _checkpoint_saves(
+    policy: dict[str, bool | int], *, step: int, last_step: bool
+) -> bool:
+    """``CheckpointManager._should_save`` over ``PolicyTrainer.checkpoint_save_policy``."""
+    if not policy["enabled"]:
+        return False
+    return (
+        (step == 1 and bool(policy["first_step"]))
+        or last_step
+        or step % int(policy["interval"]) == 0
     )
 
 
@@ -470,6 +484,13 @@ class Controller(Configurable):
         ``[dp_degree]`` row, so every rank stops receiving and unpickling the other
         ranks' data. Requires the trainer's torch ranks to follow the mesh order as
         ``(dp, cp, tp)``; setup checks it."""
+
+        async_bookkeeping: bool = False
+        """Take the trainer loop's per-step bookkeeping off its critical path:
+        lineage records are written by a background thread (same bytes, same
+        order), ``sync_log_step`` runs while the loop waits for the batch and is
+        awaited before ``forward_backward``, and the checkpoint RPCs are sent only
+        on steps the trainer's checkpoint policy saves on."""
 
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
@@ -804,6 +825,9 @@ class Controller(Configurable):
             dump_dir=config.dump_folder,
             track_pending_inputs=config.trainer.checkpoint_training_data,
         )
+        if config.async_bookkeeping:
+            self.training_lineage.enable_background_writes()
+            atexit.register(self.training_lineage.close)
         self._training_data_lock = asyncio.Lock()
         self._next_training_group_id = 0
         self._replay_training_inputs: deque[tuple[int, object]] = deque()
@@ -833,6 +857,13 @@ class Controller(Configurable):
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
         logger.info("Closing: tearing down actors and process meshes.")
+
+        recorder = getattr(self, "training_lineage", None)
+        if recorder is not None:
+            try:
+                recorder.flush()
+            except Exception:
+                logger.exception("training lineage flush failed")
 
         # A crash can leave a background validation pass running against actors we
         # are about to stop; drop it before touching them.
@@ -2581,6 +2612,32 @@ class Controller(Configurable):
         await training_batch_queue.put(None)
         # TODO(async-rl): if finite datasets are supported, drain a final partial batch here.
 
+    async def _sync_log_step(self, step: int, *, concurrent: bool = False) -> None:
+        """Propagate the step counter to the trainer, generators and idle eval generators."""
+        if concurrent:
+            await asyncio.gather(
+                self.trainer.sync_log_step.call(step),
+                self.generator_router.fanout("sync_log_step", step),
+            )
+        else:
+            await self.trainer.sync_log_step.call(step)
+            logger.info(f"[trainer_loop] step {step}: generator fanout sync_log_step")
+            await self.generator_router.fanout("sync_log_step", step)
+        # Ping eval generators only while they are idle. Between passes this
+        # keeps a mesh from being reaped, but an in-flight pass already exercises
+        # the mesh. A concurrent maintenance fanout can sit behind its generation
+        # RPCs until the guard times out and falsely declares a healthy evaluator
+        # dead. Training generators remain safe to ping because they continuously
+        # serve the training stream rather than one isolated background pass.
+        if (
+            self.eval_generator_router is not None
+            and not self._validation_pass_in_flight()
+        ):
+            await self._guard_eval_generators(
+                lambda: self.eval_generator_router.fanout("sync_log_step", step),
+                what=f"eval generator sync_log_step at step {step}",
+            )
+
     async def _trainer_loop(
         self,
         training_batch_queue: "asyncio.Queue[TrainingBatch | None]",
@@ -2595,34 +2652,37 @@ class Controller(Configurable):
             unblocked by: _batcher_loop training_batch_queue.put()
         """
         validation = self.config.async_loop.validation
+        async_bookkeeping = self.config.async_bookkeeping
+        checkpoint_policy = None
+        if async_bookkeeping:
+            checkpoint_policy = self._get_rank_0_value(
+                await self.trainer.checkpoint_save_policy.call()
+            )
+        # The tail after a step's total (metrics log, checkpoint, validation start)
+        # is reported with the next step, whose metrics are the next to be logged.
+        prev_post_step_s: float | None = None
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
             will_validate = _will_validate_after_step(
                 validation=validation, step=step, num_training_steps=num_training_steps
             )
+            step_timer = MetricsTimer()
+            if prev_post_step_s is not None:
+                step_timer.durations["timing/step/post_step"].append(prev_post_step_s)
             # Phase logging: the training step is otherwise a black box until its
             # end-of-step metrics flush, so a hang inside it is invisible. Log each
             # actor-call boundary so a stall is localized in the stdout timeline.
             logger.info(f"[trainer_loop] step {step}: begin; trainer.sync_log_step")
-            await self.trainer.sync_log_step.call(step)
-            logger.info(f"[trainer_loop] step {step}: generator fanout sync_log_step")
-            await self.generator_router.fanout("sync_log_step", step)
-            # Ping eval generators only while they are idle. Between passes this
-            # keeps a mesh from being reaped, but an in-flight pass already exercises
-            # the mesh. A concurrent maintenance fanout can sit behind its generation
-            # RPCs until the guard times out and falsely declares a healthy evaluator
-            # dead. Training generators remain safe to ping because they continuously
-            # serve the training stream rather than one isolated background pass.
-            if (
-                self.eval_generator_router is not None
-                and not self._validation_pass_in_flight()
-            ):
-                await self._guard_eval_generators(
-                    lambda: self.eval_generator_router.fanout("sync_log_step", step),
-                    what=f"eval generator sync_log_step at step {step}",
+            sync_task: asyncio.Task | None = None
+            if async_bookkeeping:
+                # Overlaps the batch wait; awaited before forward_backward below.
+                sync_task = asyncio.create_task(
+                    self._sync_log_step(step, concurrent=True)
                 )
+            else:
+                with step_timer.record("timing/step/sync_log_step"):
+                    await self._sync_log_step(step)
             logger.info(f"[trainer_loop] step {step}: awaiting training batch")
-            step_timer = MetricsTimer()
 
             with sl.log_trace_span("train_step"), step_timer.record(
                 "timing/step/total"
@@ -2637,7 +2697,13 @@ class Controller(Configurable):
 
                 if packed is None:
                     logger.info("Batcher closed and drained; stopping training")
+                    if sync_task is not None:
+                        sync_task.cancel()
+                        await asyncio.gather(sync_task, return_exceptions=True)
                     break
+                if sync_task is not None:
+                    with step_timer.record("timing/step/sync_log_step"):
+                        await sync_task
                 logger.info(
                     f"[trainer_loop] step {step}: got batch, "
                     f"{len(packed.microbatches)} microbatch(es), "
@@ -2730,14 +2796,15 @@ class Controller(Configurable):
                     )
                 self._generator_policy_version = optim_result.policy_version
                 logger.info(f"[trainer_loop] step {step}: weights pulled (step done)")
-                for lineage in packed.group_lineages:
-                    self._record_training_event(
-                        "trained",
-                        lineage=lineage,
-                        train_step=step,
-                        target_policy_version=packed.target_policy_version,
-                        resulting_policy_version=optim_result.policy_version,
-                    )
+                with step_timer.record("timing/step/lineage"):
+                    for lineage in packed.group_lineages:
+                        self._record_training_event(
+                            "trained",
+                            lineage=lineage,
+                            train_step=step,
+                            target_policy_version=packed.target_policy_version,
+                            resulting_policy_version=optim_result.policy_version,
+                        )
 
                 # Release one train step's group slots after the pull; the batcher packs exactly
                 # num_groups_per_train_step trainable groups per batch.
@@ -2753,6 +2820,7 @@ class Controller(Configurable):
                     reason="trained",
                 )
 
+            post_step_start = time.perf_counter()
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
@@ -2785,22 +2853,27 @@ class Controller(Configurable):
 
             # Save full training state for resume; CheckpointManager writes only on its interval
             # and the final step. After the divergence guard so a NaN step isn't checkpointed.
-            with sl.log_trace_span("trainer_save_checkpoint"):
-                checkpoint_args = {}
-                if self.config.trainer.checkpoint_training_data:
-                    assert self.trainer is not None
-                    should_save = self._get_rank_0_value(
-                        await self.trainer.should_save_checkpoint.call(
-                            step, last_step=(step == num_training_steps)
+            # With async_bookkeeping, steps the policy cannot save on skip both RPCs;
+            # on those steps CheckpointManager.save returns before doing anything.
+            if checkpoint_policy is None or _checkpoint_saves(
+                checkpoint_policy, step=step, last_step=(step == num_training_steps)
+            ):
+                with sl.log_trace_span("trainer_save_checkpoint"):
+                    checkpoint_args = {}
+                    if self.config.trainer.checkpoint_training_data:
+                        assert self.trainer is not None
+                        should_save = self._get_rank_0_value(
+                            await self.trainer.should_save_checkpoint.call(
+                                step, last_step=(step == num_training_steps)
+                            )
                         )
+                        if should_save:
+                            checkpoint_args[
+                                "training_data_state"
+                            ] = await self._snapshot_training_data_state()
+                    await self.trainer.save_checkpoint.call(
+                        step, last_step=(step == num_training_steps), **checkpoint_args
                     )
-                    if should_save:
-                        checkpoint_args[
-                            "training_data_state"
-                        ] = await self._snapshot_training_data_state()
-                await self.trainer.save_checkpoint.call(
-                    step, last_step=(step == num_training_steps), **checkpoint_args
-                )
 
             # Periodic held-out validation. Skip the final step -- run() does a post-training
             # pass right after the loop. Runs on this step's just-pulled weights, overlapping
@@ -2811,6 +2884,7 @@ class Controller(Configurable):
                     self._start_async_validation(step=step)
                 else:
                     await self._validate_and_log(step=step)
+            prev_post_step_s = time.perf_counter() - post_step_start
 
     async def _take_reserved_training_batch(
         self, training_batch_queue: "asyncio.Queue[TrainingBatch | None]"

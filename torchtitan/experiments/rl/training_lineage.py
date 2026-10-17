@@ -12,6 +12,8 @@ import dataclasses
 import hashlib
 import json
 import os
+import queue
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -77,6 +79,10 @@ class TrainingLineageRecorder:
         self.track_pending_inputs = track_pending_inputs
         self.pending_inputs: dict[int, object] = {}
         self._known_sample_revisions = self._read_known_sample_revisions()
+        # Background writer (enable_background_writes); None appends synchronously.
+        self._write_queue: queue.Queue | None = None
+        self._writer: threading.Thread | None = None
+        self._writer_error: BaseException | None = None
         self.record_event("session_started", pid=os.getpid())
 
     def _read_known_sample_revisions(self) -> set[str]:
@@ -94,11 +100,78 @@ class TrainingLineageRecorder:
                     revisions.add(revision)
         return revisions
 
-    @staticmethod
-    def _append(path: Path, record: dict[str, Any]) -> None:
-        with path.open("a") as f:
-            f.write(canonical_json(record) + "\n")
-            f.flush()
+    def _append(self, path: Path, record: dict[str, Any]) -> None:
+        line = canonical_json(record) + "\n"
+        if self._write_queue is None:
+            with path.open("a") as f:
+                f.write(line)
+                f.flush()
+            return
+        if self._writer_error is not None:
+            raise RuntimeError("training lineage writer failed") from self._writer_error
+        self._write_queue.put((path, line))
+
+    def enable_background_writes(self) -> None:
+        """Append from a background thread instead of the caller's thread.
+
+        Lines are serialized when recorded, so file contents and order are the same
+        as synchronous appends; each batch the thread drains opens a file once.
+        Records still queued at a crash are lost (synchronous mode loses at most a
+        partial line). ``flush`` waits for the queue; ``close`` also stops the thread.
+        """
+        if self._write_queue is not None:
+            return
+        self._write_queue = queue.Queue()
+        self._writer = threading.Thread(
+            target=self._write_loop, name="training-lineage-writer", daemon=True
+        )
+        self._writer.start()
+
+    def _write_loop(self) -> None:
+        assert self._write_queue is not None
+        while True:
+            items = [self._write_queue.get()]
+            while True:
+                try:
+                    items.append(self._write_queue.get_nowait())
+                except queue.Empty:
+                    break
+            stop = any(item is None for item in items)
+            batches: dict[Path, list[str]] = {}
+            for item in items:
+                if item is not None:
+                    batches.setdefault(item[0], []).append(item[1])
+            try:
+                for path, lines in batches.items():
+                    with path.open("a") as f:
+                        f.write("".join(lines))
+                        f.flush()
+            except BaseException as error:  # surfaced by the next _append/flush
+                self._writer_error = error
+            finally:
+                for _ in items:
+                    self._write_queue.task_done()
+            if stop:
+                return
+
+    def flush(self) -> None:
+        """Block until every queued record is written (no-op when synchronous)."""
+        if self._write_queue is not None:
+            self._write_queue.join()
+        if self._writer_error is not None:
+            raise RuntimeError("training lineage writer failed") from self._writer_error
+
+    def close(self) -> None:
+        """Write everything queued and stop the background writer."""
+        if self._write_queue is None:
+            return
+        self._write_queue.put(None)
+        if self._writer is not None:
+            self._writer.join()
+        self._write_queue = None
+        self._writer = None
+        if self._writer_error is not None:
+            raise RuntimeError("training lineage writer failed") from self._writer_error
 
     def describe_sample(self, *, sample: object, group_id: int) -> dict[str, Any]:
         """Return a stable occurrence identity, with a generic fallback."""
@@ -185,6 +258,7 @@ class TrainingLineageRecorder:
         self, *, policy_version: int, requested_training_steps: int
     ) -> None:
         """Atomically publish that the optimizer will perform no more steps."""
+        self.flush()
         record = {
             "schema_version": _SCHEMA_VERSION,
             "record_type": "optimization_complete",

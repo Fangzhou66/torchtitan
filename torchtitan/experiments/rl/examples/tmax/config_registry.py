@@ -1017,6 +1017,12 @@ def rl_grpo_qwen3_5_9b_tmax(
     config.send_trainer_microbatch_columns = (
         os.environ.get("SWE_TRAINER_COLUMN_SEND", "0") == "1"
     )
+    # SWE_CONTROLLER_ASYNC_BOOKKEEPING=1: background lineage writes, sync_log_step
+    # overlapped with the batch wait, checkpoint RPCs only on saving steps
+    # (Controller.async_bookkeeping).
+    config.async_bookkeeping = (
+        os.environ.get("SWE_CONTROLLER_ASYNC_BOOKKEEPING", "0") == "1"
+    )
     config.isolate_rollout_artifacts = True
     config.trainer.checkpoint_training_data = (
         os.environ.get("SWE_CKPT_CONTROLLER_DATA", "0") == "1"

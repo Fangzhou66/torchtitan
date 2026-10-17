@@ -1080,9 +1080,10 @@ def test_async_validation_skips_while_a_pass_is_in_flight() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("async_bookkeeping", [False, True])
 @pytest.mark.parametrize("validation_in_flight", [False, True])
 def test_eval_log_step_ping_only_while_validation_is_idle(
-    validation_in_flight: bool,
+    validation_in_flight: bool, async_bookkeeping: bool
 ) -> None:
     """The eval keepalive must not compete with its own background pass."""
 
@@ -1090,17 +1091,31 @@ def test_eval_log_step_ping_only_while_validation_is_idle(
         controller = object.__new__(Controller)
         controller.start_step = 0
         controller.config = SimpleNamespace(
+            async_bookkeeping=async_bookkeeping,
             async_loop=SimpleNamespace(
                 validation=ValidationConfig(num_samples=1, interval=25, run_async=True),
                 max_offpolicy_steps=0,
             )
         )
         controller.trainer = SimpleNamespace(
-            sync_log_step=SimpleNamespace(call=AsyncMock())
+            sync_log_step=SimpleNamespace(call=AsyncMock()),
+            checkpoint_save_policy=SimpleNamespace(
+                call=AsyncMock(return_value=_FakeValueMesh([{"enabled": False}]))
+            ),
         )
         controller.generator_router = SimpleNamespace(fanout=AsyncMock())
         controller.eval_generator_router = SimpleNamespace(fanout=AsyncMock())
         controller._eval_guard_failures = 0
+        if async_bookkeeping:
+            # The concurrent sync_log_step must get to run before the loop
+            # drains the closed queue and cancels it.
+            take = controller._take_reserved_training_batch
+
+            async def take_after_sync(queue):
+                await asyncio.sleep(0.01)
+                return await take(queue)
+
+            controller._take_reserved_training_batch = take_after_sync
 
         validation_task = None
         if validation_in_flight:
@@ -1376,3 +1391,231 @@ def test_slice_trainer_by_dp_rank_rejects_wrong_layout() -> None:
     slices[:] = [_fake_trainer_slice(r, sent) for r in range(3)]
     asyncio.run(controller._slice_trainer_by_dp_rank())
     assert len(controller._trainer_by_dp_rank) == 3
+
+
+def _deterministic_lineage(monkeypatch):
+    from torchtitan.experiments.rl import training_lineage
+
+    monkeypatch.setattr(training_lineage, "_utc_now", lambda: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(training_lineage, "time", SimpleNamespace(time_ns=lambda: 1))
+    monkeypatch.setattr(
+        training_lineage,
+        "uuid",
+        SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="session")),
+    )
+    return training_lineage.TrainingLineageRecorder
+
+
+def _write_lineage(recorder) -> None:
+    for group_id in range(50):
+        lineage = recorder.describe_sample(
+            sample={"instance_id": f"task-{group_id % 7}", "n": group_id % 7},
+            group_id=group_id,
+        )
+        recorder.record_sample(lineage=lineage, sample={"n": group_id % 7})
+        recorder.record_event("claimed", lineage=lineage, generator_policy_version=0)
+        recorder.record_event("trained", lineage=lineage, train_step=group_id)
+
+
+def test_background_lineage_writes_match_synchronous(tmp_path, monkeypatch) -> None:
+    """Same bytes in the same order, complete once flushed and after close."""
+    recorder_cls = _deterministic_lineage(monkeypatch)
+    sync = recorder_cls(dump_dir=str(tmp_path / "sync"))
+    _write_lineage(sync)
+
+    background = recorder_cls(dump_dir=str(tmp_path / "background"))
+    background.enable_background_writes()
+    _write_lineage(background)
+    background.flush()
+    for name in ("events.jsonl", "samples.jsonl"):
+        assert (background.root / name).read_bytes() == (sync.root / name).read_bytes()
+
+    background.record_event("after_flush")
+    background.close()
+    sync.record_event("after_flush")
+    assert background.events_path.read_bytes() == sync.events_path.read_bytes()
+    # A closed recorder appends synchronously again.
+    background.record_event("after_close")
+    sync.record_event("after_close")
+    assert background.events_path.read_bytes() == sync.events_path.read_bytes()
+
+
+def test_optimization_complete_waits_for_queued_lineage(tmp_path, monkeypatch) -> None:
+    recorder_cls = _deterministic_lineage(monkeypatch)
+    recorder = recorder_cls(dump_dir=str(tmp_path))
+    recorder.enable_background_writes()
+    _write_lineage(recorder)
+    recorder.record_optimization_complete(policy_version=1, requested_training_steps=1)
+    # session_started + 2 events per group, all on disk before the marker.
+    assert len(recorder.events_path.read_text().splitlines()) == 1 + 2 * 50
+    recorder.close()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("load_only", [False, True])
+@pytest.mark.parametrize("first_step", [False, True])
+@pytest.mark.parametrize("interval", [1, 3, 500])
+def test_checkpoint_saves_matches_checkpoint_manager(
+    enabled: bool, load_only: bool, first_step: bool, interval: int
+) -> None:
+    from torchtitan.components.checkpoint import CheckpointManager
+    from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+    from torchtitan.experiments.rl.controller import _checkpoint_saves
+
+    # A disabled CheckpointManager returns from __init__ before setting the rest.
+    manager = SimpleNamespace(enable=enabled)
+    if enabled:
+        manager.load_only = load_only
+        manager.enable_first_step_checkpoint = first_step
+        manager.interval = interval
+    # The endpoint's body, without a Monarch actor around it.
+    endpoint = PolicyTrainer.__dict__["checkpoint_save_policy"]
+    policy = asyncio.run(endpoint._method(SimpleNamespace(checkpointer=manager)))
+    for step in range(1, 12):
+        for last_step in (False, True):
+            assert _checkpoint_saves(policy, step=step, last_step=last_step) == (
+                CheckpointManager._should_save(manager, step, last_step=last_step)
+            )
+
+
+def _bookkeeping_controller(*, async_bookkeeping: bool, num_steps: int, order: list):
+    """A controller whose actors are fakes that log their calls into ``order``."""
+    controller = object.__new__(Controller)
+    controller.start_step = 0
+    controller._trainer_policy_version = 0
+    controller._generator_policy_version = 0
+    controller._validation_task = None
+    controller.eval_generator_router = None
+    controller.training_lineage = MagicMock()
+    controller.metrics_processor = MagicMock()
+    controller.config = SimpleNamespace(
+        async_bookkeeping=async_bookkeeping,
+        async_loop=SimpleNamespace(
+            validation=ValidationConfig(num_samples=0),
+            max_offpolicy_steps=0,
+            num_groups_per_train_step=1,
+        ),
+        trainer=SimpleNamespace(checkpoint_training_data=False),
+    )
+
+    async def sync_log_step(step):
+        order.append(("sync_start", step))
+        await asyncio.sleep(0.02)
+        order.append(("sync_done", step))
+
+    async def save_checkpoint(step, last_step=False):
+        order.append(("save_checkpoint", step))
+
+    def optim_step():
+        controller._trainer_policy_version += 1
+        return _FakeValueMesh(
+            [
+                SimpleNamespace(
+                    policy_version=controller._trainer_policy_version, metrics={}
+                )
+            ]
+        )
+
+    controller.trainer = SimpleNamespace(
+        sync_log_step=SimpleNamespace(call=sync_log_step),
+        optim_step=_FakeEndpoint(optim_step),
+        push_model_state_dict=SimpleNamespace(call=AsyncMock()),
+        save_checkpoint=SimpleNamespace(call=save_checkpoint),
+        checkpoint_save_policy=SimpleNamespace(
+            call=AsyncMock(
+                return_value=_FakeValueMesh(
+                    [{"enabled": True, "first_step": False, "interval": 2}]
+                )
+            )
+        ),
+    )
+    controller.generator_router = SimpleNamespace(fanout=AsyncMock())
+
+    async def take(queue):
+        await asyncio.sleep(0.005)  # the batch is not ready yet
+        packed = await queue.get()
+        if packed is not None:
+            order.append(("batch", controller._trainer_policy_version + 1))
+        return packed
+
+    async def forward_backward(microbatch, num_den, num_valid):
+        order.append(("forward_backward", controller._trainer_policy_version + 1))
+        return _FakeValueMesh([{"loss/mean": 1.0}])
+
+    controller._take_reserved_training_batch = take
+    controller._trainer_forward_backward = forward_backward
+    controller._pull_generator_weights = AsyncMock()
+    controller._include_eval_pull = lambda will_validate: False
+    controller._evolution_metrics = lambda step: []
+    controller._group_buffer = SimpleNamespace(
+        release_active_groups=AsyncMock(), metrics=lambda: []
+    )
+    queue = asyncio.Queue()
+    for step in range(num_steps):
+        queue.put_nowait(
+            SimpleNamespace(
+                microbatches=["mb"],
+                num_loss_denominator_tokens=1,
+                num_packed_valid_tokens=1,
+                num_global_valid_tokens=1,
+                min_policy_versions=[step],
+                target_policy_version=step,
+                group_lineages=[{"group_id": step}],
+                metrics=[],
+            )
+        )
+    return controller, queue
+
+
+@pytest.mark.parametrize("async_bookkeeping", [False, True])
+def test_sync_log_step_finishes_before_forward_backward(
+    async_bookkeeping: bool,
+) -> None:
+    """Off: sync_log_step runs before the batch wait. On: it overlaps the wait but
+    still completes before that step's forward_backward."""
+    order = []
+    controller, queue = _bookkeeping_controller(
+        async_bookkeeping=async_bookkeeping, num_steps=2, order=order
+    )
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=2))
+    for step in (1, 2):
+        step_calls = [
+            name for name, s in order if s == step and name != "save_checkpoint"
+        ]
+        if async_bookkeeping:
+            assert step_calls == ["sync_start", "batch", "sync_done", "forward_backward"]
+        else:
+            assert step_calls == ["sync_start", "sync_done", "batch", "forward_backward"]
+
+    logged = [
+        {metric.key for metric in call.kwargs["metrics"]}
+        for call in controller.metrics_processor.log.call_args_list
+    ]
+    for keys in logged:
+        assert {"timing/step/sync_log_step", "timing/step/lineage"} <= keys
+    assert "timing/step/post_step" not in logged[0]
+    assert "timing/step/post_step" in logged[1]
+    # Lineage is still recorded once per trained group.
+    assert controller.training_lineage.record_event.call_count == 2
+
+
+@pytest.mark.parametrize("async_bookkeeping", [False, True])
+def test_checkpoint_rpc_only_on_saving_steps(async_bookkeeping: bool) -> None:
+    order = []
+    controller, queue = _bookkeeping_controller(
+        async_bookkeeping=async_bookkeeping, num_steps=5, order=order
+    )
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=5))
+    saved = [step for name, step in order if name == "save_checkpoint"]
+    # interval 2 plus the last step; the default path asks on every step.
+    assert saved == ([2, 4, 5] if async_bookkeeping else [1, 2, 3, 4, 5])
+
+
+def test_async_bookkeeping_cancels_sync_on_shutdown() -> None:
+    order = []
+    controller, queue = _bookkeeping_controller(
+        async_bookkeeping=True, num_steps=0, order=order
+    )
+    queue.put_nowait(None)
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=3))
+    assert ("sync_done", 1) not in order

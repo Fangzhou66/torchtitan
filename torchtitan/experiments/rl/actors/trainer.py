@@ -464,6 +464,19 @@ class PolicyTrainer(Actor, Configurable):
         return self.checkpointer._should_save(step, last_step=last_step)
 
     @endpoint
+    async def checkpoint_save_policy(self) -> dict[str, bool | int]:
+        """The inputs of ``CheckpointManager._should_save``, so the controller can
+        skip the save RPCs on steps that cannot save (see ``checkpoint_saves``)."""
+        checkpointer = self.checkpointer
+        if not checkpointer.enable or checkpointer.load_only:
+            return {"enabled": False, "first_step": False, "interval": 0}
+        return {
+            "enabled": True,
+            "first_step": checkpointer.enable_first_step_checkpoint,
+            "interval": checkpointer.interval,
+        }
+
+    @endpoint
     async def close(self) -> None:
         """Close actor-local resources before the process mesh stops.
 
