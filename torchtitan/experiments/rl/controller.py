@@ -88,6 +88,7 @@ _trainer_loop
 """
 
 import asyncio
+import copy
 import logging
 import math
 import os
@@ -497,6 +498,17 @@ class Controller(Configurable):
         way: a model that needs TP to fit still needs it here.
         """
 
+        eval_generator_max_model_len: int = 0
+        """vLLM ``max_model_len`` for the eval generators only.
+
+        0 (default) inherits ``model_spec.model.max_seq_len``, like the training
+        generators. N > 0 spawns the eval generators on a copy of ``model_spec``
+        whose RoPE ``max_seq_len`` is N, so validation can run a longer context
+        than training without touching the training generators or the trainer.
+        The RoPE cache is a non-persistent buffer, so weight sync is unaffected.
+        Only takes effect with ``num_eval_generators > 0``.
+        """
+
         num_eval_rollout_workers: int = 0
         """CPU RolloutWorker processes dedicated to validation group rollouts.
 
@@ -567,6 +579,11 @@ class Controller(Configurable):
                 raise ValueError(
                     "eval_rollout_concurrency must be non-negative, got "
                     f"{self.eval_rollout_concurrency}"
+                )
+            if self.eval_generator_max_model_len < 0:
+                raise ValueError(
+                    "eval_generator_max_model_len must be non-negative, got "
+                    f"{self.eval_generator_max_model_len}"
                 )
             if self.eval_generator_data_parallel_degree < 0:
                 raise ValueError(
@@ -700,6 +717,23 @@ class Controller(Configurable):
                 self.generator.parallelism,
                 data_parallel_degree=self.eval_generator_data_parallel_degree,
             )
+
+        def eval_generator_model_spec(self):
+            """Model spec the eval generators are spawned with.
+
+            ``model_spec`` itself unless ``eval_generator_max_model_len`` is set, in
+            which case a copy with every attention layer's RoPE ``max_seq_len``
+            raised (or lowered) to it -- ``max_seq_len`` is what both generator
+            backends hand vLLM as ``max_model_len``.
+            """
+            if not self.eval_generator_max_model_len or self.model_spec is None:
+                return self.model_spec
+            spec = copy.deepcopy(self.model_spec)
+            for layer in spec.model.layers:
+                rope = getattr(getattr(layer, "attention", None), "rope", None)
+                if rope is not None:
+                    rope.max_seq_len = self.eval_generator_max_model_len
+            return spec
 
     def __init__(self, config: Config):
         self.config = config
@@ -1088,6 +1122,15 @@ class Controller(Configurable):
             eval_generator_dp_degree = max(
                 eval_generator_config.parallelism.data_parallel_degree, 1
             )
+            if config.eval_generator_max_model_len and not eval_generator_meshes:
+                logger.warning(
+                    "eval_generator_max_model_len=%d has no effect with "
+                    "num_eval_generators=0; validation runs on the training "
+                    "generators at max_model_len %d.",
+                    config.eval_generator_max_model_len,
+                    config.model_spec.model.max_seq_len if config.model_spec else -1,
+                )
+            eval_model_spec = config.eval_generator_model_spec()
             eval_generators = []
             for idx, eval_mesh in enumerate(eval_generator_meshes):
                 actor_name = (
@@ -1100,7 +1143,7 @@ class Controller(Configurable):
                         actor_name,
                         VLLMGenerator,
                         eval_generator_config,
-                        model_spec=config.model_spec,
+                        model_spec=eval_model_spec,
                         model_path=config.hf_assets_path,
                         compile_config=generator_compile,
                         max_num_seqs=async_loop.generator_max_num_seqs

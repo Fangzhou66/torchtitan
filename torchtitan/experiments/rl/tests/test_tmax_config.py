@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import dataclasses
+import os
 
 import pytest
 
@@ -461,3 +463,111 @@ def test_tmax_9b_configures_max_bypass_override(
     group_buffer = rl_grpo_qwen3_5_9b_tmax().async_loop.group_buffer
 
     assert group_buffer.max_bypass_groups == expected
+
+
+_CONTEXT_ENV = (
+    "SWE_TMAX_CONTEXT",
+    "SWE_MAX_CONTEXT_LEN",
+    "SWE_EVAL_MAX_MODEL_LEN",
+    "SWE_EVAL_MAX_CONTEXT_LEN",
+)
+
+
+def _eval_generators_on(monkeypatch):
+    monkeypatch.setenv("SWE_NUM_EVAL_GENERATORS", "2")
+    monkeypatch.setenv("SWE_EVAL_GEN_DP", "8")
+    monkeypatch.setenv("SWE_NUM_EVAL_ROLLOUT_WORKERS", "16")
+
+
+def _engine_max_model_len(model_spec) -> int:
+    # What VLLMGenerator passes as engine_kwargs["max_model_len"] (both backends)
+    # and what the torchtitan_wrapper HF config advertises as the position cap.
+    from torchtitan.experiments.rl.models.vllm_registry import (
+        model_spec_to_hf_config_dict,
+    )
+
+    hf = model_spec_to_hf_config_dict(model_spec)
+    assert hf["max_position_embeddings"] == model_spec.model.max_seq_len
+    return model_spec.model.max_seq_len
+
+
+def test_tmax_context_defaults_unchanged(monkeypatch):
+    for name in _CONTEXT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    _eval_generators_on(monkeypatch)
+    config = rl_grpo_qwen3_5_9b_tmax()
+    # tyro rebuilds the Controller.Config at launch, which runs __post_init__ and
+    # mirrors the batcher width into the trainer seq_len.
+    rebuilt = dataclasses.replace(config)
+
+    assert config.async_loop.batcher.batch.seq_len == 65536
+    assert rebuilt.trainer.training.seq_len == 65536
+    assert _engine_max_model_len(config.model_spec) == 65536
+    assert config.eval_generator_max_model_len == 0
+    assert config.eval_generator_model_spec() is config.model_spec
+    assert config.rollouter.max_context_tokens == 32768
+    assert config.rollouter.eval_max_context_tokens == 0
+
+
+def test_tmax_context_train_80k_eval_160k(monkeypatch):
+    _eval_generators_on(monkeypatch)
+    monkeypatch.setenv("SWE_TMAX_CONTEXT", "81920")
+    monkeypatch.setenv("SWE_MAX_CONTEXT_LEN", "79872")
+    monkeypatch.setenv("SWE_EVAL_MAX_MODEL_LEN", "163840")
+    monkeypatch.setenv("SWE_EVAL_MAX_CONTEXT_LEN", "161792")
+    config = rl_grpo_qwen3_5_9b_tmax()
+    rebuilt = dataclasses.replace(config)
+
+    # Training generators, trainer and batcher: 81920.
+    assert config.async_loop.batcher.batch.seq_len == 81920
+    assert rebuilt.trainer.training.seq_len == 81920
+    assert _engine_max_model_len(config.model_spec) == 81920
+    assert 81920 % config.trainer.loss.num_chunks == 0
+    # Eval generators: their own copy at 163840; the training spec is untouched.
+    eval_spec = config.eval_generator_model_spec()
+    assert eval_spec is not config.model_spec
+    assert _engine_max_model_len(eval_spec) == 163840
+    assert _engine_max_model_len(config.model_spec) == 81920
+    assert all(
+        layer.attention.rope.max_seq_len == 163840
+        for layer in eval_spec.model.layers
+        if getattr(layer, "attention", None) is not None
+    )
+    # Agent-side caps.
+    assert config.rollouter.max_context_tokens == 79872
+    assert config.rollouter.eval_max_context_tokens == 161792
+
+
+def test_tmax_eval_context_must_fit_eval_model_len(monkeypatch):
+    for name in _CONTEXT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    # No eval generators: validation runs on the 65536 training generators.
+    monkeypatch.setenv("SWE_NUM_EVAL_GENERATORS", "0")
+    monkeypatch.setenv("SWE_EVAL_MAX_CONTEXT_LEN", "161792")
+    with pytest.raises(ValueError, match="SWE_EVAL_MAX_CONTEXT_LEN=161792"):
+        rl_grpo_qwen3_5_9b_tmax()
+
+
+_TB2_1_EVAL = (
+    "/home/yichuan/torchtitan-claude-code-harness-cotrain/mast_rl/swe_assets/"
+    "tb2_1_envpatch_20261016/tb2_1_eval.jsonl"
+)
+
+
+@pytest.mark.skipif(not os.path.isfile(_TB2_1_EVAL), reason="TB-2.1 eval set absent")
+@pytest.mark.parametrize(("eval_cap", "expected"), [(0, 79872), (161792, 161792)])
+def test_tmax_rollouter_eval_cap_resolution(eval_cap, expected):
+    from torchtitan.experiments.rl.examples.tmax.data import TMaxDataset
+    from torchtitan.experiments.rl.examples.tmax.rollouter import TMaxRollouter
+
+    dataset = TMaxDataset.Config(data_path=_TB2_1_EVAL, holdout_n=0, shuffle=False)
+    rollouter = TMaxRollouter.Config(
+        train_dataset=dataset,
+        validation_dataset=dataset,
+        max_context_tokens=79872,
+        eval_max_context_tokens=eval_cap,
+    ).build()
+    # Training rollouts keep the training cap; validation (negative group ids)
+    # uses the eval cap, which falls back to the training cap when unset.
+    assert rollouter._max_context_tokens == 79872
+    assert rollouter._eval_max_context_tokens == expected

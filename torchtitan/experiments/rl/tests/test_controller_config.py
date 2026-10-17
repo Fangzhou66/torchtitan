@@ -23,6 +23,7 @@ def _config(**overrides) -> SimpleNamespace:
             "num_eval_generators": 0,
             "num_eval_rollout_workers": 0,
             "eval_rollout_concurrency": 0,
+            "eval_generator_max_model_len": 0,
             "eval_generator_data_parallel_degree": 0,
             "torchstore_reset_interval": 0,
             **overrides,
@@ -64,6 +65,13 @@ def test_negative_eval_generator_dp_is_rejected():
         ValueError, match="eval_generator_data_parallel_degree must be non-negative"
     ):
         Controller.Config.__post_init__(_config(eval_generator_data_parallel_degree=-1))
+
+
+def test_negative_eval_generator_max_model_len_is_rejected():
+    with pytest.raises(
+        ValueError, match="eval_generator_max_model_len must be non-negative"
+    ):
+        Controller.Config.__post_init__(_config(eval_generator_max_model_len=-1))
 
 
 def test_eval_generator_dp_without_eval_generators_warns(caplog):

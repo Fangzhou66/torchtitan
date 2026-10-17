@@ -160,6 +160,7 @@ def _stub_rollouter(
     rollouter._eval_timeout_sec = 60
     rollouter._guard_sec = 300
     rollouter._max_context_tokens = 4096
+    rollouter._eval_max_context_tokens = 4096
     rollouter._reward_mode = reward_mode
     rollouter._read_ctrf = True
     rollouter._shadow_grade_unsubmitted = False

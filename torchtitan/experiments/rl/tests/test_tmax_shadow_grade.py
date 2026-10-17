@@ -39,6 +39,7 @@ def _rollouter(*, shadow: bool) -> TMaxRollouter:
     r._time_budget_sec = 3600
     r._eval_timeout_sec = 600
     r._max_context_tokens = 4096
+    r._eval_max_context_tokens = 4096
     r._reward_mode = "sparse"
     r._read_ctrf = False
     r._shadow_grade_unsubmitted = shadow

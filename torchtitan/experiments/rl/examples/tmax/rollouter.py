@@ -37,6 +37,8 @@ Knobs read from env (the launcher sets these; see ``submit_swe_tmax_9b.sh``):
                                       TRAINING and validation rollouts alike
                                       (default 600)
   ``SWE_MAX_CONTEXT_LEN``             model context budget for the adapter session
+  ``SWE_EVAL_MAX_CONTEXT_LEN``        the same budget for validation rollouts only
+                                      (default: SWE_MAX_CONTEXT_LEN)
   ``SWE_ROLLOUT_CONCURRENCY``         concurrently-active rollouts (default 16)
   ``TMAX_CALL_LIMIT``                 Vanillux step cap (its per-turn token cap is a
                                       constant in vanillux_loop, not an env knob)
@@ -977,6 +979,12 @@ class TMaxRollouter(Rollouter):
         max_context_tokens: int = 32768
         """Model context budget for the adapter session."""
 
+        eval_max_context_tokens: int = 0
+        """Context budget for validation rollouts. 0 (default) uses
+        ``max_context_tokens``. Set it together with the eval generators'
+        ``max_model_len`` (``Controller.Config.eval_generator_max_model_len``) when
+        validation runs a longer context than training."""
+
         length_penalty: bool = False
         """In-group length penalty on solved training rollouts (off by default).
 
@@ -1050,6 +1058,9 @@ class TMaxRollouter(Rollouter):
         self._agent_budget_floor_sec = config.agent_budget_floor_sec
         self._eval_timeout_sec = config.eval_timeout_sec
         self._max_context_tokens = config.max_context_tokens
+        self._eval_max_context_tokens = (
+            config.eval_max_context_tokens or config.max_context_tokens
+        )
         self._reward_mode = config.reward_mode
         self._evolution_harder_ratio = config.evolution_harder_ratio
         self._evolution_easier_ratio = config.evolution_easier_ratio
@@ -1543,6 +1554,10 @@ class TMaxRollouter(Rollouter):
         # path the rollout takes out of it. Both are pure reads of `sample`.
         budget_sec = self._agent_budget_sec(sample)
         verifier_sec = self._verifier_budget_sec(sample)
+        # Validation groups carry negative ids.
+        max_context_tokens = (
+            self._eval_max_context_tokens if group_id < 0 else self._max_context_tokens
+        )
         started_at = time.monotonic()
         started_wall = time.time()
         # Sandbox exec wall-clock, filled by _RootSandbox as the agent runs;
@@ -1574,7 +1589,7 @@ class TMaxRollouter(Rollouter):
                 generate_fn=generate_fn,
                 sampling=sampling,
                 routing_session_id=rollout_id,
-                max_context_tokens=self._max_context_tokens,
+                max_context_tokens=max_context_tokens,
             )
             async with asyncio.timeout(
                 self._guard_for(budget_sec, verifier_sec)
@@ -1677,7 +1692,7 @@ class TMaxRollouter(Rollouter):
                             adapter=adapter,
                             time_budget_sec=budget_sec,
                             workdir=sample.workdir,
-                            max_context_tokens=self._max_context_tokens,
+                            max_context_tokens=max_context_tokens,
                         )
                     )
                     timing["agent_secs"] = time.monotonic() - agent_at

@@ -102,6 +102,8 @@ _TB2_VAL_MAX_TOKENS = int(os.environ.get("SWE_TB2_VAL_MAX_TOKENS", "0")) or None
 # generator's vLLM max_model_len AND the trainer batcher's packing width: both are
 # raised together (the controller mirrors the batcher width into the trainer
 # seq_len), or a full episode is truncated by vLLM / dropped during packing.
+# SWE_TMAX_CONTEXT overrides both at once (see _tmax_context); keep the agent-side
+# SWE_MAX_CONTEXT_LEN below it by the per-turn headroom the launcher uses.
 _TMAX_9B_CONTEXT = 65536
 _TMAX_9B_PER_TURN_TOKENS = 16384
 # 27B terminus default per-turn cap (TMAX_TURN_MAX_TOKENS overrides). Terminus-2
@@ -117,6 +119,14 @@ _TMAX_9B_VAL_SAMPLES = 32
 # Use all training rows by default with a separate benchmark for validation.
 # SWE_HOLDOUT_N opts into reserving the last N rows for same-file validation.
 _TMAX_9B_HOLDOUT_N = 0
+
+
+def _tmax_context() -> int:
+    """Model max_seq_len (= vLLM max_model_len) and batcher packing width for the
+    tmax recipes. Read at recipe build time so SWE_TMAX_CONTEXT is honored.
+    Qwen3.5's native RoPE range is 262144, so any value up to that needs no
+    scaling; it must stay divisible by the loss chunk count (32)."""
+    return int(os.environ.get("SWE_TMAX_CONTEXT", _TMAX_9B_CONTEXT))
 
 
 def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Config:
@@ -180,6 +190,9 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         time_budget_sec=int(os.environ.get("SWE_TIME_BUDGET_SEC", "2400")),
         eval_timeout_sec=int(os.environ.get("TMAX_EVAL_TIMEOUT_SEC", "600")),
         max_context_tokens=int(os.environ.get("SWE_MAX_CONTEXT_LEN", "32768")),
+        # Validation-only agent cap (0 = max_context_tokens). Pair with
+        # SWE_EVAL_MAX_MODEL_LEN so the eval generators can hold it.
+        eval_max_context_tokens=int(os.environ.get("SWE_EVAL_MAX_CONTEXT_LEN", "0")),
         evolution_harder_ratio=float(
             os.environ.get("SWE_EVOLUTION_HARDER_RATIO", "1.0")
         ),
@@ -366,7 +379,7 @@ def rl_grpo_qwen3_5_27b_tmax_fsdp16() -> Controller.Config:
     """
     config = rl_grpo_qwen3_5_27b_tmax()
     assert config.model_spec is not None
-    _set_max_seq_len(config.model_spec, _TMAX_9B_CONTEXT)
+    _set_max_seq_len(config.model_spec, _tmax_context())
     config.trainer = dataclasses.replace(
         config.trainer,
         parallelism=dataclasses.replace(
@@ -419,7 +432,7 @@ def rl_grpo_qwen3_5_27b_tmax_gb200() -> Controller.Config:
     """
     config = rl_grpo_qwen3_5_9b_tmax()
     config.model_spec = _qwen3_5_rl_model_registry("27B", attn_backend="flex")
-    _set_max_seq_len(config.model_spec, _TMAX_9B_CONTEXT)
+    _set_max_seq_len(config.model_spec, _tmax_context())
     # Per-turn generation cap. The 9B recipe pins vanillux's 16384; Terminus-2 thinks
     # longer per step, and TMAX_TURN_MAX_TOKENS is only a hint in the HTTP body (the
     # adapter generates from this SamplingConfig), so honour it here.
@@ -485,7 +498,7 @@ def rl_grpo_qwen3_5_27b_tmax_fsdp32_tp2() -> Controller.Config:
     """
     config = rl_grpo_qwen3_5_9b_tmax()
     config.model_spec = _qwen3_5_rl_model_registry("27B", attn_backend="varlen")
-    _set_max_seq_len(config.model_spec, _TMAX_9B_CONTEXT)
+    _set_max_seq_len(config.model_spec, _tmax_context())
     config.trainer = dataclasses.replace(
         config.trainer,
         parallelism=dataclasses.replace(
@@ -586,7 +599,7 @@ def rl_grpo_qwen3_5_9b_tmax(
             policy_canary_root=os.environ.get("TRL_BASE", ""),
         )
     assert config.model_spec is not None
-    _set_max_seq_len(config.model_spec, _TMAX_9B_CONTEXT)
+    _set_max_seq_len(config.model_spec, _tmax_context())
     # Interleaved thinking: keep each turn's <think> in later prompts (the tmax
     # recipe's preserve_thinking, shown to help agentic RL). The qwen3.5 renderer
     # defaults to preserve_all_thinking=False, which strips prior-turn reasoning;
@@ -699,7 +712,7 @@ def rl_grpo_qwen3_5_9b_tmax(
         batcher=dataclasses.replace(
             config.async_loop.batcher,
             batch=dataclasses.replace(
-                config.async_loop.batcher.batch, seq_len=_TMAX_9B_CONTEXT
+                config.async_loop.batcher.batch, seq_len=_tmax_context()
             ),
             # With the zero-std drop off, most of the batch is all-solved or
             # all-failed groups whose centered advantage is 0, and a zero-advantage
@@ -792,6 +805,28 @@ def rl_grpo_qwen3_5_9b_tmax(
     config.eval_rollout_concurrency = int(
         os.environ.get("SWE_EVAL_ROLLOUT_CONCURRENCY", "64")
     )
+    # Eval-only context. SWE_EVAL_MAX_MODEL_LEN gives the eval generators their own
+    # vLLM max_model_len (unset = the training context); SWE_EVAL_MAX_CONTEXT_LEN
+    # (read into the rollouter above) is the matching agent-side cap. Neither
+    # touches the training generators, the trainer, or the batcher. Longer eval
+    # sequences mean more KV per running request on the eval engines: size
+    # SWE_MAX_NUM_SEQS / SWE_EVAL_GPU_MEMORY_LIMIT against it.
+    config.eval_generator_max_model_len = int(
+        os.environ.get("SWE_EVAL_MAX_MODEL_LEN", "0")
+    )
+    _eval_cap = config.rollouter.eval_max_context_tokens
+    if _eval_cap:
+        _eval_model_len = (
+            config.eval_generator_max_model_len
+            if config.num_eval_generators and config.eval_generator_max_model_len
+            else config.model_spec.model.max_seq_len
+        )
+        if _eval_cap > _eval_model_len:
+            raise ValueError(
+                f"SWE_EVAL_MAX_CONTEXT_LEN={_eval_cap} exceeds the max_model_len "
+                f"{_eval_model_len} validation runs at; set SWE_EVAL_MAX_MODEL_LEN "
+                "(with SWE_NUM_EVAL_GENERATORS>0) or lower the cap."
+            )
     # Weight-sync KV policy. Default (SWE_SALT_KV=1): keep in-flight KV AND the prefix
     # cache (no preempt, no full re-prefill) and salt the prefix cache per GROUP (its n
     # samples share one namespace), so a NEW group recomputes its prefix under the new
@@ -1153,7 +1188,7 @@ def rl_grpo_qwen3_4b_tmax() -> Controller.Config:
     config = rl_grpo_qwen3_5_9b_tmax()
     # DENSE Qwen3-4B (softmax attention, varlen batch-invariant path); fp32 lm_head.
     config.model_spec = _qwen3_rl_model_registry("4B", attn_backend="varlen")
-    _set_max_seq_len(config.model_spec, _TMAX_9B_CONTEXT)
+    _set_max_seq_len(config.model_spec, _tmax_context())
     config.hf_assets_path = f"{_CKPT_DIR}/Qwen3-4B"
     # Dense Qwen3 chat template (the 9B base uses the qwen3.5 renderer).
     config.renderer = dataclasses.replace(config.renderer, name="qwen3")
