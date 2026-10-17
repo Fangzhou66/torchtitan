@@ -12,6 +12,7 @@ TorchTitan models for vLLM.
 """
 
 import dataclasses
+import os
 from dataclasses import dataclass
 from functools import partial
 
@@ -42,6 +43,28 @@ from vllm.utils import torch_utils as _torch_utils
 
 
 logger = init_logger(__name__)
+
+
+def maybe_regional_compile(model: torch.nn.Module) -> int:
+    """SWE_GEN_REGIONAL_COMPILE=1: inductor-compile each block's feed-forward and
+    norms, leaving attention and GatedDeltaNet eager (whole-block compile trips on
+    the GDN core's in-place paged-state updates). Compiled and eager FFNs differ by
+    bf16 rounding, so keep this matched with the trainer's regional compile: one
+    side alone moves gen-vs-trainer logprobs ~100x (p99 0.007 -> 0.76 nats on a 5K
+    prefill), both sides compiled match like both eager. Returns the module count."""
+    if os.environ.get("SWE_GEN_REGIONAL_COMPILE", "0") != "1":
+        return 0
+    torch._dynamo.config.capture_scalar_outputs = True
+    compiled = 0
+    for block in model.layers.children():
+        inner = getattr(block, "_checkpoint_wrapped_module", block)
+        for name in ("feed_forward", "attention_norm", "ffn_norm"):
+            sub = getattr(inner, name, None)
+            if sub is not None:
+                sub.compile(backend="inductor", fullgraph=True)
+                compiled += 1
+    logger.info("generator regional compile: %d feed-forward/norm modules", compiled)
+    return compiled
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
 # This is because piecewise CUDA-graph capture calls weak_ref_tensor()
@@ -361,6 +384,7 @@ class VLLMModelWrapper(Module):
             # TorchTitan FSDP/DDP here.
             skip_dp=True,
         )
+        maybe_regional_compile(self.model)
 
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
