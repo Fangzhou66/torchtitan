@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import Rollout, RolloutGroup
-from torchtitan.experiments.rl.rollout.types import is_scored, task_reward
+from torchtitan.experiments.rl.rollout.types import is_scored
 from torchtitan.experiments.rl.types import (
     RolloutTurnID,
     TrainingSample,
@@ -145,9 +145,7 @@ class TrainingSampleBuilder(Configurable):
         # policy learns) while all-solved may rise. The complement of their sum (among
         # zero-std groups) is the trainable mixed band; together they are the scalar
         # summary of the per-group solve-rate ("solve_rate_hist") distribution.
-        # Reporting uses the unshaped reward; the drop above uses the shaped one.
-        task_rewards = [task_reward(rollout) for rollout in scored_rollouts]
-        group_mean_reward = statistics.mean(task_rewards)
+        group_mean_reward = statistics.mean(rewards)
         metrics.append(
             m.Metric(
                 "rollout_reward/group_all_solved_frac",
@@ -171,7 +169,7 @@ class TrainingSampleBuilder(Configurable):
             metrics.append(
                 m.Metric(
                     "rollout_reward/avg_train_reward",
-                    m.Mean(group_mean_reward),
+                    m.Mean(statistics.mean(rewards)),
                 )
             )
         if self.config.drop_zero_std_reward_groups and is_zero_std:

@@ -183,21 +183,6 @@ def is_scored(rollout: Rollout) -> bool:
     return rollout.reward is not None and not math.isnan(rollout.reward)
 
 
-TASK_REWARD_KEY = "task_reward"
-"""``Rollout.diagnostics`` key holding the reward before training-only shaping."""
-
-
-def task_reward(rollout: Rollout) -> float | None:
-    """The reward for reporting and solve counting, before training-only shaping.
-
-    A rollouter that shapes ``Rollout.reward`` for the advantage only (e.g. a
-    format-error penalty) stores the unshaped value under ``TASK_REWARD_KEY``, so
-    reward curves and solve counts stay comparable. Otherwise this is ``reward``.
-    """
-    value = rollout.diagnostics.get(TASK_REWARD_KEY)
-    return float(value) if isinstance(value, (int, float)) else rollout.reward
-
-
 @dataclass(kw_only=True, slots=True)
 class RolloutGroup:
     group_id: int

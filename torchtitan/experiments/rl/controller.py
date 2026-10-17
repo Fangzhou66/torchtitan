@@ -136,11 +136,7 @@ from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
-from torchtitan.experiments.rl.rollout.types import (
-    GenerateFn,
-    is_scored,
-    task_reward,
-)
+from torchtitan.experiments.rl.rollout.types import GenerateFn, is_scored
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
@@ -2395,7 +2391,7 @@ class Controller(Configurable):
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                     lineage=work.lineage,
                 )
-            rewards = [task_reward(r) for r in group.rollouts if is_scored(r)]
+            rewards = [r.reward for r in group.rollouts if is_scored(r)]
             self._record_training_event(
                 "finalized",
                 lineage=work.lineage,
@@ -2442,7 +2438,7 @@ class Controller(Configurable):
             # [buffer trace] classify this completed group's solve status for per-step
             # visibility. full-solve (all rollouts pass) and not-solve (all fail) groups
             # are zero-std -> dropped by drop_zero_std; only partial-solve groups train.
-            _rw = [task_reward(r) for r in rollout_group.rollouts if is_scored(r)]
+            _rw = [r.reward for r in rollout_group.rollouts if is_scored(r)]
             _n = len(_rw)
             _ns = sum(1 for x in _rw if x and x > 0.0)
             _cls = (
