@@ -1680,6 +1680,76 @@ support a useful change within the size limits, write
 `GIVE UP: no-supported-hardening — <why>` and stop.
 """
 
+# Which hardening a student-guided harder rewrite asks for. "student" is the
+# guidance above. "real" grounds the change in researched real-world software
+# behavior: on the r100 Sol arm 82 of 93 accepted hardenings were a decoy, a
+# record to pick, or an input edge case, with a median of +1 solution line, and
+# policies trained on them over-check and fill the context on Terminal-Bench,
+# whose hard tasks are real builds, real formats and real upstream bugs.
+HARDER_GUIDANCE = os.environ.get("EVOLVE_HARDER_GUIDANCE", "student")
+
+_REAL_HARDER_GUIDANCE = """These tasks train an agent for real terminal work, the
+kind Terminal-Bench measures: building, configuring, debugging and repairing
+real software, recovering data in real formats, applying a known algorithm under
+a real constraint. A harder task needs more of that work or deeper knowledge of
+a real system. It does not need more care in reading the workspace.
+
+Start from the student's attempts in `traces/`: what the successful strategy
+did, and which real work the task currently spares it -- a dependency that
+already installs cleanly, a version whose behavior is the one everyone
+remembers, a format reduced to its easy subset, a service that needs no
+configuration.
+
+Then research one real difficulty that fits this task's domain and tools: a
+documented behavior change between two versions of a package the task uses, a
+known issue in an upstream project's tracker together with its fix, a detail of
+a file format or protocol from its specification, a failure an operator of this
+software meets in practice. Your own recollection decides what to look for;
+it is never the source. Your shell has network access: read the primary source
+there -- the project's documentation or changelog page, the issue thread
+through GitHub's REST API (`api.github.com/repos/<owner>/<repo>/issues/<n>`,
+`/releases`), a package's PyPI JSON, the specification, the code at a tag.
+Cite only what you fetched.
+
+The difficulty must be real in this environment. Pin the actual upstream
+artifact it comes from (`package==version`, a repository at a commit, a URL
+with its sha256) in the Dockerfile, and confirm in `./sandbox exec` that the
+behavior the source describes happens here: the error, the wrong output, the
+crash. A library, tool, version or bug that does not exist upstream is not
+allowed, and neither is a vendored imitation of one.
+
+Write `run/hardening.md` before editing the task: the sources by URL with the
+sentence of each that you rely on, the pinned artifacts, the reproduction
+command with the output you observed, what the student must now do that the
+successful attempts did not, and why that is one modest step from the skills
+those attempts show.
+
+These are not hardening, whatever their effect on the solve rate: decoy files,
+a second candidate or stale copy to choose between, a log that contradicts a
+config, an extra edge-case clause for the input, stricter output formatting, a
+longer instruction. Keep the instruction as short as a user would write it:
+the goal and the deliverable. Do not list the pitfalls; the agent meets them
+as error messages, logs and behavior in the environment, the way the real
+software presents them.
+
+The student has 2400 seconds of wall clock per attempt, and generating its own
+turns takes most of that: in measured attempts its commands ran for about 100
+seconds in total. So the reference solution's commands, as `./sandbox check`
+times them, stay well under 300 seconds, and anything slow that is not the
+point of the task -- a large download, a full build of a dependency -- happens
+in the Dockerfile, at image build. What is left to the student is a debug and
+rebuild loop measured in minutes. Its context is limited too: a correct
+solution must not require reading an unbounded build log or data dump.
+
+Preserve the original user goal and requirements unrelated to the change.
+Aim for a modest reduction in this student's solve rate toward mixed success,
+not universal failure; in `run/hardening.md`, write the solved count you
+expect from the next group of the same size as a number ("5 of 8"). If no real
+difficulty that fits this task can be reproduced here, write
+`GIVE UP: no-real-difficulty — <what you searched and why it did not fit>` and
+stop.
+"""
+
 _CALIBRATION_GUIDANCE = (
     """The previous simplification now has all attempts passing.
 Read `traces/previous-simplify.json` and the current attempts. When the record
@@ -3099,7 +3169,11 @@ def evolve_agentic(
             "harder": (_HARDER_JOB_BLIND if blind else _HARDER_JOB).format(
                 solved=solved,
                 attempts=attempts_n,
-                guidance=_CALIBRATION_GUIDANCE if calibration else _STUDENT_HARDER_GUIDANCE,
+                guidance=_CALIBRATION_GUIDANCE
+                if calibration
+                else _REAL_HARDER_GUIDANCE
+                if HARDER_GUIDANCE == "real"
+                else _STUDENT_HARDER_GUIDANCE,
                 seed_lines=seed_size["solution_lines"],
                 seed_asserts=seed_size["verifier_asserts"],
                 growth_bound=(
