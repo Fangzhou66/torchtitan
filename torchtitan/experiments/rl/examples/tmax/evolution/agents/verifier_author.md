@@ -148,6 +148,11 @@ decimal-text encodings that permit it, test a correct value and a distinct wrong
 value that a default binary floating-point parser would round to the same value.
 Establish their difference directly from the decimal tokens and record it in the
 replay contract; a test that changes only digits the parser retains misses this loss.
+These adjacent-value and parser-precision controls apply only where the
+public task makes the value exact. A value the task computes approximately (a
+fit, an estimate, a measurement) is graded within an allowance; a deviation
+inside that allowance is a correct answer, never a wrong control, and every
+wrong control for such a field deviates by more than the allowance.
 For reusable programs, exercise the permitted range of each numeric field that
 affects the result, including identifiers used for matching or ordering. A large
 argument does not test a large output identifier. Put the distinguishing values
