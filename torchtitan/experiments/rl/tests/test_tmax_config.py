@@ -571,3 +571,12 @@ def test_tmax_rollouter_eval_cap_resolution(eval_cap, expected):
     # uses the eval cap, which falls back to the training cap when unset.
     assert rollouter._max_context_tokens == 79872
     assert rollouter._eval_max_context_tokens == expected
+
+
+
+def test_eval_max_turns_env(monkeypatch):
+    monkeypatch.setattr(tmax_config_registry, "_TB2_VAL_DATA", "/data/tb2.jsonl")
+    monkeypatch.delenv("SWE_EVAL_MAX_TURNS", raising=False)
+    assert tmax_config_registry.rl_grpo_qwen3_5_9b_tmax().rollouter.eval_max_turns == 0
+    monkeypatch.setenv("SWE_EVAL_MAX_TURNS", "-1")
+    assert tmax_config_registry.rl_grpo_qwen3_5_9b_tmax().rollouter.eval_max_turns == -1

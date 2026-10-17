@@ -193,6 +193,8 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         # Validation-only agent cap (0 = max_context_tokens). Pair with
         # SWE_EVAL_MAX_MODEL_LEN so the eval generators can hold it.
         eval_max_context_tokens=int(os.environ.get("SWE_EVAL_MAX_CONTEXT_LEN", "0")),
+        # Validation-only turn cap: 0 keeps TMAX_TERMINUS_MAX_TURNS, -1 = no cap.
+        eval_max_turns=int(os.environ.get("SWE_EVAL_MAX_TURNS", "0")),
         evolution_harder_ratio=float(
             os.environ.get("SWE_EVOLUTION_HARDER_RATIO", "1.0")
         ),

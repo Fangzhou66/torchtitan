@@ -263,6 +263,10 @@ def _captured_to_turns(
     return turns
 
 
+# Stand-in for "no turn cap" (Terminus-2 needs an int); the time budget ends the run.
+_UNCAPPED_TURNS = 1_000_000
+
+
 @dataclass(slots=True)
 class _SandboxRolloutDiagnostics:
     sandbox_id: str
@@ -987,6 +991,11 @@ class TMaxRollouter(Rollouter):
         ``max_model_len`` (``Controller.Config.eval_generator_max_model_len``) when
         validation runs a longer context than training."""
 
+        eval_max_turns: int = 0
+        """Turn cap for validation rollouts. 0 (default) keeps the harness default
+        (TMAX_TERMINUS_MAX_TURNS); -1 removes the cap, leaving the agent time budget
+        as the only bound."""
+
         length_penalty: bool = False
         """In-group length penalty on solved training rollouts (off by default).
 
@@ -1063,6 +1072,12 @@ class TMaxRollouter(Rollouter):
         self._eval_max_context_tokens = (
             config.eval_max_context_tokens or config.max_context_tokens
         )
+        if config.eval_max_turns < -1:
+            raise ValueError(
+                f"eval_max_turns must be -1 (no cap), 0 (default) or positive, got "
+                f"{config.eval_max_turns}"
+            )
+        self._eval_max_turns = config.eval_max_turns
         self._reward_mode = config.reward_mode
         self._evolution_harder_ratio = config.evolution_harder_ratio
         self._evolution_easier_ratio = config.evolution_easier_ratio
@@ -1560,6 +1575,10 @@ class TMaxRollouter(Rollouter):
         max_context_tokens = (
             self._eval_max_context_tokens if group_id < 0 else self._max_context_tokens
         )
+        # None keeps the harness default; -1 means no turn cap (time budget only).
+        max_turns = None
+        if group_id < 0 and self._eval_max_turns:
+            max_turns = _UNCAPPED_TURNS if self._eval_max_turns < 0 else self._eval_max_turns
         started_at = time.monotonic()
         started_wall = time.time()
         # Sandbox exec wall-clock, filled by _RootSandbox as the agent runs;
@@ -1695,6 +1714,7 @@ class TMaxRollouter(Rollouter):
                             time_budget_sec=budget_sec,
                             workdir=sample.workdir,
                             max_context_tokens=max_context_tokens,
+                            max_turns=max_turns,
                         )
                     )
                     timing["agent_secs"] = time.monotonic() - agent_at
