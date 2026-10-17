@@ -43,6 +43,10 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
+from torchtitan.experiments.rl.native_ep_partial_pull import (
+    local_expert_range,
+    NativeEPPartialPull,
+)
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
@@ -1446,6 +1450,22 @@ class VLLMGenerator(Actor, Configurable):
         self._dp_weight_broadcaster: DPWeightBroadcaster | None = None
         # cpu_staged_weight_pull: CPU copy of the state dict reused across pulls.
         self._cpu_pull_buffer: dict | None = None
+        # SWE_NATIVE_EP_PARTIAL_PULL=1: a vllm_native expert-parallel rank pulls
+        # only its own experts after the first (full) pull.
+        self._ep_partial_pull: NativeEPPartialPull | None = None
+        if (
+            native
+            and os.environ.get("SWE_NATIVE_EP_PARTIAL_PULL", "0") == "1"
+            and config.parallelism.expert_parallel_degree > 1
+        ):
+            expert_range = local_expert_range(self._get_model())
+            if expert_range is not None:
+                self._ep_partial_pull = NativeEPPartialPull(*expert_range)
+            elif self._rank == 0:
+                logger.warning(
+                    "SWE_NATIVE_EP_PARTIAL_PULL=1 but no contiguous local expert "
+                    "range was found; pulling the full state dict"
+                )
         if config.enable_dp_weight_broadcast:
             unsupported_reason = dp_weight_broadcast_unsupported_reason(
                 data_parallel_degree=config.parallelism.data_parallel_degree,
@@ -2025,7 +2045,14 @@ class VLLMGenerator(Actor, Configurable):
             # The native model is not a torchtitan model, so weights cannot be filled
             # in place by FQN: pull the full state dict (no template). The result is a
             # fresh dict, so it is already safe to fetch while generation runs.
-            staged = await ts.get_state_dict("model_state_dict", direct_rdma=False)
+            if self._ep_partial_pull is not None and self._ep_partial_pull.ready:
+                staged = await self._ep_partial_pull.fetch("model_state_dict")
+            else:
+                staged = await ts.get_state_dict(
+                    "model_state_dict", direct_rdma=False
+                )
+                if self._ep_partial_pull is not None:
+                    self._ep_partial_pull.record(staged)
         else:
             # Async RL uses a StorageVolume snapshot so generators never read the
             # trainer's live GPU tensors while an optimizer step may be mutating them.
@@ -2064,6 +2091,8 @@ class VLLMGenerator(Actor, Configurable):
         if self._backend == "vllm_native":
             # Convert torchtitan layout -> HF, then let vLLM copy + TP-shard.
             hf_state_dict = self._sd_adapter.to_hf(staged)
+            if self._ep_partial_pull is not None and self._ep_partial_pull.ready:
+                hf_state_dict = self._ep_partial_pull.embed_hf(hf_state_dict)
             _t2 = time.perf_counter()
             self._get_model().load_weights(hf_state_dict.items())
             _t3 = time.perf_counter()
