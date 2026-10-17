@@ -639,16 +639,25 @@ def _extra_config() -> list[str]:
     return os.environ.get("EVOLVE_CODEX_EXTRA_CONFIG", "").split()
 
 
+# EVOLVE_CODEX_WEB_SEARCH=live gives sessions codex's web tool (web__run:
+# search_query / open). Off by default, so existing arms keep their tool set.
+WEB_SEARCH = os.environ.get("EVOLVE_CODEX_WEB_SEARCH", "")
+
+
 def _provider_overrides() -> list[str]:
     """The provider settings both drivers pass; the SDK takes them as a list."""
+    search = [f"web_search={WEB_SEARCH}"] if WEB_SEARCH else []
     if ACCOUNT_HOME or os.environ.get("EVOLVE_CODEX_AUTH_FILE"):
-        return ["model_provider=openai"] + _extra_config()
+        return ["model_provider=openai"] + search + _extra_config()
     return [
-        "model_providers.oai.name=openai",
+        # codex 0.149 offers the web tool to a custom provider only when its
+        # name is exactly "OpenAI" (captured requests, 2026-10-17); "openai"
+        # gets none, whatever web_search says.
+        f"model_providers.oai.name={'OpenAI' if WEB_SEARCH else 'openai'}",
         f"model_providers.oai.base_url={API_BASE}",
         "model_providers.oai.env_key=OPENAI_API_KEY",
         "model_provider=oai",
-    ] + _extra_config()
+    ] + search + _extra_config()
 
 
 def _session_cmd(run: SessionRun, cwd: Path, *, resume: str | None) -> list[str]:
@@ -3171,6 +3180,12 @@ def evolve_agentic(
                 attempts=attempts_n,
                 guidance=_CALIBRATION_GUIDANCE
                 if calibration
+                else _REAL_HARDER_GUIDANCE.replace(
+                    "Your shell has network access",
+                    "Search with your web tool to find candidate sources. Your shell "
+                    "also has network access",
+                )
+                if HARDER_GUIDANCE == "real" and WEB_SEARCH
                 else _REAL_HARDER_GUIDANCE
                 if HARDER_GUIDANCE == "real"
                 else _STUDENT_HARDER_GUIDANCE,
