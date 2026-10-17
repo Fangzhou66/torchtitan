@@ -753,6 +753,7 @@ these are the variables that touch them.
 | `TMAX_CONTEXT_WARN_FRAC` | `0.5` | `0.5` | start context notices at 50% of the session budget; `0` disables notices. |
 | `SWE_TB2_VAL_TEMPERATURE` | `1.0` | `1.0` | inline and standalone TB-2.0 evaluation sampling, matching ivuaqcol. |
 | `SWE_TB2_VAL_TOP_P` | `1.0` | `1.0` | TB-2.0 evaluation nucleus sampling, matching ivuaqcol. |
+| `SWE_EVAL_MAX_TURNS` | `0` | `0` | validation-only turn cap: `0` keeps `TMAX_TERMINUS_MAX_TURNS`, `-1` removes it (agent time budget only), `N` caps at N. Use `300` with a 160K eval context: in the 2026-10-17 harder run (eval uncapped) none of the 890 recorded validation rollouts solved past 195 turns, while 50 of them ran 200-1205 turns in degenerate loops (`1 1` / empty `<response>` / `echo N`) and held each eval pass open. |
 | `TMAX_FORMAT_ERROR_FEEDBACK` | unset | `0` | at `0`, a turn with no tool call ends the rollout immediately (open-instruct parity). |
 | `TMAX_TERMINUS_SUMMARIZE` | unset | `0` | upstream defaults this on; the module docstring says "on a 9B it is lethal". |
 | `TT_TERMINAL_ISOLATION` | unset | `1` | cgroup split of the student from the control plane (see "The student and the control plane are separate cgroups"). `0` skips it. |
