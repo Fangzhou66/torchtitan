@@ -60,6 +60,14 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+
+# SWE_TS_REPLICA_DEDUP=1: read each replicated (HSDP) weight region from one
+# TorchStore volume instead of every replica (torchstore_replica_dedup.py).
+if os.environ.get("SWE_TS_REPLICA_DEDUP", "0") == "1":
+    from torchtitan.experiments.rl.torchstore_replica_dedup import install
+
+    install()
+
 logger = logging.getLogger(__name__)
 
 
