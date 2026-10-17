@@ -592,8 +592,10 @@ class _RootSandbox:
 # 2 vCPU sandbox. Measured over a full step-0 pass, only ~2% of the wall clock is token
 # generation (11,927 completion tokens at ~200 tok/s = 60s); ~98% is in-sandbox command
 # execution -- apt, pip, pytest, tmux round trips.
+# 5400 (1.5 h) since 2026-10-16: with single-GPU eval generators a turn takes
+# ~16-20 s instead of ~32-47 s, and the 7200 floor let unsolvable tasks run 1-2 h.
 _DECLARED_AGENT_BUDGET_FLOOR_SEC = int(
-    os.environ.get("SWE_AGENT_TIMEOUT_FLOOR_SEC", "7200")
+    os.environ.get("SWE_AGENT_TIMEOUT_FLOOR_SEC", "5400")
 )
 
 # Seconds to let an ENTRYPOINT reach a state the agent can use. It is a startup
@@ -924,7 +926,7 @@ class TMaxRollouter(Rollouter):
         """Floor on a task's OWN declared budget: ``max(declared, floor)``, so it
         only ever raises a too-small declared budget, never lowers one. Governs the
         TB-2.0 eval (those rows declare 900-12000s); tasks that declare nothing use
-        ``time_budget_sec`` instead. Defaults to SWE_AGENT_TIMEOUT_FLOOR_SEC (7200);
+        ``time_budget_sec`` instead. Defaults to SWE_AGENT_TIMEOUT_FLOOR_SEC (5400);
         the eval recipe pins it so a stray launcher env cannot cap eval budgets."""
 
         eval_timeout_sec: int = 600

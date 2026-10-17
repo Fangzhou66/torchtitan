@@ -1253,14 +1253,14 @@ def rl_grpo_qwen3_5_9b_tmax_tb2_eval() -> Controller.Config:
             data_path=tb2_data, seed=99, holdout_n=0, split="validation", shuffle=False
         ),
         # Pin the eval budget in code so a stray launcher env cannot cap it. TB-2.0
-        # rows declare 900-12000s; the floor raises anything below 7200 (a 120-turn
+        # rows declare 600-12000s; the floor raises anything below 5400 (a 120-turn
         # Terminus-2 episode at ~47s/turn needs it -- a 900 floor left ~60% timing
         # out and read the base at ~0.09 instead of ~0.16). time_budget_sec=3600 is
         # what training gives the few rows that declare nothing. Hardwired, NOT read
         # from SWE_AGENT_TIMEOUT_FLOOR_SEC / SWE_TIME_BUDGET_SEC, so the training
         # launcher's own values (e.g. a 900 floor) can never reach the eval. An
         # eval-only override lives in SWE_EVAL_BUDGET_FLOOR_SEC if ever needed.
-        agent_budget_floor_sec=int(os.environ.get("SWE_EVAL_BUDGET_FLOOR_SEC", "7200")),
+        agent_budget_floor_sec=int(os.environ.get("SWE_EVAL_BUDGET_FLOOR_SEC", "5400")),
         time_budget_sec=int(os.environ.get("SWE_EVAL_TIME_BUDGET_SEC", "3600")),
     )
     config.async_loop = dataclasses.replace(
