@@ -822,7 +822,9 @@ async def terminus_agent(
             llm = _AdapterLLM(
                 task.adapter,
                 session_id=task.session_id,
-                max_context=_MAX_CONTEXT,
+                # Per-task budget (validation can run a longer context than
+                # training); the module default only covers tasks that set none.
+                max_context=task.max_context_tokens or _MAX_CONTEXT,
                 turn_max_tokens=_TURN_MAX_TOKENS,
                 deadline=deadline,
                 context_warn_frac=_CONTEXT_WARN_FRAC,
