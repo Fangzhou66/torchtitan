@@ -162,6 +162,26 @@ class _MicrobatchProfiler:
             logger.info(f"[trainer] profiler top ops by {key}:\n{table}")
 
 
+def _maybe_regional_compile(model: torch.nn.Module) -> None:
+    """SWE_TRAINER_REGIONAL_COMPILE=1: torch.compile each block's feed-forward and
+    norms, leaving attention and GatedDeltaNet eager. Whole-block compile fails on
+    fla's causal_conv1d inside the activation-checkpoint region; these submodules
+    hold most of the unfused elementwise work (~9% of a 9B microbatch)."""
+    if os.environ.get("SWE_TRAINER_REGIONAL_COMPILE", "0") != "1":
+        return
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+    compiled = 0
+    for block in model.layers.children():
+        inner = getattr(block, "_checkpoint_wrapped_module", block)
+        for name in ("feed_forward", "attention_norm", "ffn_norm"):
+            sub = getattr(inner, name, None)
+            if sub is not None:
+                sub.compile(backend="inductor", fullgraph=True)
+                compiled += 1
+    logger.info(f"[trainer] regional compile: {compiled} feed-forward/norm modules")
+
+
 class PolicyTrainer(Actor, Configurable):
     """Updates policy based on collected TrainingSample using TorchTitan components.
 
@@ -518,6 +538,7 @@ class PolicyTrainer(Actor, Configurable):
             ac_config=config.ac_config,
             dump_folder=config.dump_folder,
         )
+        _maybe_regional_compile(model)
 
         model.to_empty(device=device_type)
         with torch.no_grad():
