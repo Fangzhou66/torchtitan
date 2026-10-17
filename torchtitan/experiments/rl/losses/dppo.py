@@ -59,9 +59,23 @@ def entropy_from_logits(logits: torch.Tensor) -> torch.Tensor | None:
         if vocab_sharded:
             return None
         logits = logits.to_local()
+    if os.environ.get("SWE_TRAINER_REGIONAL_COMPILE_WIDE", "0") == "1":
+        global _compiled_entropy
+        if _compiled_entropy is None:
+            _compiled_entropy = torch.compile(_entropy, dynamic=True)
+        return _compiled_entropy(logits)
+    return _entropy(logits)
+
+
+def _entropy(logits: torch.Tensor) -> torch.Tensor:
     logits_f = logits.float()
     pd = torch.nn.functional.softmax(logits_f, dim=-1)
     return torch.logsumexp(logits_f, dim=-1) - (pd * logits_f).sum(dim=-1)
+
+
+# Fuses the vocab-wide passes of the monitoring-only entropy (~0.5 s per 9B
+# microbatch eager); built on first use under SWE_TRAINER_REGIONAL_COMPILE_WIDE.
+_compiled_entropy = None
 
 # SWE_DEBUG_MAX_LOGDIFF=1 debug: only log/dump chunks whose worst |diff| exceeds
 # this, and show a +/-window of tokens around the argmax. Fixed constants (one env

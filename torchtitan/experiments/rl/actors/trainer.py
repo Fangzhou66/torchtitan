@@ -172,13 +172,23 @@ def _maybe_regional_compile(model: torch.nn.Module) -> None:
     torch._dynamo.config.capture_scalar_outputs = True
     torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
     compiled = 0
+    # SWE_TRAINER_REGIONAL_COMPILE_WIDE=1 also compiles the norms inside attention:
+    # GatedDeltaNet's output RMSNormGated (attn.norm), softmax attention's q/k
+    # norms, and the final norm.
+    wide = os.environ.get("SWE_TRAINER_REGIONAL_COMPILE_WIDE", "0") == "1"
     for block in model.layers.children():
         inner = getattr(block, "_checkpoint_wrapped_module", block)
-        for name in ("feed_forward", "attention_norm", "ffn_norm"):
-            sub = getattr(inner, name, None)
+        subs = [getattr(inner, n, None) for n in ("feed_forward", "attention_norm", "ffn_norm")]
+        if wide:
+            attn = getattr(inner, "attn", None)
+            subs += [getattr(attn, n, None) for n in ("norm", "q_norm", "k_norm")]
+        for sub in subs:
             if sub is not None:
                 sub.compile(backend="inductor", fullgraph=True)
                 compiled += 1
+    if wide and getattr(model, "norm", None) is not None:
+        model.norm.compile(backend="inductor", fullgraph=True)
+        compiled += 1
     logger.info(f"[trainer] regional compile: {compiled} feed-forward/norm modules")
 
 
