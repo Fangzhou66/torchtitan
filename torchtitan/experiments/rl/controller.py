@@ -413,6 +413,10 @@ class Controller(Configurable):
         await controller.run()
     """
 
+    # One trainer slice per DP rank under send_trainer_microbatch_columns, set in
+    # setup_async. Empty means forward_backward goes to the whole trainer mesh.
+    _trainer_by_dp_rank: tuple | list = ()
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         """Top-level config for RL training."""
@@ -454,6 +458,18 @@ class Controller(Configurable):
         generator_compile: CompileConfig | None = None
         """torch.compile config for the torchtitan_wrapper generators only. ``None``
         uses ``compile``. Lets the generator compile while the trainer stays eager."""
+
+        eval_pull_only_before_validation: bool = False
+        """Pull new weights into the eval generators only on steps followed by a
+        validation pass, instead of on every idle step. The trainer waits for the
+        eval pull, so skipping it on the other steps keeps those readers off the
+        trainer hosts. Each pass still scores the weights of the step it follows."""
+
+        send_trainer_microbatch_columns: bool = False
+        """Send each trainer DP rank only its own microbatch instead of the whole
+        ``[dp_degree]`` row, so every rank stops receiving and unpickling the other
+        ranks' data. Requires the trainer's torch ranks to follow the mesh order as
+        ``(dp, cp, tp)``; setup checks it."""
 
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
@@ -1306,6 +1322,9 @@ class Controller(Configurable):
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
 
+        if self.config.send_trainer_microbatch_columns:
+            await self._slice_trainer_by_dp_rank()
+
         # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
@@ -1932,6 +1951,65 @@ class Controller(Configurable):
                 "failed to mirror validation to the W&B run at policy_version %d",
                 policy_version,
             )
+
+    def _include_eval_pull(self, *, will_validate: bool) -> bool:
+        """Whether this step's weight sync also pulls into the eval generators."""
+        if self._validation_pass_in_flight():
+            return False
+        return will_validate or not self.config.eval_pull_only_before_validation
+
+    async def _slice_trainer_by_dp_rank(self) -> None:
+        """Cut the trainer mesh into one slice per DP rank and check the layout.
+
+        The trainer lays torch ranks out as (dp, cp, tp) with no PP, so each DP
+        rank's cp * tp ranks are consecutive in mesh order. If that drifts, a TP
+        group would get different microbatches, so each slice's ranks must report
+        the same DP rank.
+        """
+        trainer_dp_cp_tp = self.trainer.flatten("rank").split(
+            rank=("dp", "cp_tp"), dp=self.trainer_dp_degree
+        )
+        self._trainer_by_dp_rank = [
+            trainer_dp_cp_tp.slice(dp=dp_rank)
+            for dp_rank in range(self.trainer_dp_degree)
+        ]
+        for dp_rank, trainer_at_dp_rank in enumerate(self._trainer_by_dp_rank):
+            reported = set((await trainer_at_dp_rank.get_dp_rank.call()).values())
+            if reported != {dp_rank}:
+                raise RuntimeError(
+                    f"Trainer ranks at DP rank {dp_rank} report DP ranks {reported}; "
+                    "send_trainer_microbatch_columns assumes the trainer orders "
+                    "ranks as (dp, cp, tp)."
+                )
+        logger.info(
+            f"Sending each of {self.trainer_dp_degree} trainer DP ranks only its "
+            "own microbatch"
+        )
+
+    async def _trainer_forward_backward(
+        self,
+        microbatch: list,
+        num_loss_denominator_tokens: int,
+        num_packed_valid_tokens: int | None,
+    ):
+        """Run one microbatch on the trainer and return the rank-0 slice's result
+        (whole mesh by default; one call per DP rank with its own microbatch under
+        send_trainer_microbatch_columns)."""
+        if not self._trainer_by_dp_rank:
+            return await self.trainer.forward_backward.call(
+                microbatch, num_loss_denominator_tokens, num_packed_valid_tokens
+            )
+        results = await asyncio.gather(
+            *(
+                trainer_at_dp_rank.forward_backward.call(
+                    [microbatch[dp_rank]],
+                    num_loss_denominator_tokens,
+                    num_packed_valid_tokens,
+                )
+                for dp_rank, trainer_at_dp_rank in enumerate(self._trainer_by_dp_rank)
+            )
+        )
+        return results[0]
 
     def _validation_pass_in_flight(self) -> bool:
         """True while a background validation pass is still running.
@@ -2591,7 +2669,7 @@ class Controller(Configurable):
                         )
                         microbatch_metrics.append(
                             self._get_rank_0_value(
-                                await self.trainer.forward_backward.call(
+                                await self._trainer_forward_backward(
                                     microbatch,
                                     packed.num_loss_denominator_tokens,
                                     packed.num_packed_valid_tokens,
@@ -2633,19 +2711,22 @@ class Controller(Configurable):
                 ), step_timer.record("timing/step/push_model_state_dict"):
                     await self.trainer.push_model_state_dict.call()
                 logger.info(f"[trainer_loop] step {step}: weights pushed")
-                # The eval generators pull whenever they are idle, inside this
-                # weight-sync window (the only point where TorchStore still holds
-                # optim_result.policy_version). Pulling every idle step -- not only
-                # evaluated ones -- keeps them exercising the same path as a training
-                # generator instead of sitting untouched between passes. A pass in
-                # flight keeps its weights: pulling now would swap them mid-pass, and
+                # The eval generators pull inside this weight-sync window (the only
+                # point where TorchStore still holds optim_result.policy_version).
+                # By default they pull on every idle step -- not only evaluated ones
+                # -- so they exercise the same path as a training generator instead
+                # of sitting untouched between passes; eval_pull_only_before_validation
+                # trades that for a shorter sync on the other steps. A pass in flight
+                # keeps its weights: pulling now would swap them mid-pass, and
                 # _start_async_validation skips this step anyway.
                 with sl.log_trace_span(
                     "generator_pull_model_state_dict"
                 ), step_timer.record("timing/step/pull_model_state_dict"):
                     await self._pull_generator_weights(
                         policy_version=optim_result.policy_version,
-                        include_eval=not self._validation_pass_in_flight(),
+                        include_eval=self._include_eval_pull(
+                            will_validate=will_validate
+                        ),
                     )
                 self._generator_policy_version = optim_result.policy_version
                 logger.info(f"[trainer_loop] step {step}: weights pulled (step done)")

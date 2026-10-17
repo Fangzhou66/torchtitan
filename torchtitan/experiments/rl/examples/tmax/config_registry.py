@@ -1006,6 +1006,17 @@ def rl_grpo_qwen3_5_9b_tmax(
         initial_policy_version=int(os.environ.get("SWE_INITIAL_POLICY_VERSION", "0")),
     )
     config.training_heartbeat_interval_sec = 30
+    # SWE_EVAL_PULL_ONLY_BEFORE_VALIDATION=1: eval generators pull new weights only
+    # on steps followed by a validation pass (Controller.eval_pull_only_before_validation),
+    # so the other steps' weight sync waits on the training generators alone.
+    config.eval_pull_only_before_validation = (
+        os.environ.get("SWE_EVAL_PULL_ONLY_BEFORE_VALIDATION", "0") == "1"
+    )
+    # SWE_TRAINER_COLUMN_SEND=1: send each trainer DP rank only its own microbatch
+    # (Controller.send_trainer_microbatch_columns) instead of the whole row.
+    config.send_trainer_microbatch_columns = (
+        os.environ.get("SWE_TRAINER_COLUMN_SEND", "0") == "1"
+    )
     config.isolate_rollout_artifacts = True
     config.trainer.checkpoint_training_data = (
         os.environ.get("SWE_CKPT_CONTROLLER_DATA", "0") == "1"

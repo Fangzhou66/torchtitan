@@ -398,11 +398,31 @@ class PolicyTrainer(Actor, Configurable):
         if self.config.checkpoint_training_data:
             self._controller_training_data = state_dict["controller_training_data"]
 
+    def _select_local_microbatch(
+        self, training_data: list[TrainingMicrobatch]
+    ) -> TrainingMicrobatch:
+        """This rank's microbatch: from a full ``[dp_degree]`` row, or the single
+        microbatch the controller sent to this DP rank alone."""
+        if len(training_data) == self.dp_size:
+            return training_data[self.dp_rank]
+        if len(training_data) == 1:
+            return training_data[0]
+        raise ValueError(
+            f"forward_backward got {len(training_data)} microbatches; expected "
+            f"{self.dp_size} (one per DP rank) or 1 (this rank's own)"
+        )
+
     @endpoint
     async def get_policy_version(self) -> int:
         """Current policy version: after load(), the step a resume restored from
         (0 if fresh). The controller uses it to resume and re-sync generators."""
         return self.policy_version
+
+    @endpoint
+    async def get_dp_rank(self) -> int:
+        """This rank's data-parallel rank; the controller checks its per-DP-rank
+        mesh slices against it before sending each rank only its microbatch."""
+        return self.dp_rank
 
     @endpoint
     async def get_training_data_state(self) -> bytes:
@@ -555,8 +575,10 @@ class PolicyTrainer(Actor, Configurable):
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            training_data: List of TrainingMicrobatch, one per DP rank. Local rank
-                picks training_data[self.dp_rank].
+            training_data: List of TrainingMicrobatch, one per DP rank, and the
+                local rank picks training_data[self.dp_rank]; or, when the
+                controller sends each DP rank only its own microbatch, a
+                one-element list holding it.
             num_loss_denominator_tokens: Loss scale denominator, summed across all
                 DP ranks for this step before sharding (TrainingBatch.
                 num_loss_denominator_tokens): every valid response token by
@@ -588,7 +610,7 @@ class PolicyTrainer(Actor, Configurable):
             )
         model = self.model_parts[0]
 
-        local_batch = training_data[self.dp_rank]
+        local_batch = self._select_local_microbatch(training_data)
         device = self.device
         token_ids = local_batch.token_ids.to(device)
         labels = local_batch.labels.to(device)

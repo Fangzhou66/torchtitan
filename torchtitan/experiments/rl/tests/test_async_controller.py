@@ -1247,3 +1247,132 @@ def test_validation_max_tokens_override(override: int | None, expected: int) -> 
         assert (seen["sampling"].temperature, seen["sampling"].top_p) == (0.7, 0.95)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("only_before_validation", [False, True])
+def test_eval_pull_schedule(only_before_validation: bool) -> None:
+    """Default: eval generators pull on every idle step. With
+    eval_pull_only_before_validation they pull only on steps followed by a pass,
+    and never while a pass is in flight."""
+
+    async def run() -> None:
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            eval_pull_only_before_validation=only_before_validation
+        )
+        controller._validation_task = None
+        assert controller._include_eval_pull(will_validate=True)
+        assert controller._include_eval_pull(will_validate=False) is (
+            not only_before_validation
+        )
+        controller._validation_task = asyncio.create_task(asyncio.Event().wait())
+        try:
+            assert not controller._include_eval_pull(will_validate=True)
+            assert not controller._include_eval_pull(will_validate=False)
+        finally:
+            controller._validation_task.cancel()
+            await asyncio.gather(controller._validation_task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_eval_pull_only_before_validation_versions() -> None:
+    """Over a run with interval 3, eval generators pull only at the validated steps,
+    and each pull carries that step's policy version."""
+    validation = ValidationConfig(num_samples=1, interval=3, run_async=True)
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(eval_pull_only_before_validation=True)
+    controller._validation_task = None
+    pulled = [
+        step
+        for step in range(1, 8)
+        if controller._include_eval_pull(
+            will_validate=_will_validate_after_step(
+                validation=validation, step=step, num_training_steps=7
+            )
+        )
+    ]
+    assert pulled == [3, 6, 7]
+
+
+class _FakeEndpoint:
+    def __init__(self, fn):
+        self._fn = fn
+
+    async def call(self, *args):
+        return self._fn(*args)
+
+
+class _FakeValueMesh:
+    def __init__(self, values):
+        self._values = values
+
+    def values(self):
+        return list(self._values)
+
+    def get(self, i):
+        return self._values[i]
+
+
+def _fake_trainer_slice(dp_rank, sent):
+    def fwd_bwd(microbatches, num_den, num_valid):
+        sent.append((dp_rank, list(microbatches), num_den, num_valid))
+        return _FakeValueMesh([{"loss/mean": float(dp_rank)}])
+
+    return SimpleNamespace(
+        forward_backward=_FakeEndpoint(fwd_bwd),
+        get_dp_rank=_FakeEndpoint(lambda: _FakeValueMesh([dp_rank])),
+    )
+
+
+def test_trainer_forward_backward_sends_each_dp_rank_its_column() -> None:
+    sent = []
+    controller = object.__new__(Controller)
+    controller._trainer_by_dp_rank = [_fake_trainer_slice(r, sent) for r in range(3)]
+    result = asyncio.run(
+        controller._trainer_forward_backward(["mb0", "mb1", "mb2"], 100, 90)
+    )
+    assert sorted(sent) == [
+        (0, ["mb0"], 100, 90),
+        (1, ["mb1"], 100, 90),
+        (2, ["mb2"], 100, 90),
+    ]
+    assert controller._get_rank_0_value(result) == {"loss/mean": 0.0}
+
+
+def test_trainer_forward_backward_default_sends_whole_row() -> None:
+    sent = []
+    controller = object.__new__(Controller)
+
+    def fwd_bwd(microbatches, num_den, num_valid):
+        sent.append(list(microbatches))
+        return _FakeValueMesh([{"loss/mean": 1.0}])
+
+    controller.trainer = SimpleNamespace(forward_backward=_FakeEndpoint(fwd_bwd))
+    asyncio.run(controller._trainer_forward_backward(["mb0", "mb1"], 10, 9))
+    assert sent == [["mb0", "mb1"]]
+
+
+def test_slice_trainer_by_dp_rank_rejects_wrong_layout() -> None:
+    sent = []
+    slices = [_fake_trainer_slice(r, sent) for r in (0, 2, 1)]  # ranks out of order
+
+    class _Mesh:
+        def flatten(self, name):
+            return self
+
+        def split(self, **kwargs):
+            return self
+
+        def slice(self, dp):
+            return slices[dp]
+
+    controller = object.__new__(Controller)
+    controller.trainer = _Mesh()
+    controller.trainer_dp_degree = 3
+    with pytest.raises(RuntimeError, match="DP rank 1"):
+        asyncio.run(controller._slice_trainer_by_dp_rank())
+
+    slices[:] = [_fake_trainer_slice(r, sent) for r in range(3)]
+    asyncio.run(controller._slice_trainer_by_dp_rank())
+    assert len(controller._trainer_by_dp_rank) == 3
