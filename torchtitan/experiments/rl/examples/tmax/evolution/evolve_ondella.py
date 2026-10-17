@@ -72,7 +72,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1285,6 +1285,30 @@ def candidate_row(package: Path, input_row: dict, meta: dict) -> dict:
     return row
 
 
+def fold_workers() -> int:
+    """EVOLVE_FOLD_WORKERS: threads preparing one fold's packages (1 = serial)."""
+    n = int(os.environ.get("EVOLVE_FOLD_WORKERS", "8"))
+    if n < 1:
+        raise ValueError("EVOLVE_FOLD_WORKERS must be at least 1")
+    return n
+
+
+def _prepare_fold_row(
+    package: Path, input_line: str, meta: dict, policy_canary: dict
+) -> dict:
+    """Strip one package and build its row. Touches only that package."""
+    strip_harness(package)
+    # The directory is `package` now and `r<N>` once renamed, so the row's
+    # identity is passed rather than read off the name; so is the hook, which
+    # the package never held, and so are the row's protected lists -- unless
+    # the package ships its own tests/protected_paths.json, which pack.to_row
+    # lets override them.
+    row = candidate_row(package, json.loads(input_line), meta)
+    if policy_canary.get("ok") and content_hash(row) != policy_canary["candidate_sha256"]:
+        raise ValueError("candidate row changed after its policy canary")
+    return row
+
+
 def fold(root: layout.Root, accepted: list[dict]) -> int | None:
     """The accepted rewrites given into one new mix version.
 
@@ -1321,9 +1345,9 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
             iid = json.loads(ln)["metadata"]["instance_id"]
             rows[iid] = ln
             order.append(iid)
-    folded = []
+    gated: list[tuple[dict, str, int, dict]] = []
     for h in accepted:
-        meta, rewrite = h["meta"], h["rewrite"]
+        meta = h["meta"]
         tid, n = meta["task"], int(meta["input_rev"])
         task = root.evolution.task(tid)
         target = task.rev(n + 1)
@@ -1347,16 +1371,37 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
                 meta["route"] = "invalid_signal"
                 _finish(h, "kept", stage="policy_canary_expired", reason="current-policy admission expired before publication")
                 continue
+        gated.append((h, tid, n, policy_canary))
+
+    # Each package's strip and row build touch only that package, so they run
+    # in parallel; everything after is serial and in batch order. A second
+    # rewrite of a task in one batch builds on the first's row, so it is
+    # prepared serially below, exactly as before.
+    t_prep = time.monotonic()
+    prepared: dict[int, Future] = {}
+    first: dict[str, int] = {}
+    for i, (_h, tid, _n, _pc) in enumerate(gated):
+        first.setdefault(tid, i)
+    workers = min(fold_workers(), len(first))
+    if workers > 1:
+        with ThreadPoolExecutor(workers, thread_name_prefix="evolve-fold") as pool:
+            for i in first.values():
+                h, tid, _n, pc = gated[i]
+                prepared[i] = pool.submit(
+                    _prepare_fold_row, h["rewrite"].package, rows[tid], h["meta"], pc
+                )
+    prep_sec = time.monotonic() - t_prep
+
+    t_commit = time.monotonic()
+    folded = []
+    for i, (h, tid, n, policy_canary) in enumerate(gated):
         try:
-            strip_harness(rewrite.package)
-            # The directory is `package` now and `r<N>` once renamed, so the
-            # row's identity is passed rather than read off the name; so is
-            # the hook, which the package never held, and so are the row's
-            # protected lists -- unless the package ships its own
-            # tests/protected_paths.json, which pack.to_row lets override them.
-            row = candidate_row(rewrite.package, json.loads(rows[tid]), meta)
-            if policy_canary.get("ok") and content_hash(row) != policy_canary["candidate_sha256"]:
-                raise ValueError("candidate row changed after its policy canary")
+            if i in prepared:
+                row = prepared[i].result()
+            else:
+                row = _prepare_fold_row(
+                    h["rewrite"].package, rows[tid], h["meta"], policy_canary
+                )
         except Exception as e:  # noqa: BLE001 -- one malformed package, not the round
             _finish(h, "failed", stage="fold", reason=f"{type(e).__name__}: {e}")
             continue
@@ -1405,6 +1450,14 @@ def fold(root: layout.Root, accepted: list[dict]) -> int | None:
         len(order),
         len(folded),
         path.name,
+    )
+    log.info(
+        "fold timing: prep %.1fs for %d rewrites on %d workers (parallel), "
+        "commit %.1fs (serial)",
+        prep_sec,
+        len(prepared),
+        max(workers, 1),
+        time.monotonic() - t_commit,
     )
     return version
 
