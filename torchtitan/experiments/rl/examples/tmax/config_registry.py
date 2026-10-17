@@ -102,9 +102,11 @@ _TB2_VAL_MAX_TOKENS = int(os.environ.get("SWE_TB2_VAL_MAX_TOKENS", "0")) or None
 # generator's vLLM max_model_len AND the trainer batcher's packing width: both are
 # raised together (the controller mirrors the batcher width into the trainer
 # seq_len), or a full episode is truncated by vLLM / dropped during packing.
-# SWE_TMAX_CONTEXT overrides both at once (see _tmax_context); keep the agent-side
-# SWE_MAX_CONTEXT_LEN below it by the per-turn headroom the launcher uses.
+# SWE_TMAX_CONTEXT overrides both at once (see _tmax_context). The agent-side
+# budget SWE_MAX_CONTEXT_LEN defaults to that context minus a small headroom, so
+# the agent ends a rollout before vLLM would reject it.
 _TMAX_9B_CONTEXT = 65536
+_AGENT_CONTEXT_HEADROOM = 2048
 _TMAX_9B_PER_TURN_TOKENS = 16384
 # 27B terminus default per-turn cap (TMAX_TURN_MAX_TOKENS overrides). Terminus-2
 # thinks for longer per step than vanillux, so the 9B's 16384 truncates its turns.
@@ -189,7 +191,11 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         rollout_concurrency=int(os.environ.get("SWE_ROLLOUT_CONCURRENCY", "16")),
         time_budget_sec=int(os.environ.get("SWE_TIME_BUDGET_SEC", "2400")),
         eval_timeout_sec=int(os.environ.get("TMAX_EVAL_TIMEOUT_SEC", "600")),
-        max_context_tokens=int(os.environ.get("SWE_MAX_CONTEXT_LEN", "32768")),
+        max_context_tokens=int(
+            os.environ.get(
+                "SWE_MAX_CONTEXT_LEN", _tmax_context() - _AGENT_CONTEXT_HEADROOM
+            )
+        ),
         # Validation-only agent cap (0 = max_context_tokens). Pair with
         # SWE_EVAL_MAX_MODEL_LEN so the eval generators can hold it.
         eval_max_context_tokens=int(os.environ.get("SWE_EVAL_MAX_CONTEXT_LEN", "0")),
