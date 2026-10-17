@@ -124,7 +124,6 @@ from torchtitan.experiments.rl.rollout.types import (
     RolloutTurn,
     task_reward,
     TASK_REWARD_KEY,
-    TURN_ADVANTAGE_OFFSETS_KEY,
 )
 from torchtitan.experiments.rl.rubrics import Rubric
 from torchtitan.experiments.rl.types import RolloutTurnID
@@ -264,23 +263,6 @@ def _captured_to_turns(
     if turns and pending_env:
         turns[-1].env_messages = pending_env
     return turns
-
-
-def _rollout_turn_indices(
-    captured: list[CapturedTurn], captured_indices: list[int]
-) -> list[int]:
-    """Map adapter capture indices to the RolloutTurn indices of ``_captured_to_turns``,
-    which drops empty-completion turns; a dropped turn maps to nothing."""
-    wanted = set(captured_indices)
-    indices: list[int] = []
-    turn_idx = 0
-    for capture_idx, ct in enumerate(captured):
-        if not ct.completion_token_ids:
-            continue
-        if capture_idx in wanted:
-            indices.append(turn_idx)
-        turn_idx += 1
-    return indices
 
 
 # Stand-in for "no turn cap" (Terminus-2 needs an int); the time budget ends the run.
@@ -1064,16 +1046,6 @@ class TMaxRollouter(Rollouter):
         """Largest total format-error penalty per rollout. Must be in [0, 1) so a
         sparse solve still outranks every failure."""
 
-        format_error_turn_advantage: float = 0.0
-        """Subtracted from the advantage of each format-error turn's completion
-        tokens on training rollouts (0 = off).
-
-        Per turn, so it does not need in-group variance: when every sibling makes
-        the same error, ``format_error_penalty`` cancels in the centering while
-        this still pushes the erroneous turns down. Needs a harness that
-        attributes errors to turns (``AgentRun.format_error_turns``; Terminus).
-        """
-
     def __init__(self, config: Config) -> None:
         # Before super(), which builds the datasets: a typo in a knob that changes
         # what reward means should fail on the spot, not behind a data error.
@@ -1103,8 +1075,6 @@ class TMaxRollouter(Rollouter):
             raise ValueError("length_penalty_min_pass_rate must be in [0, 1]")
         if config.format_error_penalty < 0:
             raise ValueError("format_error_penalty must be >= 0")
-        if config.format_error_turn_advantage < 0:
-            raise ValueError("format_error_turn_advantage must be >= 0")
         max_shaping = config.format_error_penalty_cap + (
             config.length_penalty_max if config.length_penalty else 0.0
         )
@@ -1145,7 +1115,6 @@ class TMaxRollouter(Rollouter):
         self._length_penalty_min_pass_rate = config.length_penalty_min_pass_rate
         self._format_error_penalty = config.format_error_penalty
         self._format_error_penalty_cap = config.format_error_penalty_cap
-        self._format_error_turn_advantage = config.format_error_turn_advantage
         # The CTRF read is one extra sandbox exec per graded rollout, and the Daytona
         # API rate limit is the throughput ceiling at high rollout concurrency -- so
         # it is opt-in for metrics, and mandatory when it feeds the reward.
@@ -1330,8 +1299,6 @@ class TMaxRollouter(Rollouter):
         # After the length penalty, so task_reward keeps what the metrics saw before.
         if group_id >= 0 and self._format_error_penalty > 0:
             group_metrics += self._apply_format_error_penalty(rollouts)
-        if group_id >= 0 and self._format_error_turn_advantage > 0:
-            group_metrics += self._apply_format_error_turn_offsets(rollouts)
 
         # Group reward-shape metrics. With evolution_harder_ratio < 1, evolution
         # additionally hardens high-success mixed groups; these metrics retain
@@ -1446,35 +1413,6 @@ class TMaxRollouter(Rollouter):
         return [
             m.Metric("rollout/format_error_penalty_mean", m.Mean.from_list(penalties)),
             m.Metric("rollout/shaped_reward_mean", m.Mean.from_list(shaped)),
-        ]
-
-    def _apply_format_error_turn_offsets(
-        self, rollouts: list[Rollout]
-    ) -> list[m.Metric]:
-        """Attach ``-format_error_turn_advantage`` to each scored rollout's
-        format-error turns (``diagnostics[TURN_ADVANTAGE_OFFSETS_KEY]``), which the
-        sample builder adds to those turns' advantage. Training groups only."""
-        if not self._format_error_turn_advantage:
-            return []
-        offset = -self._format_error_turn_advantage
-        num_turns = num_offset_turns = 0
-        for rollout in rollouts:
-            if not is_scored(rollout):
-                continue
-            error_turns = rollout.diagnostics.get("format_error_turns") or []
-            assert isinstance(error_turns, list)
-            rollout.diagnostics[TURN_ADVANTAGE_OFFSETS_KEY] = {
-                turn_idx: offset for turn_idx in error_turns
-            }
-            num_turns += len(rollout.turns)
-            num_offset_turns += len(error_turns)
-        if not num_turns:
-            return []
-        return [
-            m.Metric(
-                "rollout/format_error_turn_frac",
-                m.Mean(float(num_offset_turns), count=float(num_turns)),
-            )
         ]
 
     # Extra initial guard headroom for the sandbox-creation queue. After a restart
@@ -1661,9 +1599,6 @@ class TMaxRollouter(Rollouter):
         submitted = False
         baseline_digests: dict[str, str] | None = None
         fmt_errors = 0  # total format errors this rollout (from run_vanillux_loop)
-        # Adapter capture indices of the format-error turns, when the harness
-        # attributes them (Terminus); mapped to RolloutTurn indices below.
-        fmt_error_captures: list[int] = []
         # Default for the timeout/exception paths where run_vanillux_loop never
         # returned (it sets its own reason on the normal path).
         finish_reason = "error"
@@ -1853,7 +1788,6 @@ class TMaxRollouter(Rollouter):
                     # trace, since a graded rollout is what the reward reflects.
                     submitted = agent_run.submitted is not False
                     fmt_errors = agent_run.format_errors
-                    fmt_error_captures = agent_run.format_error_turns
                     finish_reason = agent_run.finish_reason
                     # The harness's own turn count, which is what decides
                     # finish_reason (a harness reports hit_max_turns off ITS counter).
@@ -2021,7 +1955,6 @@ class TMaxRollouter(Rollouter):
         )
 
         turns = _captured_to_turns(captured, group_id, rollout_idx)
-        fmt_error_turns = _rollout_turn_indices(captured, fmt_error_captures)
 
         # Load-bearing invariant: the off-policy age filter (controller) takes
         # min()/max() over each sample's turn policy versions, which TypeErrors
@@ -2173,9 +2106,6 @@ class TMaxRollouter(Rollouter):
                     "finish_reason": finish_reason,
                     "agent_turns": agent_turns,
                     "format_errors": fmt_errors,
-                    # RolloutTurn indices of the format errors the harness
-                    # attributed to a turn (Terminus); see AgentRun.
-                    "format_error_turns": fmt_error_turns,
                     "submitted": submitted,
                     "infra_failed": diagnostics.infra_failed,
                     "failure": diagnostics.failure,

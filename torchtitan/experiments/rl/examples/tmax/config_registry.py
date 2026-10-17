@@ -244,12 +244,6 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         format_error_penalty_cap=float(
             os.environ.get("SWE_FORMAT_ERROR_PENALTY_CAP", "0.5")
         ),
-        # Per-turn version (TMaxRollouter.Config.format_error_turn_advantage), off
-        # at 0: each format-error turn's tokens train at advantage - this value,
-        # which still acts when every sibling makes the error.
-        format_error_turn_advantage=float(
-            os.environ.get("SWE_FORMAT_ERROR_TURN_ADV", "0")
-        ),
     )
 
 

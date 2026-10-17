@@ -198,19 +198,6 @@ def task_reward(rollout: Rollout) -> float | None:
     return float(value) if isinstance(value, (int, float)) else rollout.reward
 
 
-TURN_ADVANTAGE_OFFSETS_KEY = "turn_advantage_offsets"
-"""``Rollout.diagnostics`` key: ``{turn index: offset}`` added to the rollout's
-advantage on that turn's completion tokens (training groups only)."""
-
-
-def turn_advantage_offsets(rollout: Rollout) -> dict[int, float]:
-    """Nonzero per-turn advantage offsets a rollouter attached; empty when none."""
-    value = rollout.diagnostics.get(TURN_ADVANTAGE_OFFSETS_KEY)
-    if not isinstance(value, dict):
-        return {}
-    return {int(turn): float(offset) for turn, offset in value.items() if offset}
-
-
 @dataclass(kw_only=True, slots=True)
 class RolloutGroup:
     group_id: int
