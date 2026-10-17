@@ -289,6 +289,12 @@ class PolicyTrainer(Actor, Configurable):
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
         gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
         self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
+        # SWE_SKIP_FROZEN_WEIGHT_SYNC=1: push frozen params (the vision tower) only
+        # on the first push; they never change, and each one costs a TorchStore
+        # request per FSDP shard on every generator pull.
+        self._skip_frozen_sync = os.environ.get("SWE_SKIP_FROZEN_WEIGHT_SYNC") == "1"
+        self._pushed_once = False
+        self._logged_frozen_skip = False
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -855,6 +861,18 @@ class PolicyTrainer(Actor, Configurable):
         this returns and any number of generators can read the staged copy.
         """
         state_dict = self.model.state_dict()
+        if self._skip_frozen_sync and self._pushed_once:
+            # Keyed by state_dict names: named_parameters() keeps wrapper prefixes
+            # (activation checkpointing) that state_dict() strips.
+            frozen = {
+                k
+                for k, v in self.model.state_dict(keep_vars=True).items()
+                if isinstance(v, torch.nn.Parameter) and not v.requires_grad
+            }
+            state_dict = {k: v for k, v in state_dict.items() if k not in frozen}
+            if not self._logged_frozen_skip:
+                logger.info(f"Weight push skips {len(frozen)} frozen params")
+                self._logged_frozen_skip = True
         if self._transfer_dtype is not None:
             # TorchStore's generic transfer_dtype cast cannot distinguish model
             # parameters from buffers. Cast parameters here while preserving
@@ -868,3 +886,4 @@ class PolicyTrainer(Actor, Configurable):
             "model_state_dict",
             direct_rdma=False,
         )
+        self._pushed_once = True
