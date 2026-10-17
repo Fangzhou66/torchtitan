@@ -699,3 +699,15 @@ def test_a_rewrite_that_leaves_the_answer_open_blocks_instead_of_widening(tmp_pa
     (before / "instruction.md").write_text("Fit the peak. Use the 2500-2900 window.\n")
     (after / "instruction.md").write_text("Fit the peak.\n")
     assert "removes no requirement" in ec._instruction_change_note(before, after)
+
+
+def test_sub_tolerance_controls_are_correct_answers_not_wrong_ones():
+    """On raman v2, 11 of 13 abandoned rewrites ended on an independent 'wrong'
+    control that changed fitted values by 1e-13..1e-37: valid under the fit
+    tolerance, so the verifier rightly accepted it and the rewrite was given up.
+    The parser-precision controls are now limited to exact values."""
+    rule = "apply only where the\npublic task makes the value exact"
+    assert rule in ec.VERIFIER_SPEC.read_text()
+    probes = ec.VERIFIER_SPEC.with_name("independent_verifier_probes.md").read_text()
+    assert rule in probes
+    assert "deviates by more than the allowance" in probes

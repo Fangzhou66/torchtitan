@@ -58,6 +58,11 @@ wrong value beyond a default binary floating-point parser's precision, so that
 parser would round both to the same value. Establish the difference from the
 original decimal tokens, without an intermediate floating-point conversion,
 and record the exact values and the collapsed value in the contract.
+These adjacent-value and parser-precision controls apply only where the
+public task makes the value exact. A value the task computes approximately (a
+fit, an estimate, a measurement) is graded within an allowance; a deviation
+inside that allowance is a correct answer, never a wrong control, and every
+wrong control for such a field deviates by more than the allowance.
 Then save `wrong-1.sh`, `wrong-2.sh`, and so on. Each wrong implementation should
 make a specific semantic mistake while otherwise completing the task. Derive
 these mistakes from the public requirements, including independently falsifiable
