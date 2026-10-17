@@ -84,6 +84,10 @@ class AgentRun:
     format_errors: int = 0
     """Responses the harness could not parse into an action."""
 
+    format_error_turns: list[int] = field(default_factory=list)
+    """Adapter-session indices (capture order, ``finish_session``) of the turns
+    counted in ``format_errors``. Empty when the harness does not attribute them."""
+
     finish_reason: str = "unknown"
     """How the loop ended: submit / hit_max_turns / hit_time_budget /
     stopped_early / error, or "unknown" when the harness does not track it."""

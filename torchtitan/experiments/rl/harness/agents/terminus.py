@@ -204,6 +204,12 @@ class _AdapterLLM:
         # the training trajectory like any other turn, so a run needs to be able
         # to see how much of its data came from one.
         self.subagent_calls = 0
+        # adapter.complete captures exactly one turn per non-None reply, so this
+        # counts the session's captured turns; the last reply's index and text
+        # let the parser attribute a format error to the turn that produced it.
+        self.captured_turns = 0
+        self.last_turn: int | None = None
+        self.last_text: str | None = None
 
     def get_model_context_limit(self) -> int:
         return self._max_context
@@ -278,6 +284,8 @@ class _AdapterLLM:
             OutputLengthExceededError,
         )
 
+        self.last_turn = None
+        self.last_text = None
         if self._deadline is not None and time.monotonic() >= self._deadline:
             raise _TimeBudgetExhausted(
                 f"time budget spent before an episode for {self._session_id}"
@@ -302,6 +310,11 @@ class _AdapterLLM:
             for block in (reply.get("content") or [])
             if isinstance(block, dict) and block.get("type") == "text"
         )
+        # Set before the length checks below: a truncated turn is captured too,
+        # and Terminus-2 parses its text for warnings.
+        self.last_turn = self.captured_turns
+        self.last_text = text
+        self.captured_turns += 1
         usage = reply.get("usage") or {}
         self.context_tokens = int(usage.get("input_tokens") or 0) + int(
             usage.get("output_tokens") or 0
@@ -362,11 +375,18 @@ class _CountingParser:
     completion signal: whatever the model emitted, the terminal did not move.
     Delegation is by ``__getattr__`` because Terminus-2 feature-detects
     ``salvage_truncated_response`` on the parser.
+
+    With ``llm`` given, each error is also attributed to the adapter turn whose
+    reply was parsed (``format_error_turns``, adapter-session indices). Content
+    that is not the last reply's text (a summarization fallback string) is
+    counted but not attributed.
     """
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(self, inner: Any, llm: "_AdapterLLM | None" = None) -> None:
         self._inner = inner
+        self._llm = llm
         self.format_errors = 0
+        self.format_error_turns: list[int] = []
         self.completion_signals = 0
 
     def __getattr__(self, name: str) -> Any:
@@ -385,6 +405,14 @@ class _CountingParser:
             result, "is_task_complete", False
         ):
             self.format_errors += 1
+            llm = self._llm
+            if (
+                llm is not None
+                and llm.last_turn is not None
+                and content == llm.last_text
+                and llm.last_turn not in self.format_error_turns[-1:]
+            ):
+                self.format_error_turns.append(llm.last_turn)
         return result
 
 
@@ -787,6 +815,7 @@ async def terminus_agent(
     submitted = False
     turns = 0
     format_errors = 0
+    format_error_turns: list[int] = []
     finish_reason = "unknown"
     agent = None
     parser: _CountingParser | None = None
@@ -842,7 +871,7 @@ async def terminus_agent(
             else:
                 if isinstance(inner_parser, TerminusXMLPlainParser):
                     inner_parser = SafeTerminusXMLParser()
-                parser = _CountingParser(inner_parser)
+                parser = _CountingParser(inner_parser, llm)
                 agent._parser = parser
             _count_subagent_calls(agent, llm)
             context = AgentContext()
@@ -924,6 +953,7 @@ async def terminus_agent(
         finally:
             if parser is not None:
                 format_errors = parser.format_errors
+                format_error_turns = list(parser.format_error_turns)
             if llm is not None and llm.subagent_calls:
                 # Summarization is off by default, so this is 0 on the normal path.
                 # Nonzero means that many of the captured turns are a subagent being
@@ -939,6 +969,7 @@ async def terminus_agent(
         turns=turns,
         submitted=submitted,
         format_errors=format_errors,
+        format_error_turns=format_error_turns,
         finish_reason=finish_reason,
         exec_trace=env.exec_trace,
         # The pane lives in the sandbox, which is still up when this returns;

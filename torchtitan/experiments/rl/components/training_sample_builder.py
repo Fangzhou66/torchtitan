@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import Rollout, RolloutGroup
-from torchtitan.experiments.rl.rollout.types import is_scored, task_reward
+from torchtitan.experiments.rl.rollout.types import (
+    is_scored,
+    task_reward,
+    turn_advantage_offsets,
+)
 from torchtitan.experiments.rl.types import (
     RolloutTurnID,
     TrainingSample,
@@ -174,14 +178,34 @@ class TrainingSampleBuilder(Configurable):
                     m.Mean(group_mean_reward),
                 )
             )
+        # Per-turn advantage offsets (Rollout.diagnostics[TURN_ADVANTAGE_OFFSETS_KEY])
+        # are a signal of their own, so a zero-std group carrying them is kept: its
+        # rollout advantages are 0 and only the offset turns train.
+        offsets = [self._turn_offsets(rollout) for rollout in scored_rollouts]
+        has_offsets = any(
+            rollout.turns[turn].completion_token_ids
+            for rollout, rollout_offsets in zip(scored_rollouts, offsets, strict=True)
+            for turn in rollout_offsets
+            if 0 <= turn < len(rollout.turns)
+        )
         if self.config.drop_zero_std_reward_groups and is_zero_std:
+            if not has_offsets:
+                metrics.append(
+                    m.Metric(
+                        "training_sample_builder/num_groups_dropped_zero_std",
+                        m.Sum(1.0),
+                    )
+                )
+                return TrainingSampleGroup(
+                    group_id=rollout_group.group_id,
+                    training_samples=[],
+                    metrics=metrics,
+                )
             metrics.append(
                 m.Metric(
-                    "training_sample_builder/num_groups_dropped_zero_std", m.Sum(1.0)
+                    "training_sample_builder/num_zero_std_groups_kept_for_offsets",
+                    m.Sum(1.0),
                 )
-            )
-            return TrainingSampleGroup(
-                group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
 
         # One rollout may branch into multiple trainable training_samples.
@@ -199,7 +223,26 @@ class TrainingSampleBuilder(Configurable):
             training_sample.max_policy_version for training_sample in training_samples
         ]
         advantages = [rollout.advantage for rollout in scored_rollouts]
+        # Share of trained turns / tokens whose advantage carries an offset.
+        num_turns = num_offset_turns = num_tokens = num_offset_tokens = 0
+        for rollout, rollout_offsets in zip(scored_rollouts, offsets, strict=True):
+            for turn_idx, turn in enumerate(rollout.turns):
+                if not turn.completion_token_ids:
+                    continue
+                num_turns += 1
+                num_tokens += len(turn.completion_token_ids)
+                if turn_idx in rollout_offsets:
+                    num_offset_turns += 1
+                    num_offset_tokens += len(turn.completion_token_ids)
         metrics += [
+            m.Metric(
+                "training_sample_builder/advantage_offset_turn_frac",
+                m.Mean(float(num_offset_turns), count=float(num_turns)),
+            ),
+            m.Metric(
+                "training_sample_builder/advantage_offset_token_frac",
+                m.Mean(float(num_offset_tokens), count=float(num_tokens)),
+            ),
             m.Metric(
                 "training_sample_builder/num_training_samples",
                 m.Sum(float(len(training_samples))),
@@ -223,6 +266,12 @@ class TrainingSampleBuilder(Configurable):
             training_samples=training_samples,
             metrics=metrics,
         )
+
+    @staticmethod
+    def _turn_offsets(rollout: Rollout) -> dict[int, float]:
+        """Per-turn advantage offsets; training groups only (validation ids < 0)."""
+        offsets = turn_advantage_offsets(rollout)
+        return offsets if offsets and rollout.group_id >= 0 else {}
 
     def rollout_to_training_samples(self, rollout: Rollout) -> list[TrainingSample]:
         """Pack a scored `Rollout` into training training_samples — usually one, or several where its turns branch.
@@ -262,6 +311,7 @@ class TrainingSampleBuilder(Configurable):
                 f"rollout {rollout.group_id}/rollout={rollout.rollout_id} has no advantage; the Rollouter "
                 "must fill it (via its advantage estimator) before training_samples are built."
             )
+        offsets = self._turn_offsets(rollout)
         training_samples: list[TrainingSample] = []
 
         # Used to check if [P1, C1] is prefix of [P1,C1,E1] in the docstring example
@@ -326,7 +376,10 @@ class TrainingSampleBuilder(Configurable):
             training_sample.token_ids += rollout_turn.completion_token_ids
             training_sample.loss_mask += [True] * num_completion
             training_sample.logprobs += rollout_turn.completion_logprobs
-            training_sample.advantage += [rollout_advantage] * num_completion
+            turn_advantage = rollout_advantage
+            if turn_idx in offsets:
+                turn_advantage += offsets[turn_idx]
+            training_sample.advantage += [turn_advantage] * num_completion
 
             prev_prompt_and_completion = prompt + rollout_turn.completion_token_ids
 
