@@ -62,13 +62,36 @@ def _tf32x3_enabled() -> bool:
     return os.environ.get("SWE_LMHEAD_TF32X3", "0") == "1"
 
 
+try:
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def _split_tf32_kernel(x_ptr, hi_ptr, lo_ptr, n, BLOCK: tl.constexpr):
+        offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        x = tl.load(x_ptr + offs, mask=mask)
+        hi = (x.to(tl.int32, bitcast=True) & -0x2000).to(tl.float32, bitcast=True)
+        tl.store(hi_ptr + offs, hi, mask=mask)
+        tl.store(lo_ptr + offs, x - hi, mask=mask)
+
+except ImportError:  # pragma: no cover - CPU-only installs
+    triton = None
+
+
 def _split_tf32(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Split an fp32 tensor into a TF32-representable high part and its remainder.
 
     TF32 keeps 10 explicit mantissa bits, so masking the low 13 bits of the fp32
     significand yields a value the tensor cores represent exactly; the remainder
-    carries what was dropped.
+    carries what was dropped. A contiguous CUDA tensor takes one fused pass (the
+    same mask and subtraction, bitwise identical to the eager ops below).
     """
+    if triton is not None and t.is_cuda and t.is_contiguous():
+        hi, lo = torch.empty_like(t), torch.empty_like(t)
+        n = t.numel()
+        _split_tf32_kernel[(triton.cdiv(n, 4096),)](t, hi, lo, n, BLOCK=4096)
+        return hi, lo
     hi = (t.view(torch.int32) & -0x2000).view(torch.float32)
     return hi, t - hi
 
@@ -101,8 +124,37 @@ def _tf32_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         torch.set_float32_matmul_precision(prev)
 
 
+def _sum_tf32_mm(pairs: list[tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+    """``sum(a @ b for a, b in pairs)``, left to right, on the tensor cores.
+
+    When each product is a single GEMM, later products accumulate into the first
+    through ``addmm_``'s fp32 epilogue instead of materializing each product and
+    adding: the same additions in the same order, without the extra full-size
+    output and elementwise pass (4 GB per 9B lm_head chunk for grad_w).
+    """
+    if pairs[0][0].shape[1] > _TF32_MAX_K:
+        out = _tf32_mm(*pairs[0])
+        for a, b in pairs[1:]:
+            out = out + _tf32_mm(a, b)
+        return out
+    prev = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("high")
+    try:
+        a0, b0 = pairs[0]
+        out = a0 @ b0
+        for a, b in pairs[1:]:
+            out.addmm_(a, b)
+        return out
+    finally:
+        torch.set_float32_matmul_precision(prev)
+
+
 def _mm_fp32_on_tensor_cores(
-    a: torch.Tensor, b: torch.Tensor, a_exact: bool, b_exact: bool
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_exact: bool,
+    b_exact: bool,
+    a_split: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """fp32-accuracy ``a @ b`` from TF32 tensor cores, in as few matmuls as the
     operands need.
@@ -114,19 +166,20 @@ def _mm_fp32_on_tensor_cores(
     and the products are exact in fp32 (7+7 bits), so the result matches an
     IEEE fp32 matmul up to accumulation order. One exact operand takes two. Two
     fp32 operands take the 3xTF32 form ``ah*bh + ah*bl + al*bh``; ``al*bl`` is
-    below the fp32 significand and is dropped.
+    below the fp32 significand and is dropped. ``a_split`` passes an already
+    split ``a`` so one operand split can serve several matmuls.
     """
     if a_exact and b_exact:
         return _tf32_mm(a, b)
     if b_exact:
-        ah, al = _split_tf32(a)
-        return _tf32_mm(ah, b) + _tf32_mm(al, b)
+        ah, al = a_split or _split_tf32(a)
+        return _sum_tf32_mm([(ah, b), (al, b)])
     if a_exact:
         bh, bl = _split_tf32(b)
-        return _tf32_mm(a, bh) + _tf32_mm(a, bl)
-    ah, al = _split_tf32(a)
+        return _sum_tf32_mm([(a, bh), (a, bl)])
+    ah, al = a_split or _split_tf32(a)
     bh, bl = _split_tf32(b)
-    return _tf32_mm(ah, bh) + _tf32_mm(ah, bl) + _tf32_mm(al, bh)
+    return _sum_tf32_mm([(ah, bh), (ah, bl), (al, bh)])
 
 
 class _LinearTF32(torch.autograd.Function):
@@ -172,13 +225,19 @@ class _LinearTF32(torch.autograd.Function):
         x, weight = ctx.saved_tensors
         x_exact, w_exact = ctx.exact
         go2 = grad_out.contiguous().reshape(-1, grad_out.shape[-1])
+        # The fp32 upstream gradient is split once and shared by both matmuls.
+        go_hi, go_lo = _split_tf32(go2)
         grad_x = grad_w = None
         if ctx.needs_input_grad[0]:
-            grad_x = _mm_fp32_on_tensor_cores(go2, weight, False, w_exact)
+            grad_x = _mm_fp32_on_tensor_cores(
+                go2, weight, False, w_exact, a_split=(go_hi, go_lo)
+            )
             grad_x = grad_x.reshape(x.shape)
         if ctx.needs_input_grad[1]:
             x2 = x.reshape(-1, x.shape[-1])
-            grad_w = _mm_fp32_on_tensor_cores(go2.t(), x2, False, x_exact)
+            grad_w = _mm_fp32_on_tensor_cores(
+                go2.t(), x2, False, x_exact, a_split=(go_hi.t(), go_lo.t())
+            )
         return grad_x, grad_w, None, None
 
 

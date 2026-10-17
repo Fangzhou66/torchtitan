@@ -298,3 +298,64 @@ def test_tf32_mm_long_reduction_stays_fp32_accurate():
     ref = a.double() @ b.double()
     got = _tf32_mm(a, b)
     assert ((got.double() - ref).norm() / ref.norm()).item() < 3e-5
+
+
+# --- the fused split and shared-split backward are bitwise the old math ---
+
+
+def _split_tf32_eager(t):
+    hi = (t.view(torch.int32) & -0x2000).view(torch.float32)
+    return hi, t - hi
+
+
+def _mm_reference(a, b, a_exact, b_exact):
+    """The pre-fusion formula: split per call, materialize each product, add."""
+    if a_exact and b_exact:
+        return _tf32_mm(a, b)
+    if b_exact:
+        ah, al = _split_tf32_eager(a)
+        return _tf32_mm(ah, b) + _tf32_mm(al, b)
+    if a_exact:
+        bh, bl = _split_tf32_eager(b)
+        return _tf32_mm(a, bh) + _tf32_mm(a, bl)
+    ah, al = _split_tf32_eager(a)
+    bh, bl = _split_tf32_eager(b)
+    return _tf32_mm(ah, bh) + _tf32_mm(ah, bl) + _tf32_mm(al, bh)
+
+
+@_needs_cuda
+def test_fused_split_matches_eager_split_bitwise():
+    torch.manual_seed(0)
+    t = torch.randn(1000, 4097, device="cuda")  # odd size: exercises the tail mask
+    hi, lo = _split_tf32(t)
+    ref_hi, ref_lo = _split_tf32_eager(t)
+    assert torch.equal(hi, ref_hi) and torch.equal(lo, ref_lo)
+    # A non-contiguous tensor takes the eager path and still splits correctly.
+    hi_t, lo_t = _split_tf32(t.t())
+    assert torch.equal(hi_t, ref_hi.t()) and torch.equal(lo_t, ref_lo.t())
+
+
+@_needs_cuda
+@pytest.mark.parametrize("x_src,w_src", [
+    (torch.bfloat16, torch.bfloat16),
+    (torch.float32, torch.bfloat16),
+    (torch.float32, torch.float32),
+])
+@pytest.mark.parametrize("vocab", [1024, 9000])  # grad_x K <= and > _TF32_MAX_K
+def test_linear_tf32_backward_matches_unfused_math_bitwise(x_src, w_src, vocab):
+    torch.manual_seed(0)
+    x32 = torch.randn(2, 128, 256, device="cuda", dtype=x_src).float().requires_grad_(True)
+    w32 = torch.randn(vocab, 256, device="cuda", dtype=w_src).float().requires_grad_(True)
+    go = torch.randn(2, 128, vocab, device="cuda")
+    x_exact = x_src is torch.bfloat16
+    w_exact = w_src is torch.bfloat16
+    out = _LinearTF32.apply(x32, w32, x_exact, w_exact)
+    out.backward(go)
+    go2 = go.reshape(-1, vocab)
+    x2 = x32.detach().reshape(-1, 256)
+    ref_out = _mm_reference(x2, w32.detach().t(), x_exact, w_exact)
+    ref_gx = _mm_reference(go2, w32.detach(), False, w_exact)
+    ref_gw = _mm_reference(go2.t(), x2, False, x_exact)
+    assert torch.equal(out.detach().reshape(-1, vocab), ref_out)
+    assert torch.equal(x32.grad.reshape(-1, 256), ref_gx)
+    assert torch.equal(w32.grad, ref_gw)
