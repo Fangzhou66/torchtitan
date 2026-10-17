@@ -236,6 +236,14 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         length_penalty_min_pass_rate=float(
             os.environ.get("SWE_LENGTH_PENALTY_MIN_PASS_RATE", "0.5")
         ),
+        # Per-format-error penalty on training rollouts (TMaxRollouter.Config.
+        # format_error_penalty*), off at 0. A live run drifted to dropping the
+        # opening <response> tag on every turn-0 reply: Terminus re-prompts, the
+        # reward never saw it, and with the whole group erring it was absorbing.
+        format_error_penalty=float(os.environ.get("SWE_FORMAT_ERROR_PENALTY", "0")),
+        format_error_penalty_cap=float(
+            os.environ.get("SWE_FORMAT_ERROR_PENALTY_CAP", "0.5")
+        ),
     )
 
 

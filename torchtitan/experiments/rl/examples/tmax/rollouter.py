@@ -122,6 +122,8 @@ from torchtitan.experiments.rl.rollout.types import (
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
+    task_reward,
+    TASK_REWARD_KEY,
 )
 from torchtitan.experiments.rl.rubrics import Rubric
 from torchtitan.experiments.rl.types import RolloutTurnID
@@ -1030,6 +1032,20 @@ class TMaxRollouter(Rollouter):
         length_penalty_min_pass_rate: float = 0.5
         """Skip a group unless its solved fraction is strictly greater than this."""
 
+        format_error_penalty: float = 0.0
+        """Reward taken per harness format error on training rollouts (0 = off).
+
+        The advantage sees ``reward - min(penalty * format_errors, cap)``; reward
+        metrics, solve counts and evolution signals keep the unshaped reward
+        (``rollout.types.task_reward``). Validation is never shaped. Without it a
+        format error the harness re-prompts past costs nothing, and once every
+        sibling makes it there is no in-group variance to remove it.
+        """
+
+        format_error_penalty_cap: float = 0.5
+        """Largest total format-error penalty per rollout. Must be in [0, 1) so a
+        sparse solve still outranks every failure."""
+
     def __init__(self, config: Config) -> None:
         # Before super(), which builds the datasets: a typo in a knob that changes
         # what reward means should fail on the spot, not behind a data error.
@@ -1057,6 +1073,16 @@ class TMaxRollouter(Rollouter):
             raise ValueError("length_penalty_exponent must be >= 1")
         if not 0 <= config.length_penalty_min_pass_rate <= 1:
             raise ValueError("length_penalty_min_pass_rate must be in [0, 1]")
+        if config.format_error_penalty < 0:
+            raise ValueError("format_error_penalty must be >= 0")
+        max_shaping = config.format_error_penalty_cap + (
+            config.length_penalty_max if config.length_penalty else 0.0
+        )
+        if config.format_error_penalty_cap < 0 or max_shaping >= 1:
+            raise ValueError(
+                "format_error_penalty_cap must be >= 0 and, plus length_penalty_max "
+                "when the length penalty is on, < 1"
+            )
         super().__init__(config)
         # Training and evaluation share Terminus unless a run explicitly selects
         # another scaffold with its corresponding action format.
@@ -1087,6 +1113,8 @@ class TMaxRollouter(Rollouter):
         self._length_penalty_saturate = config.length_penalty_saturate
         self._length_penalty_exponent = config.length_penalty_exponent
         self._length_penalty_min_pass_rate = config.length_penalty_min_pass_rate
+        self._format_error_penalty = config.format_error_penalty
+        self._format_error_penalty_cap = config.format_error_penalty_cap
         # The CTRF read is one extra sandbox exec per graded rollout, and the Daytona
         # API rate limit is the throughput ceiling at high rollout concurrency -- so
         # it is opt-in for metrics, and mandatory when it feeds the reward.
@@ -1268,6 +1296,9 @@ class TMaxRollouter(Rollouter):
 
         if group_id >= 0 and self._length_penalty:
             group_metrics += self._apply_length_penalty(rollouts)
+        # After the length penalty, so task_reward keeps what the metrics saw before.
+        if group_id >= 0 and self._format_error_penalty > 0:
+            group_metrics += self._apply_format_error_penalty(rollouts)
 
         # Group reward-shape metrics. With evolution_harder_ratio < 1, evolution
         # additionally hardens high-success mixed groups; these metrics retain
@@ -1276,7 +1307,7 @@ class TMaxRollouter(Rollouter):
         # (is_scored) so an infra-failed sibling's NaN reward is excluded -- statistics
         # .pstdev raises on NaN under Python 3.12. Training groups only (group_id >= 0).
         if group_id >= 0:
-            ev_rewards = [r.reward for r in rollouts if is_scored(r)]
+            ev_rewards = [task_reward(r) for r in rollouts if is_scored(r)]
             ev_zero_std = len(ev_rewards) >= 2 and statistics.pstdev(ev_rewards) == 0.0
             ev_all_pass = ev_zero_std and ev_rewards[0] > 0
             ev_all_fail = ev_zero_std and not ev_all_pass
@@ -1352,6 +1383,36 @@ class TMaxRollouter(Rollouter):
                 "rollout/length_penalty_applied_frac",
                 m.Mean.from_list([float(p > 0) for p in penalties]),
             ),
+        ]
+
+    def _apply_format_error_penalty(self, rollouts: list[Rollout]) -> list[m.Metric]:
+        """Take ``min(penalty * format_errors, cap)`` from each scored rollout.
+
+        See ``Config.format_error_penalty``. Training groups only; runs before the
+        group metrics and the advantage. The unshaped reward goes to
+        ``diagnostics[TASK_REWARD_KEY]`` for reporting and solve counting.
+        """
+        penalties: list[float] = []
+        shaped: list[float] = []
+        for rollout in rollouts:
+            raw = rollout.reward
+            if raw is None or not is_scored(rollout):
+                continue
+            num_errors = rollout.diagnostics.get("format_errors") or 0
+            assert isinstance(num_errors, int)
+            penalty = min(
+                self._format_error_penalty * num_errors, self._format_error_penalty_cap
+            )
+            rollout.diagnostics[TASK_REWARD_KEY] = raw
+            rollout.diagnostics["format_error_penalty"] = penalty
+            rollout.reward = raw - penalty
+            penalties.append(penalty)
+            shaped.append(raw - penalty)
+        if not penalties:
+            return []
+        return [
+            m.Metric("rollout/format_error_penalty_mean", m.Mean.from_list(penalties)),
+            m.Metric("rollout/shaped_reward_mean", m.Mean.from_list(shaped)),
         ]
 
     # Extra initial guard headroom for the sandbox-creation queue. After a restart
@@ -1434,7 +1495,8 @@ class TMaxRollouter(Rollouter):
             # is_scored (not "is not None"): an infra-failed sibling carries a NaN
             # reward, and statistics.pstdev raises on NaN under Python 3.12.
             scored = [r for r in rollouts if is_scored(r)]
-            rewards = [r.reward for r in scored]
+            # task_reward: a training-only shaping penalty must not move a verdict.
+            rewards = [task_reward(r) for r in scored]
             if len(rewards) < 2:
                 return
             solved = sum(reward > 0 for reward in rewards)
