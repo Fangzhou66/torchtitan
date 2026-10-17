@@ -80,6 +80,7 @@ def test_embed_hf_and_vllm_style_load_match_full_pull():
     same local experts as loading the full tensor."""
     start, stop = 8, 12
     pull = NativeEPPartialPull(start, stop, E)
+    pull.last_fetch_partial = True  # as after fetch()
     full = torch.randn(E, 2 * F, D)
     hf_key = "model.language_model.layers.3.mlp.experts.gate_up_proj"
     embedded = pull.embed_hf({hf_key: full[start:stop].clone(), "x.weight": torch.ones(1)})
@@ -105,3 +106,17 @@ def test_record_rejects_unexpected_expert_count():
     pull = NativeEPPartialPull(0, 4, E)
     pull.record({KEY: torch.zeros(E + 1, F, D)})
     assert not pull.ready
+
+
+def test_first_full_pull_is_not_embedded():
+    """record() runs on the first, full pull; that same pull's full HF experts
+    must pass through embed_hf unchanged (regression: it tried to copy all E
+    experts into the local slice)."""
+    pull = NativeEPPartialPull(8, 12, E)
+    tt_key = "layers.3.moe.experts.w1_EFD"
+    pull.record({tt_key: torch.randn(E, F, D)})
+    assert pull.ready and not pull.last_fetch_partial
+    hf_key = "model.language_model.layers.3.mlp.experts.gate_up_proj"
+    full_hf = torch.randn(E, 2 * F, D)
+    out = pull.embed_hf({hf_key: full_hf})
+    assert out[hf_key] is full_hf

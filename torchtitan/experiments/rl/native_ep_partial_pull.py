@@ -65,6 +65,9 @@ class NativeEPPartialPull:
         self.start, self.stop, self.num_experts = start, stop, num_experts
         self._expert_meta: dict[str, tuple[tuple[int, ...], torch.dtype]] = {}
         self._full_hf: dict[str, torch.Tensor] = {}
+        # Whether the most recent fetch was partial; a full fetch (the first pull,
+        # which also calls record) must not be embedded.
+        self.last_fetch_partial = False
 
     @property
     def ready(self) -> bool:
@@ -72,6 +75,7 @@ class NativeEPPartialPull:
 
     def record(self, state_dict: dict[str, Any]) -> None:
         """Learn the stacked expert tensors from a full fetch."""
+        self.last_fetch_partial = False
         for key, value in state_dict.items():
             if _TT_EXPERT_KEY.search(key) and isinstance(value, torch.Tensor):
                 if value.shape[0] != self.num_experts:
@@ -133,12 +137,16 @@ class NativeEPPartialPull:
                 results[request.key], inplace.get(request.key), request
             )
             flat[fk] = value
+        self.last_fetch_partial = True
         return unflatten_state_dict(flat, mapping)
 
     def embed_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Place each local-slice HF expert tensor at its global offset in a
         reused full-size CPU tensor. Rows outside ``[start, stop)`` are never
-        written or read (vLLM skips non-local expert ids before touching them)."""
+        written or read (vLLM skips non-local expert ids before touching them).
+        A full fetch passes through unchanged."""
+        if not self.last_fetch_partial:
+            return hf_state_dict
         out = dict(hf_state_dict)
         for key, value in hf_state_dict.items():
             if not _HF_EXPERT_KEY.search(key):
