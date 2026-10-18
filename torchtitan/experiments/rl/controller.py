@@ -1676,8 +1676,14 @@ class Controller(Configurable):
         )
 
         self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
-        summary = self._record_validation_traces(
-            step=step, samples=samples, rollout_groups=rollout_groups
+        # Off the event loop: the report decodes and writes all 445 trials to
+        # the dump mount, measured at ~500 s per pass, during which the loop
+        # served no rollouts, data input or batching.
+        summary = await asyncio.to_thread(
+            self._record_validation_traces,
+            step=step,
+            samples=samples,
+            rollout_groups=rollout_groups,
         )
         if summary is not None and summary.pass_at_k is not None:
             metrics.append(
