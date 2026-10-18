@@ -579,3 +579,80 @@ def test_input_jsonl_rows_get_patches_unless_disabled(tmp_path, monkeypatch):
         f"FROM {_PIN}\n" + B._TMUX_INSTALL
     )
     assert patched["fix-git"] == base["fix-git"]
+
+
+_SEPARATE_TOML = """schema_version = "1.1"
+artifacts = ["/app/out.step"]
+
+[verifier]
+timeout_sec = 240.0
+environment_mode = "separate"
+
+[verifier.environment]
+cpus = 2
+memory_mb = 8192
+storage_mb = 10240
+docker_image = "harborframework/terminal-bench:demo-verifier@sha256:abc"
+
+[agent]
+timeout_sec = 28800.0
+
+[environment]
+docker_image = "harborframework/terminal-bench:demo-environment@sha256:def"
+cpus = 2
+memory_mb = 8192
+storage_mb = 10240
+"""
+
+
+def test_a_separate_verifier_task_carries_its_image_and_artifacts(tmp_path):
+    """TB4 grades in its own image, which owns /tests, from the declared
+    artifacts alone; the row says so and ships no fixtures."""
+    root = tmp_path / "tasks"
+    root.mkdir()
+    _write_task(root, "demo-task", task_toml=_SEPARATE_TOML)
+
+    (row,), skipped = build_rows(tasks_root=str(root))
+
+    assert skipped == {}
+    tmax = row["metadata"]["tmax"]
+    assert tmax["fixtures"] == {}
+    sv = tmax["separate_verifier"]
+    assert sv["image"] == "harborframework/terminal-bench:demo-verifier@sha256:abc"
+    assert sv["artifacts"] == ["/app/out.step"]
+    assert sv["daytona_mem_gb"] == 8 and sv["daytona_disk_gb"] == 10
+
+
+def test_a_shared_environment_task_has_no_separate_verifier(tmp_path):
+    root = tmp_path / "tasks"
+    root.mkdir()
+    _write_task(root, "demo-task")
+
+    (row,), _ = build_rows(tasks_root=str(root))
+
+    assert "separate_verifier" not in row["metadata"]["tmax"]
+
+
+def test_a_rewritten_separate_task_builds_its_verifier_from_tests(tmp_path):
+    """A rewrite may change the tests, which the published verifier image does
+    not hold: from a package, the verifier is built from tests/Dockerfile."""
+    import base64 as b64
+    import tomllib
+
+    from torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data import (
+        separate_verifier,
+    )
+
+    task = _write_task(tmp_path, "demo-task", task_toml=_SEPARATE_TOML)
+    (task / "tests" / "Dockerfile").write_text("FROM python:3.13-slim\nCOPY . /tests/\n")
+    cfg = tomllib.loads((task / "task.toml").read_text())
+
+    sv, why = separate_verifier(cfg, str(task), build=True)
+
+    assert why == "" and "image" not in sv
+    assert sv["dockerfile"].startswith("FROM python:3.13-slim")
+    assert b64.b64decode(sv["build_context"]["test.sh"]).decode() == _TEST_SH
+    assert "nested/case.txt" in sv["build_context"]
+    assert separate_verifier(
+        tomllib.loads(_TASK_TOML), str(task), build=True
+    ) == (None, "")

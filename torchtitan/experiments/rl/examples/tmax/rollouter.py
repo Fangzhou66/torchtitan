@@ -92,6 +92,7 @@ from torchtitan.experiments.rl.examples.tmax.data import TMaxDataset, TMaxSample
 from torchtitan.experiments.rl.examples.tmax.env import TMaxEnv
 from torchtitan.experiments.rl.examples.tmax.grading import (
     ctrf_pass_fraction,
+    grade_separate,
     grade_tmax,
     read_ctrf_report,
     seed_workspace,
@@ -1362,6 +1363,53 @@ class TMaxRollouter(Rollouter):
             verifier_sec = self._eval_timeout_sec
         return budget_sec + verifier_sec + 300
 
+    async def _read_ctrf_quietly(self, sandbox, rollout_id: str) -> dict | None:
+        """The verifier's per-test CTRF report, read while the sandbox is up.
+
+        Failures are swallowed: `sandbox.exec` raises when the sandbox is gone or
+        the API errors, and the enclosing handler would otherwise turn that into
+        reward=0 + infra_failed for an already-graded rollout. In dense mode a
+        failed read is a fallback to the sparse reward, never a lost rollout."""
+        if not self._read_ctrf:
+            return None
+        try:
+            return await read_ctrf_report(sandbox)
+        except Exception as e:
+            logger.warning(
+                f"[tmax] {rollout_id}: ctrf read failed ({type(e).__name__}: {e})"
+            )
+            return None
+
+    async def _grade_separate(
+        self,
+        sandbox,
+        sample: TMaxSample,
+        *,
+        verifier_sec: int,
+        diagnostics: dict,
+        rollout_id: str,
+        labels: dict[str, str],
+    ) -> tuple[float, dict | None]:
+        """Grade in a separate verifier sandbox (grading.grade_separate); the
+        CTRF report is read there, before that sandbox closes."""
+        ctrf: dict | None = None
+
+        async def read_report(verifier_sb) -> None:
+            nonlocal ctrf
+            ctrf = await self._read_ctrf_quietly(verifier_sb, rollout_id)
+
+        reward = await grade_separate(
+            sandbox,
+            sample.tmax,
+            workdir=sample.workdir,
+            boot=boot_agent_sandbox,
+            timeout_sec=verifier_sec,
+            diagnostics=diagnostics,
+            labels=labels,
+            after=read_report,
+        )
+        return reward, ctrf
+
     def _apply_length_penalty(self, rollouts: list[Rollout]) -> list[m.Metric]:
         """Shape a training group's solves by length relative to the group median.
 
@@ -1813,31 +1861,41 @@ class TMaxRollouter(Rollouter):
                     if submitted:
                         failure_stage = "verifier"
                         grade_at = time.monotonic()
-                        reward = await grade_tmax(
-                            sandbox,
-                            sample.tmax,
-                            workdir=sample.workdir,
-                            timeout_sec=verifier_sec,
-                            baseline_digests=baseline_digests,
-                            diagnostics=verifier,
-                        )
+                        separate = sample.tmax.get("separate_verifier")
+                        if separate:
+                            # The verifier sandbox boots now, on the agent's
+                            # clock: give it the same boot allowance the agent's
+                            # sandbox had.
+                            rollout_timeout.reschedule(
+                                rollout_timeout.when()
+                                + self._SANDBOX_BOOT_ALLOWANCE_SEC
+                            )
+                            reward, ctrf = await self._grade_separate(
+                                sandbox,
+                                sample,
+                                verifier_sec=verifier_sec,
+                                diagnostics=verifier,
+                                rollout_id=rollout_id,
+                                labels={
+                                    "task": sample.instance_id,
+                                    "group": str(group_id),
+                                    "rollout": str(rollout_idx),
+                                    "role": "verifier",
+                                    **({"run": run.name} if run is not None else {}),
+                                },
+                            )
+                        else:
+                            reward = await grade_tmax(
+                                sandbox,
+                                sample.tmax,
+                                workdir=sample.workdir,
+                                timeout_sec=verifier_sec,
+                                baseline_digests=baseline_digests,
+                                diagnostics=verifier,
+                            )
+                            ctrf = await self._read_ctrf_quietly(sandbox, rollout_id)
                         timing["grade_secs"] = time.monotonic() - grade_at
                         sparse_reward = reward
-                        # Read the verifier's second output (the per-test CTRF
-                        # report) while the sandbox is still up. Swallow its
-                        # failures: `sandbox.exec` raises when the sandbox is gone
-                        # or the API errors, and the enclosing handler would
-                        # otherwise turn that into reward=0 + infra_failed for an
-                        # already-graded rollout. In dense mode a failed read is a
-                        # fallback to the sparse reward, never a lost rollout.
-                        if self._read_ctrf:
-                            try:
-                                ctrf = await read_ctrf_report(sandbox)
-                            except Exception as e:
-                                logger.warning(
-                                    f"[tmax] {rollout_id}: ctrf read failed "
-                                    f"({type(e).__name__}: {e})"
-                                )
                         # Training only. Validation groups carry negative ids (see
                         # Controller) and MUST stay on the binary verdict: TB-2.0
                         # avg@k / pass@k are defined on all-tests-pass, so a dense
@@ -1849,7 +1907,9 @@ class TMaxRollouter(Rollouter):
                             reward = sparse_reward if dense is None else dense
                     else:
                         reward = 0.0
-                        if self._shadow_grade_unsubmitted:
+                        if self._shadow_grade_unsubmitted and not sample.tmax.get(
+                            "separate_verifier"
+                        ):
                             # Grade the sandbox as the agent left it, for the
                             # record only; the rollout keeps reward 0. A failed
                             # shadow run must not turn a scored rollout into an

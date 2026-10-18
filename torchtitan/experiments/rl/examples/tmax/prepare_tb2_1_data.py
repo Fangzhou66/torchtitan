@@ -86,7 +86,11 @@ _DEFAULT_WORKDIR = "/app"
 _EXPECTED_TASKS = 89
 
 # Run before evaluation, once per cached image. A failed install must fail the build.
+# As root: some images end on an unprivileged USER (TB4 risk-scorer-replay ends on
+# `nobody`, rs-archive-clone on `agent`), and apt-get then exits 100. Left at root:
+# the harness runs every command as root whatever the image's USER says.
 _TMUX_INSTALL = (
+    "USER root\n"
     "RUN if ! command -v tmux >/dev/null 2>&1; then "
     "apt-get update && DEBIAN_FRONTEND=noninteractive "
     "apt-get install -y --no-install-recommends tmux; fi\n"
@@ -272,8 +276,13 @@ def _has_own_dockerfile(md: dict) -> bool:
     )
 
 
-async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
-    """Build and check two fresh sandboxes per task; resume from exact-row evidence."""
+async def verify_runtime(
+    rows: list[dict], evidence_dir: str, *, keep_going: bool = False
+) -> dict[str, str]:
+    """Build and check two fresh sandboxes per task; resume from exact-row evidence.
+
+    Raises on the first task that fails, unless ``keep_going``: then every task
+    is checked and the failures come back as ``{task_id: error}``."""
     from torchtitan.experiments.rl.examples.tmax.evolution.resolve_base_images import (
         head_digest,
         MEDIA,
@@ -296,6 +305,7 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
         ).hexdigest(),
         "probe_command": _TMUX_PROBE,
     }
+    failed: dict[str, str] = {}
     with (root / "progress.jsonl").open("a") as log:
 
         def event(task: str, state: str, **extra) -> None:
@@ -396,7 +406,10 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
                 event(tid, "pass", evidence=str(evidence), probes=probes)
             except Exception as error:
                 event(tid, "fail", error=str(error), row=row, probes=probes)
-                raise
+                if not keep_going:
+                    raise
+                failed[tid] = str(error)
+    return failed
 
 
 # Suffix carrying a base64-encoded binary grading fixture (see _BINARY_DECODE_PREAMBLE).
@@ -630,6 +643,45 @@ def _tb_version(cfg: dict) -> str:
     return {"1.1": "2.1", "1.0": "2.0"}.get(schema, schema or "unknown")
 
 
+def separate_verifier(
+    cfg: dict, task_dir: str, *, build: bool
+) -> tuple[dict | None, str]:
+    """The ``tmax.separate_verifier`` block of a Harbor schema-1.1 task whose
+    ``[verifier] environment_mode = "separate"`` (every TB4 task): the verifier
+    runs in its own environment, which holds /tests, and sees only the declared
+    ``artifacts``, copied from the agent's container. ``(None, "")`` for a task
+    graded in its own container; ``(None, reason)`` for an unusable declaration.
+
+    ``build=False`` names the published verifier image. ``build=True`` builds it
+    from the package's ``tests/Dockerfile`` with ``tests/`` as the context, as a
+    rewritten package must: a changed test is not in the published image."""
+    if _get(cfg, "verifier", "environment_mode") != "separate":
+        return None, ""
+    verifier_env = _get(cfg, "verifier", "environment") or {}
+    artifacts = cfg.get("artifacts")
+    if not artifacts:
+        return None, "separate verifier without artifacts"
+    sv: dict = {
+        "artifacts": list(artifacts),
+        **_daytona_resources({"environment": verifier_env}),
+    }
+    if build:
+        tests = Path(task_dir) / _FIXTURE_ROOT
+        if not (tests / "Dockerfile").is_file():
+            return None, "separate verifier without tests/Dockerfile"
+        sv["dockerfile"] = (tests / "Dockerfile").read_text(encoding="utf-8")
+        sv["build_context"] = {
+            str(f.relative_to(tests)): base64.b64encode(f.read_bytes()).decode()
+            for f in sorted(tests.rglob("*"))
+            if f.is_file()
+        }
+    elif verifier_env.get("docker_image"):
+        sv["image"] = verifier_env["docker_image"]
+    else:
+        return None, "separate verifier without [verifier.environment].docker_image"
+    return sv, ""
+
+
 def _to_row(
     task_id: str,
     task_dir: str,
@@ -689,6 +741,13 @@ def _to_row(
         },
     }
     metadata.update(_daytona_resources(cfg))
+    sv, why = separate_verifier(cfg, task_dir, build=False)
+    if why:
+        return None, why
+    if sv is not None:
+        # The verifier image owns /tests, so the grading fixtures are never uploaded.
+        metadata["tmax"]["fixtures"] = {}
+        metadata["tmax"]["separate_verifier"] = sv
     return {"prompt": instruction, "label": task_id, "metadata": metadata}, "ok"
 
 
@@ -767,6 +826,12 @@ def main() -> None:
         "sandboxes per task before publishing the output; resumes from evidence",
     )
     ap.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="with --verify-runtime: check every task, leave the ones that fail out "
+        "of the output and list them in <out>.failed.json",
+    )
+    ap.add_argument(
         "--no-binary-fixtures",
         action="store_true",
         help="drop non-UTF-8 grading fixtures instead of shipping them base64 "
@@ -829,7 +894,15 @@ def main() -> None:
     if args.verify_runtime:
         if Path(args.out).exists():
             raise SystemExit(f"Refusing to overwrite {args.out}; use a new output path")
-        asyncio.run(verify_runtime(rows, args.verify_runtime))
+        failed = asyncio.run(
+            verify_runtime(rows, args.verify_runtime, keep_going=args.keep_going)
+        )
+        if failed:
+            # Left out of the output, with their reasons beside it.
+            rows = [r for r in rows if r["metadata"]["instance_id"] not in failed]
+            write_json_atomic(Path(args.out + ".failed.json"), failed)
+            for tid, why in sorted(failed.items()):
+                print(f"WARNING: runtime check failed {tid}: {why[:300]}", file=sys.stderr)
     _write_jsonl(rows, args.out)
     print(f"wrote {len(rows)} tasks -> {args.out}")
 

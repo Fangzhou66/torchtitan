@@ -26,6 +26,7 @@ Two entry points, both driving the same steps:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -242,8 +243,13 @@ async def grade_tmax(
     timeout_sec: int | None = None,
     baseline_digests: dict[str, str] | None = None,
     diagnostics: dict | None = None,
+    upload_tests: bool = True,
 ) -> float:
     """Grade a tmax task in the (already-run) sandbox ``sb`` and return reward.
+
+    ``upload_tests=False`` is for a separate verifier sandbox whose image already
+    holds ``/tests`` (Harbor ``environment_mode = "separate"``): nothing is
+    uploaded and the image's own ``/tests/test.sh`` runs.
 
     Creates ``/logs/verifier`` + ``/tests``, uploads ``test.sh`` and the grading
     fixtures (tests/*) to their destinations, runs ``bash /tests/test.sh``, then
@@ -264,12 +270,13 @@ async def grade_tmax(
         check=False,
         timeout=60,
     )
-    for rel, content in fixtures.items():
-        dest = _grading_fixture_dest(rel)
-        if dest is None:
-            continue
-        await sb.write_file(dest, content, user="root")
-    await sb.write_file(_TEST_SH, test_sh, user="root")
+    if upload_tests:
+        for rel, content in fixtures.items():
+            dest = _grading_fixture_dest(rel)
+            if dest is None:
+                continue
+            await sb.write_file(dest, content, user="root")
+        await sb.write_file(_TEST_SH, test_sh, user="root")
 
     nonce = _make_nonce()
     await sb.exec(
@@ -395,6 +402,95 @@ async def grade_tmax(
             verifier_tail,
         )
     logger.info("[tmax] graded reward=%.2f (reward_path=%s)", reward, reward_path)
+    return reward
+
+
+_ARTIFACTS_TGZ = "/tmp/.tmax_artifacts.tgz"
+
+
+async def collect_artifacts(sb: Sandbox, paths: list[str]) -> bytes | None:
+    """The declared artifacts the agent left, as one gzipped tar rooted at ``/``.
+
+    A path that does not exist is left out, so the verifier sees exactly what
+    the agent produced; None when none exists. The tar travels as base64 text
+    because ``read_file`` returns text."""
+    rel = " ".join(shlex.quote(p.strip("/")) for p in paths)
+    await sb.exec(
+        f"cd / && rm -f {_ARTIFACTS_TGZ} {_ARTIFACTS_TGZ}.b64; set --; "
+        f'for p in {rel}; do [ -e "$p" ] && set -- "$@" "$p"; done; '
+        f'[ "$#" -gt 0 ] && tar -czf {_ARTIFACTS_TGZ} "$@" '
+        f"&& base64 -w0 {_ARTIFACTS_TGZ} > {_ARTIFACTS_TGZ}.b64; true",
+        user="root",
+        check=False,
+        timeout=300,
+    )
+    text = (await sb.read_file(f"{_ARTIFACTS_TGZ}.b64", user="root") or "").strip()
+    return base64.b64decode(text) if text else None
+
+
+async def restore_artifacts(sb: Sandbox, data: bytes | None) -> None:
+    """Unpack ``collect_artifacts``' tar at the same paths in ``sb``."""
+    if not data:
+        return
+    await sb.write_file(_ARTIFACTS_TGZ, data, user="root")
+    await sb.exec(
+        f"tar -C / -xzf {_ARTIFACTS_TGZ} && rm -f {_ARTIFACTS_TGZ}",
+        user="root",
+        check=False,
+        timeout=300,
+    )
+
+
+async def grade_separate(
+    sb: Sandbox,
+    tmax: dict,
+    *,
+    workdir: str,
+    boot,
+    timeout_sec: int | None = None,
+    diagnostics: dict | None = None,
+    labels: dict[str, str] | None = None,
+    after=None,
+) -> float:
+    """Harbor ``environment_mode = "separate"``: copy the declared artifacts out
+    of the agent's sandbox ``sb`` into a fresh sandbox of the verifier
+    environment, which holds its own ``/tests``, and grade there.
+
+    ``tmax["separate_verifier"]`` names that environment: a prebuilt ``image``,
+    or a ``dockerfile`` with ``build_context`` (the task's tests/ directory),
+    which is what a rewrite that changed the tests needs. ``boot`` is
+    ``boot_agent_sandbox`` (injected so this module stays importable without
+    the harness). ``after`` is awaited with the verifier sandbox while it is up
+    (the rollouter reads the CTRF report there)."""
+    sv = tmax["separate_verifier"]
+    artifacts = await collect_artifacts(sb, list(sv.get("artifacts") or []))
+    if diagnostics is not None:
+        diagnostics["separate_verifier"] = {
+            "image": sv.get("image"),
+            "built": bool(sv.get("dockerfile")),
+            "artifact_bytes": len(artifacts or b""),
+        }
+    async with boot(
+        sv.get("image") or "",
+        dockerfile=sv.get("dockerfile") or None,
+        build_context=sv.get("build_context") or None,
+        install_claude=False,
+        cpu=sv.get("daytona_cpu"),
+        memory=sv.get("daytona_mem_gb"),
+        disk_gb=sv.get("daytona_disk_gb"),
+        labels=labels,
+    ) as verifier_sb:
+        await restore_artifacts(verifier_sb, artifacts)
+        reward = await grade_tmax(
+            verifier_sb,
+            tmax,
+            workdir=workdir,
+            timeout_sec=timeout_sec,
+            diagnostics=diagnostics,
+            upload_tests=False,
+        )
+        if after is not None:
+            await after(verifier_sb)
     return reward
 
 
