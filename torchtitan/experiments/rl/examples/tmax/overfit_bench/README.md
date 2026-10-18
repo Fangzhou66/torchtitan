@@ -88,3 +88,6 @@ after the agent submits and fills with the task's declared artifacts. Sandbox
 requests above Daytona's per-sandbox limits (4 vCPU, 8 GiB, 10 GiB disk) run at
 those limits; fp8-rmsnorm-gemm, jax-speedrun-gpu and math-eval-grader declare
 an H100, which a Daytona sandbox does not have.
+
+`SYNC_OVERFIT.md` describes a strictly synchronous variant of a job (one group
+in flight, the next group waiting for the rewrites it triggered) and how it is run.
