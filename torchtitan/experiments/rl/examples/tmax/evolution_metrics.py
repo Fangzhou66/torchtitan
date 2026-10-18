@@ -32,6 +32,11 @@ pending: claimed after one of this run's signals asked to rewrite that exact
 revision and before the loop consumed the signal. A group claimed before the
 rewrite started counts as `while_waiting`, after it as `while_rewriting`.
 Each signal is classified when it is consumed, so the counts only grow.
+
+`repairs/*` counts the defects harder and easier rewrites repaired on the way
+(declared in run/repair.json; one line each in evolution/repairs.jsonl):
+`rewrites` that repaired anything, the `fixes` they declared, how many of
+those rewrites were accepted, and the rewrites per signal direction.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ REWRITE_OUTCOMES = (
     "accepted_harder", "accepted_easier", "accepted_repair_spec", "kept", "rejected", "failed"
 )
 REWRITE_ROUTES = ("evolve", "simplify", "repair_spec", "invalid_signal")
+REPAIR_KEYS = ("rewrites", "fixes", "accepted_rewrites", "harder", "easier")
 FLOW_KEYS = ("signals_issued", "signals_consumed", "rewrites_accepted", "rewrites_trained")
 DIRECTIONS = ("harder", "easier")
 # Merges the latency median looks back over: recent enough to move when the
@@ -76,6 +82,7 @@ def record_outcome(root: layout.Root, rewrite: layout.RewriteDir, meta: dict) ->
             "started": meta.get("started"),
             "finished": meta.get("finished"),
             "signal": meta["signal"],
+            "repairs": len(meta.get("repair") or []),
         },
     )
 
@@ -137,6 +144,7 @@ class EvolutionMetrics:
         self.classified: set[str] = set()
         self.stale_claims: set[str] = set()
         self.stale: Counter[str] = Counter()
+        self.repairs: Counter[str] = Counter()
 
     def _poll_claims(self) -> None:
         events, self.claim_offset = _new_lines(
@@ -226,6 +234,12 @@ class EvolutionMetrics:
                     started, self.rewrite_started.get(event["signal"], started)
                 )
             status = event["status"]
+            if fixes := int(event.get("repairs") or 0):
+                self.repairs["rewrites"] += 1
+                self.repairs["fixes"] += fixes
+                self.repairs[event["direction"]] += 1
+                if status == "accepted":
+                    self.repairs["accepted_rewrites"] += 1
             self.stages[("failed" if status == "interrupted" else status, event.get("stage") or "none")] += 1
             if event.get("started") and event.get("finished"):
                 try:
@@ -328,6 +342,7 @@ class EvolutionMetrics:
                 f"evolution/rewrites/{o}": float(self.outcomes[o])
                 for o in REWRITE_OUTCOMES
             },
+            **{f"evolution/repairs/{k}": float(self.repairs[k]) for k in REPAIR_KEYS},
             **{
                 f"evolution/stale/{k}": float(self.stale[k])
                 for k in ("while_waiting", "while_rewriting")
