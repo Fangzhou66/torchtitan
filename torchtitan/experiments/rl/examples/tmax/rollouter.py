@@ -660,8 +660,9 @@ _ENTRYPOINT_LOG = "/tmp/.titan_entrypoint.log"
 
 
 # SWE_SYNC_WAIT_FOR_REWRITES=1: the next training group is drawn only after
-# every evolution signal under TRL_BASE has a ledger line, i.e. the evolve loop
-# has finished (and published) or declined every rewrite asked for so far. With
+# every evolution signal this run wrote has a ledger line, i.e. the evolve loop
+# has finished (and published) or declined every rewrite this run asked for.
+# Earlier runs in the same root never hold it back. With
 # one active group (slots release after the weight pull) this makes a step
 # rollout -> train -> sync -> rewrites done -> next rollout.
 _SYNC_WAIT_FOR_REWRITES = os.environ.get("SWE_SYNC_WAIT_FOR_REWRITES", "0") == "1"
@@ -670,13 +671,15 @@ _SYNC_REWRITE_TIMEOUT_SEC = float(
 )
 
 
-def _pending_signals(root: layout.Root) -> list[str]:
-    """Signal ids under ``root`` that the evolve loop has not written a ledger
-    line for yet."""
+def _pending_signals(root: layout.Root, run_name: str) -> list[str]:
+    """Signal ids of run ``run_name`` (every MAST attempt of it: the launcher
+    suffixes each attempt's directory with ``--attempt-...``) that the evolve
+    loop has not written a ledger line for yet."""
+    base = run_name.split("--attempt-")[0]
     signals = {
         f"{run.name}/{path.stem}"
         for run in root.run_dirs()
-        if run.signals.is_dir()
+        if run.name.split("--attempt-")[0] == base and run.signals.is_dir()
         for path in run.signals.glob("*.json")
     }
     if not signals:
@@ -695,12 +698,13 @@ def _pending_signals(root: layout.Root) -> list[str]:
 def _wait_for_rewrites() -> bool:
     """Block until no signal is pending; True when it waited at all."""
     root = layout.Root.from_env()
-    if root is None:
+    run = layout.Run.from_env()
+    if root is None or run is None:
         return False
     start = time.monotonic()
     last_log = 0.0
     blocked = False
-    while pending := _pending_signals(root):
+    while pending := _pending_signals(root, run.name):
         waited = time.monotonic() - start
         if waited > _SYNC_REWRITE_TIMEOUT_SEC:
             logger.warning(
