@@ -44,6 +44,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.native_ep_partial_pull import (
+    expert_dims,
     local_expert_range,
     NativeEPPartialPull,
 )
@@ -1451,7 +1452,8 @@ class VLLMGenerator(Actor, Configurable):
         # cpu_staged_weight_pull: CPU copy of the state dict reused across pulls.
         self._cpu_pull_buffer: dict | None = None
         # SWE_NATIVE_EP_PARTIAL_PULL=1: a vllm_native expert-parallel rank pulls
-        # only its own experts after the first (full) pull.
+        # only its own experts, from the first pull on when the expert shapes can
+        # be read from the vLLM model.
         self._ep_partial_pull: NativeEPPartialPull | None = None
         if (
             native
@@ -1460,7 +1462,9 @@ class VLLMGenerator(Actor, Configurable):
         ):
             expert_range = local_expert_range(self._get_model())
             if expert_range is not None:
-                self._ep_partial_pull = NativeEPPartialPull(*expert_range)
+                self._ep_partial_pull = NativeEPPartialPull(
+                    *expert_range, dims=expert_dims(self._get_model())
+                )
             elif self._rank == 0:
                 logger.warning(
                     "SWE_NATIVE_EP_PARTIAL_PULL=1 but no contiguous local expert "

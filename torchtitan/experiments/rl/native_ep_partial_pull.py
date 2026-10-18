@@ -54,15 +54,41 @@ def local_expert_range(model: torch.nn.Module) -> tuple[int, int, int] | None:
     return None
 
 
+def expert_dims(model: torch.nn.Module) -> tuple[int, int, torch.dtype] | None:
+    """``(dim, hidden_dim, dtype)`` of the experts, read from the first FusedMoE
+    layer, or None when they cannot be read unsharded (TP > 1)."""
+    for module in model.modules():
+        if not hasattr(module, "_map_global_expert_id_to_local_expert_id"):
+            continue
+        if getattr(module, "tp_size", 1) != 1:
+            return None
+        return (
+            int(module.hidden_size),
+            int(module.intermediate_size_per_partition),
+            module.params_dtype,
+        )
+    return None
+
+
 class NativeEPPartialPull:
     """Partial weight pull for one vllm_native EP rank.
 
-    The first pull is a full fetch (``record`` learns each expert tensor's global
-    shape and dtype from it); later pulls call ``fetch``.
+    Expert shapes come from ``dims`` when given; otherwise the first pull is a full
+    fetch and ``record`` learns each expert tensor's global shape and dtype from it.
     """
 
-    def __init__(self, start: int, stop: int, num_experts: int) -> None:
+    def __init__(
+        self,
+        start: int,
+        stop: int,
+        num_experts: int,
+        dims: tuple[int, int, torch.dtype] | None = None,
+    ) -> None:
         self.start, self.stop, self.num_experts = start, stop, num_experts
+        # With ``dims`` the expert shapes are known up front, so even the first
+        # fetch is partial: a full first pull holds the whole checkpoint once per
+        # EP rank in host memory (8 x 245 GB on 122B-A10B, which OOMs the host).
+        self._dims = dims
         self._expert_meta: dict[str, tuple[tuple[int, ...], torch.dtype]] = {}
         self._full_hf: dict[str, torch.Tensor] = {}
         # Whether the most recent fetch was partial; a full fetch (the first pull,
@@ -71,7 +97,24 @@ class NativeEPPartialPull:
 
     @property
     def ready(self) -> bool:
-        return bool(self._expert_meta)
+        return bool(self._expert_meta) or self._dims is not None
+
+    def _meta_from_dims(self, flat_keys: list[str]) -> None:
+        dim, hidden_dim, dtype = self._dims
+        shapes = {
+            "w1_EFD": (self.num_experts, hidden_dim, dim),
+            "w3_EFD": (self.num_experts, hidden_dim, dim),
+            "w2_EDF": (self.num_experts, dim, hidden_dim),
+        }
+        for fk in flat_keys:
+            m = _TT_EXPERT_KEY.search(fk)
+            if m:
+                self._expert_meta[fk] = (shapes[m.group(1)], dtype)
+        logger.info(
+            f"[ep-partial-pull] pulling experts [{self.start}, {self.stop}) of "
+            f"{self.num_experts} for {len(self._expert_meta)} expert tensors "
+            "(shapes from the vLLM config)"
+        )
 
     def record(self, state_dict: dict[str, Any]) -> None:
         """Learn the stacked expert tensors from a full fetch."""
@@ -129,6 +172,8 @@ class NativeEPPartialPull:
         client = await ts.client()
         mapping = await client.get(f"{key}{DELIM}{MAPPING}")
         flat_keys = list(mapping.keys())
+        if not self._expert_meta and self._dims is not None:
+            self._meta_from_dims(flat_keys)
         requests, inplace = self.build_requests(key, flat_keys)
         results = await client._fetch(requests)
         flat = {}

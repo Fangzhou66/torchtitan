@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import torch
 
 from torchtitan.experiments.rl.native_ep_partial_pull import (
+    expert_dims,
     local_expert_range,
     NativeEPPartialPull,
 )
@@ -20,9 +21,13 @@ KEY = "layers.3.moe.experts.w1_EFD"
 
 
 class _FusedMoE(torch.nn.Module):
-    def __init__(self, local: range | None):
+    def __init__(self, local: range | None, tp_size: int = 1):
         super().__init__()
         self.global_num_experts = E
+        self.tp_size = tp_size
+        self.hidden_size = D
+        self.intermediate_size_per_partition = F
+        self.params_dtype = torch.bfloat16
         if local is None:
             self.expert_map = None
         else:
@@ -120,3 +125,28 @@ def test_first_full_pull_is_not_embedded():
     full_hf = torch.randn(E, 2 * F, D)
     out = pull.embed_hf({hf_key: full_hf})
     assert out[hf_key] is full_hf
+
+
+def test_dims_give_record_shapes_without_a_full_pull():
+    """Shapes read from the vLLM layer must equal what record() learns from a
+    full pull, so the first pull can already be partial (a full first pull holds
+    the whole checkpoint once per EP rank in host memory)."""
+    dims = expert_dims(_model(range(4, 8)))
+    assert dims == (D, F, torch.bfloat16)
+    tp2 = torch.nn.Module()
+    tp2.moe = _FusedMoE(range(4, 8), tp_size=2)
+    assert expert_dims(tp2) is None
+
+    keys = [f"layers.3.moe.experts.{n}" for n in ("w1_EFD", "w2_EDF", "w3_EFD")]
+    recorded = NativeEPPartialPull(4, 8, E)
+    recorded.record(
+        {
+            keys[0]: torch.zeros(E, F, D, dtype=torch.bfloat16),
+            keys[1]: torch.zeros(E, D, F, dtype=torch.bfloat16),
+            keys[2]: torch.zeros(E, F, D, dtype=torch.bfloat16),
+        }
+    )
+    from_dims = NativeEPPartialPull(4, 8, E, dims=dims)
+    assert from_dims.ready
+    from_dims._meta_from_dims(keys + ["norm.weight"])
+    assert from_dims._expert_meta == recorded._expert_meta
