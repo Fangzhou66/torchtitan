@@ -81,13 +81,19 @@ bench.py readout <job> [<job> ...]
 For TB2.1 the eval JSONL is `data/evalsets/tb2_1_tmux_f1640f428d48.jsonl`
 (built by `../prepare_tb2_1_data.py`, tmux preinstalled) and the task tree is
 `terminal-bench-2-1/`. TB4: `data/evalsets/tb4_tmux_493ef156d.jsonl` (66 tasks,
-the same builder pointed at the TB4 tree with `--expect-tasks 66
---verify-runtime <dir> --keep-going`). Every TB4 task grades in a separate
-verifier environment (`tmax.separate_verifier`), which the rollouter boots
-after the agent submits and fills with the task's declared artifacts. Sandbox
-requests above Daytona's per-sandbox limits (4 vCPU, 8 GiB, 10 GiB disk) run at
-those limits; fp8-rmsnorm-gemm, jax-speedrun-gpu and math-eval-grader declare
-an H100, which a Daytona sandbox does not have.
+the same builder pointed at the TB4 release tree -- `terminal-bench-prebuilt-v4.0.0`
+from the v4.0.0 GitHub release, where every image is digest-pinned -- with
+`--expect-tasks 66 --verify-runtime <dir> --keep-going`). Every TB4 task grades in
+a separate verifier environment (`tmax.separate_verifier`), which the rollouter
+boots after the agent submits and fills with the task's declared artifacts. A
+task that declares more carries it in its row (see `../harbor_env.py`): an H100
+in region earth (`--gpu-target`) for fp8-rmsnorm-gemm, jax-speedrun-gpu and
+math-eval-grader; its docker-compose project, run on one docker-in-docker
+sandbox (11 tasks); the image's own non-root user for the agent (3); a
+healthcheck, collect hooks, verifier env and no-internet. That eval file
+predates these fields; rebuild it to get them. Sandbox requests above Daytona's
+per-sandbox limits (4 vCPU, 8 GiB, 10 GiB disk; with a GPU 16 vCPU, 192 GiB,
+512 GiB) run at those limits, so 20 tasks run smaller than they declare.
 
 `SYNC_OVERFIT.md` describes a strictly synchronous variant of a job (one group
 in flight, the next group waiting for the rewrites it triggered) and how it is run.
