@@ -1380,10 +1380,14 @@ class VLLMGenerator(Actor, Configurable):
                     ).split(",")
                     if op
                 ]
-                if custom_ops:
-                    engine_kwargs["compilation_config"] = CompilationConfig(
-                        custom_ops=custom_ops
-                    )
+                # The allreduce+rmsnorm fusion (on for TP > 1) needs FlashInfer
+                # all-reduce, which _install_flashinfer_allreduce_import_stub disables.
+                pass_config = PassConfig(fuse_allreduce_rms=False)
+                engine_kwargs["compilation_config"] = (
+                    CompilationConfig(custom_ops=custom_ops, pass_config=pass_config)
+                    if custom_ops
+                    else CompilationConfig(pass_config=pass_config)
+                )
                 logger.info(
                     "[generator] SWE_GEN_VLLM_DEFAULT_COMPILE=1: vLLM default "
                     "compile (inductor VLLM_COMPILE + FULL_AND_PIECEWISE), "
