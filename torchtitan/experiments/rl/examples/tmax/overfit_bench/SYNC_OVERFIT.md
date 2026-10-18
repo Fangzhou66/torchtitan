@@ -22,13 +22,24 @@ task version. Everything not listed keeps `recipe.env`.
 | `SWE_ALLOW_IDLE_ROLLOUT_SLOTS` | 1 | allows one active group (the work-conserving check otherwise asks for 2) |
 | `SWE_SYNC_WAIT_FOR_REWRITES` | 1 | the next group waits for this run's pending rewrites (below) |
 | `SWE_GROUP_SIZE`, `SWE_ROLLOUT_CONCURRENCY` | 12 | more attempts per task version; 32 had too long a tail |
-| `SWE_TB2_VAL_K` | 5 | readout = 5 attempts at the original every 5 steps |
+| `SWE_TB2_VAL_K` | 5 | readout = 5 attempts at the original |
+| `SWE_VAL_INTERVAL` | 1 | a readout of every step's weights (see below) |
 | `SWE_TMAX_CONTEXT` / `SWE_MAX_CONTEXT_LEN` | 122880 / 120832 | 24% of the first rollouts ended at the 63.5K wall |
 | `SWE_AGENT_TIMEOUT_FLOOR_SEC` | 2400 | see "budget" below |
 | `SWE_EVOLUTION_HARDER_RATIO` | 0.9 | harder signal at >= 90% solved; easier at 0 |
 
-Hardware: one 8-GPU host, everything collocated: trainer FSDP-6, one
-generator, one eval generator.
+Hardware. At 120K the trainer's FSDP-6 on a shared 8-GPU host ran out of memory
+in the loss-chunk backward of step 2 (the fp32 lm_head gradient of one chunk,
+3.8 GiB, with 0.4 GiB free). The run now gives the trainer a host of its own
+(FSDP-8, `SWE_LOSS_CHUNKS=64`) and the generator and eval generator one each.
+The goal is one host: FSDP-6 + generator + eval generator with
+`SWE_LOSS_CHUNKS=128` (that chunk drops to ~0.95 GiB) is being tested. A
+layout without an eval GPU is ruled out by the per-step readout: run on the
+training generator, a readout attempt spans weight updates.
+
+Smoke-test a new context length for a few steps before a long run, with
+retries off: an OOM that recurs on every restart costs a full rollout group per
+attempt.
 
 ## What "synchronous" means here
 
@@ -52,6 +63,26 @@ A group that solves 0/12 writes an "easier" signal, one at >= 90% a "harder"
 signal; in between nothing is rewritten and steps run back to back. The curve
 this produces is the back-and-forth of rewrites around a task the policy can
 just reach.
+
+## A readout of every step
+
+`SWE_VAL_INTERVAL=1` with the eval generator: after step N the eval GPU runs
+the 5 readout attempts on step N's weights while the training generator rolls
+out step N+1's group on the same weights, so the readout costs no training
+time. A pass still running when the next one is due is skipped, not queued, and
+counted in `validation/skipped`; with 5 readout attempts against a 12-attempt
+group the readout usually finishes first.
+
+## Where the time goes
+
+Measured on this task at 120K, 12 attempts per group: decode runs at 60-85
+tokens/s per sequence whether 1 or 12 sequences are running, a turn takes
+~30-45 s, a rollout ~10-15 min at the median, and a group's wall time
+(~25-40 min) is set by its slowest attempt, often one that runs into the
+2400 s budget. A vLLM-native generator decoded slower (55-65 tokens/s); three
+generators instead of one cut the time per turn ~10%. The levers that remain
+are the per-sequence decode speed and the budget, and the rewrite time
+(~30-60 min each) on the critical path of every rewritten version.
 
 ## The rewriter
 
