@@ -23,10 +23,8 @@ load_env_file() {
 load_env_file "$HERE/recipe.env"
 [ -n "${RUNNER_ENV:-}" ] && load_env_file "$RUNNER_ENV"
 
-tag=$(python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(j["bench"]+"-"+j["task"]+"-"+j["rewriter"])' "$JOB/job.json")
 export TRL_BASE="$JOB"
 export TRL_TT="${TRL_TT:-$(cd "$HERE/../../../../../.." && pwd)}"
 export SWE_TB2_VAL_DATA="$JOB/data/evalsets/original.jsonl"
 export SWE_CKPT_FOLDER="${SWE_CKPT_FOLDER:-$JOB/ckpt}"
-export TT_DAYTONA_LABEL="${TT_DAYTONA_LABEL:-overfit-$tag}"
 exec "$HERE/../runbook/launch_9b.sh" "${@:2}"
