@@ -97,6 +97,7 @@ from torchtitan.experiments.rl.examples.tmax.env import TMaxEnv
 from torchtitan.experiments.rl.examples.tmax.grading import (
     ctrf_pass_fraction,
     grade_separate,
+    separate_collect_budget_sec,
     grade_tmax,
     read_ctrf_report,
     seed_workspace,
@@ -1972,9 +1973,13 @@ class TMaxRollouter(Rollouter):
                             # The verifier sandbox boots now, on the agent's
                             # clock: give it the same boot allowance the agent's
                             # sandbox had.
+                            # Collecting the artifacts (collect hooks, stopping
+                            # main, per-artifact copies) and restoring them come
+                            # on top, which the guard's fixed slack does not cover.
                             rollout_timeout.reschedule(
                                 rollout_timeout.when()
                                 + self._SANDBOX_BOOT_ALLOWANCE_SEC
+                                + separate_collect_budget_sec(separate)
                             )
                             reward, ctrf = await self._grade_separate(
                                 sandbox,

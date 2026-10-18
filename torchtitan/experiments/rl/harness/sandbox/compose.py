@@ -464,7 +464,7 @@ class DaytonaComposeSandbox:
                             "0",
                             cid,
                             "chown",
-                            f"{user}:{user}",
+                            f"{user}:",  # its login group (nobody's is nogroup)
                             sandbox_path,
                         ]
                     ),

@@ -1598,7 +1598,9 @@ class DaytonaSandbox:
         )
         if user and user != "root":
             await self.exec(
-                f"chown {shlex.quote(user)}:{shlex.quote(user)} {shlex.quote(sandbox_path)}",
+                # "user:" is the user and its login group; "user:user" names a
+                # group that need not exist (nobody's is nogroup) and fails.
+                f"chown {shlex.quote(user)}: {shlex.quote(sandbox_path)}",
                 user="root",
                 check=False,
             )

@@ -198,7 +198,7 @@ def test_file_transfer_goes_through_docker_cp(monkeypatch):
     asyncio.run(sb.write_file("/app/x.txt", "hi", user="agent"))
     joined = "\n".join(c for c, _ in host.cmds)
     assert "docker cp /tmp/tt_wf_" in joined and f"{CID}:/app/x.txt" in joined
-    assert "chown agent:agent /app/x.txt" in joined
+    assert "chown agent: /app/x.txt" in joined
     assert asyncio.run(sb.read_file("/app/x.txt")) == "file-text"
 
 

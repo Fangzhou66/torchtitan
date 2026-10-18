@@ -27,12 +27,14 @@ Two entry points, both driving the same steps:
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
 import posixpath
 import re
 import shlex
+import tarfile
 import uuid
 from functools import partial
 from typing import TYPE_CHECKING
@@ -476,22 +478,31 @@ async def collect_artifacts(sb: Sandbox, paths: list[str]) -> bytes | None:
 
 
 async def restore_artifacts(
-    sb: Sandbox, data: bytes | None, *, into: str | None = None
+    sb: Sandbox,
+    data: bytes | None,
+    *,
+    into: str | None = None,
+    empty: list[str] | None = None,
 ) -> None:
     """Unpack ``collect_artifacts``' tar at the same paths in ``sb``.
 
-    ``into``: the tar is one directory's contents (an artifact with ``exclude``
-    patterns); that directory is emptied first, as Harbor empties a directory
-    artifact's target before uploading it."""
+    Harbor empties a directory artifact's target before uploading it
+    (``empty_dirs([target], chmod=True)``): ``empty`` names the directory
+    artifacts of a tar rooted at ``/``, and ``into`` says the tar is one
+    directory's contents (an artifact with ``exclude`` patterns). Either way
+    those directories are emptied and opened (777) first."""
     if not data:
         return
     await sb.write_file(_ARTIFACTS_TGZ, data, user="root")
-    prep = ""
     root = "/"
+    targets = list(empty or [])
     if into is not None:
-        q = shlex.quote(into)
-        prep = f"rm -rf {q} && mkdir -p {q} && chmod 777 {q} && "
-        root = q
+        targets.append(into)
+        root = shlex.quote(into)
+    prep = "".join(
+        f"rm -rf {q} && mkdir -p {q} && chmod 777 {q} && "
+        for q in map(shlex.quote, targets)
+    )
     await sb.exec(
         f"{prep}tar -C {root} -xzf {_ARTIFACTS_TGZ} && rm -f {_ARTIFACTS_TGZ}",
         user="root",
@@ -518,6 +529,38 @@ async def _collect_excluding(sb: Sandbox, source: str, exclude: list[str]) -> by
 
 
 _MAIN_SERVICE = "main"
+
+
+def _dir_artifacts(data: bytes, sources: list[str]) -> list[str]:
+    """The declared ``sources`` that are directories in a tar rooted at ``/``."""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+            dirs = {m.name.strip("/") for m in tar.getmembers() if m.isdir()}
+    except (tarfile.TarError, OSError, EOFError):
+        return []
+    return [s for s in sources if s.strip("/") and s.strip("/") in dirs]
+
+
+def separate_collect_budget_sec(sv: dict) -> int:
+    """Wall-clock collection and restore may take for a separate verifier,
+    beyond the verifier's own budget and its boot: every collect hook's
+    timeout, stopping main (60 s) when a sidecar is involved, and per artifact
+    transfer the exec timeouts of collecting it (300 s; a sidecar's docker cp
+    up to 630 s more) and of restoring it (300 s). The rollout guard grows by
+    this for a separate-verifier row."""
+    entries = _artifact_entries(sv)
+    hooks = list(sv.get("collect") or [])
+    sidecars = [e for e in entries if e["service"] != _MAIN_SERVICE]
+    side_hooks = [h for h in hooks if (h.get("service") or _MAIN_SERVICE) != _MAIN_SERVICE]
+    plain = any(e["service"] == _MAIN_SERVICE and not e["exclude"] for e in entries)
+    excluded = [e for e in entries if e["service"] == _MAIN_SERVICE and e["exclude"]]
+    transfers = int(plain) + len(excluded) + len(sidecars)
+    return (
+        sum(max(1, int(float(h.get("timeout_sec") or 60))) for h in hooks)
+        + (60 if sidecars or side_hooks else 0)
+        + 600 * transfers
+        + 630 * len(sidecars)
+    )
 
 
 def _artifact_entries(sv: dict) -> list[dict]:
@@ -691,8 +734,15 @@ async def grade_separate(
         labels=labels,
         **({"sandbox_options": options} if options else {}),
     ) as verifier_sb:
+        sources = [e["source"] for e in _artifact_entries(sv)]
         for into, data in bundles:
-            await restore_artifacts(verifier_sb, data, **({"into": into} if into else {}))
+            if into:
+                await restore_artifacts(verifier_sb, data, into=into)
+                continue
+            empty = _dir_artifacts(data, sources)
+            await restore_artifacts(
+                verifier_sb, data, **({"empty": empty} if empty else {})
+            )
         reward = await grade_tmax(
             verifier_sb,
             tmax,

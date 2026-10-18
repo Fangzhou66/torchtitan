@@ -308,3 +308,75 @@ def test_restore_into_empties_the_directory_first():
     sb = _Sb()
     asyncio.run(grading.restore_artifacts(sb, b"x"))
     assert sb.cmds[0].startswith("tar -C / -xzf ")
+
+
+def _tgz(entries: dict[str, bytes | None]) -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_directory_artifacts_are_emptied_before_restore_as_harbor_does():
+    data = _tgz({"app/output": None, "app/output/model.pt": b"x", "app/out.json": b"{}"})
+    assert grading._dir_artifacts(data, ["/app/output", "/app/out.json", "/missing"]) == [
+        "/app/output"
+    ]
+    assert grading._dir_artifacts(b"not a tar", ["/app/output"]) == []
+
+    class _Sb:
+        def __init__(self):
+            self.cmds = []
+
+        async def write_file(self, path, content, *, user="root"):
+            pass
+
+        async def exec(self, cmd, **kw):
+            self.cmds.append(cmd)
+            return 0, "", ""
+
+    sb = _Sb()
+    asyncio.run(grading.restore_artifacts(sb, data, empty=["/app/output"]))
+    assert sb.cmds[0].startswith(
+        "rm -rf /app/output && mkdir -p /app/output && chmod 777 /app/output && tar -C / -xzf "
+    )
+
+
+def test_grade_separate_empties_the_directory_artifacts_it_restores(monkeypatch):
+    log: list = []
+    boot, _booted = _install(monkeypatch, log)
+    data = _tgz({"app/output": None, "app/output/model.pt": b"x"})
+
+    async def collect(sb, paths):
+        return data
+
+    monkeypatch.setattr(grading, "collect_artifacts", collect)
+
+    async def restore(sb, data, **kw):
+        log.append(("restore", kw))
+
+    monkeypatch.setattr(grading, "restore_artifacts", restore)
+    sv = {"image": "v", "artifacts": ["/app/output", "/app/out.json"]}
+    asyncio.run(
+        grading.grade_separate(
+            _ComposeAgent(log), {"separate_verifier": sv}, workdir="/app", boot=boot
+        )
+    )
+    assert ("restore", {"empty": ["/app/output"]}) in log
+
+
+def test_collection_budget_covers_hooks_stop_and_every_transfer():
+    # hooks 10 + 60, stop main 60, 3 transfers x 600 (plain, excluded, sidecar),
+    # and the sidecar's docker cp 630.
+    assert grading.separate_collect_budget_sec(_SV) == 70 + 60 + 3 * 600 + 630
+    assert grading.separate_collect_budget_sec({"artifacts": ["/app/x"]}) == 600
