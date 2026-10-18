@@ -35,7 +35,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, MISSING, replace
 from pathlib import Path
 
 from torchtitan.config import Configurable
@@ -126,6 +126,28 @@ class TMaxSample:
     agent_user: str = ""
     """The non-root user a TB4 image declares; the agent runs as it while the
     harness keeps root. "" = the agent runs as root, as on every other row."""
+
+    def __setstate__(self, state) -> None:
+        """Unpickle, filling the fields a pickle older than them does not carry.
+
+        A frozen slots dataclass pickles as the list of its field values in
+        field order. A sample pickled before ``boot_kwargs`` / ``healthcheck`` /
+        ``agent_user`` existed (a controller checkpoint's pending groups,
+        ``SWE_CKPT_CONTROLLER_DATA=1``) has a shorter list, and the dataclass's
+        own ``__setstate__`` would leave those slots unset: reading one raises
+        AttributeError, and so does ``asdict`` in the lineage recorder. They get
+        their defaults instead, which is what such a row parses to today."""
+        values = list(state)
+        for i, f in enumerate(fields(self)):
+            if i < len(values):
+                value = values[i]
+            elif f.default is not MISSING:
+                value = f.default
+            elif f.default_factory is not MISSING:
+                value = f.default_factory()
+            else:
+                raise TypeError(f"TMaxSample pickle lacks required field {f.name!r}")
+            object.__setattr__(self, f.name, value)
 
 
 def _parse_sample_row(row: dict) -> TMaxSample:

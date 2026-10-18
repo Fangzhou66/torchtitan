@@ -250,3 +250,45 @@ def test_a_plain_rollout_boots_and_runs_as_before(monkeypatch):
     assert "sandbox_options" not in kwargs and "compose" not in kwargs
     assert all(user == "root" for kind, user, *_ in sandbox.calls if kind == "exec")
     assert not any(cmd.startswith("getent") for _k, _u, cmd, _e in sandbox.calls)
+
+
+def test_a_sample_pickled_before_the_new_fields_unpickles_with_their_defaults():
+    """A controller checkpoint (SWE_CKPT_CONTROLLER_DATA=1) pickles pending
+    samples. One written before boot_kwargs/healthcheck/agent_user existed holds
+    one value per field it had, in field order; it must load with the new fields
+    at their defaults, not with unset slots (AttributeError in the rollouter,
+    and in asdict for the lineage record)."""
+    import dataclasses
+    import pickle
+
+    from torchtitan.experiments.rl.training_lineage import sample_payload
+
+    sample = TMaxSample(
+        instance_id="t",
+        image="i",
+        workdir="/app",
+        problem_statement="x",
+        tmax={"test_sh": "y"},
+    )
+    new = ("boot_kwargs", "healthcheck", "agent_user")
+    names = [f.name for f in dataclasses.fields(TMaxSample)]
+    assert names[-3:] == list(new)  # appended, so the old fields keep their order
+    old_fields = [n for n in names if n not in new]
+
+    def old_getstate(self):
+        return [getattr(self, n) for n in old_fields]
+
+    current = TMaxSample.__getstate__
+    TMaxSample.__getstate__ = old_getstate
+    try:
+        blob = pickle.dumps(sample)
+    finally:
+        TMaxSample.__getstate__ = current
+    restored = pickle.loads(blob)
+    assert (restored.boot_kwargs, restored.healthcheck, restored.agent_user) == ({}, None, "")
+    assert restored == sample
+    assert sample_payload(restored)["boot_kwargs"] == {}
+    # and a current pickle round-trips unchanged
+    tb4 = _parse_sample_row({"prompt": "p", "metadata": dict(_TB4_MD)})
+    assert pickle.loads(pickle.dumps(tb4)) == tb4
+    assert pickle.loads(pickle.dumps(tb4)).agent_user == "agent"

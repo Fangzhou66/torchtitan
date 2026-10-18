@@ -1826,8 +1826,9 @@ class TMaxRollouter(Rollouter):
                         "rollout": str(rollout_idx),
                         **({"run": run.name} if run is not None else {}),
                     },
-                    # A TB4 row's GPU/region or compose project; empty otherwise.
-                    **sample.boot_kwargs,
+                    # A TB4 row's GPU/region or compose project; empty otherwise
+                    # (and absent on a sample unpickled from an older checkpoint).
+                    **getattr(sample, "boot_kwargs", {}),
                 ) as sandbox:
                     # Sandbox is up: shrink the guard back to the agent's own
                     # envelope. Boot-queue time must not eat the agent's budget --
@@ -1869,11 +1870,12 @@ class TMaxRollouter(Rollouter):
                     # seed-bearing tasks are unsolvable (inputs absent during rollout).
                     # Grading fixtures (tests/*) are uploaded later by grade_tmax.
                     await seed_workspace(root_sb, sample.tmax)
-                    if sample.healthcheck:
+                    healthcheck = getattr(sample, "healthcheck", None)
+                    if healthcheck:
                         # Harbor waits for [environment].healthcheck before the
                         # agent starts (TB4 kv-live-surgery). Its wait is setup,
                         # not the agent's time: restart the guard after it.
-                        await harbor_env.run_healthcheck(root_sb, sample.healthcheck)
+                        await harbor_env.run_healthcheck(root_sb, healthcheck)
                         rollout_timeout.reschedule(
                             asyncio.get_running_loop().time()
                             + self._guard_for(budget_sec, verifier_sec)
@@ -1900,14 +1902,13 @@ class TMaxRollouter(Rollouter):
                         pass
                     # A TB4 image that declares its own user: the agent runs as
                     # that user, the harness (root_sb) stays root, as in Harbor.
+                    agent_user = getattr(sample, "agent_user", "")
                     agent_sb = (
                         _RootSandbox(
-                            await harbor_env.enter_as_agent_user(
-                                sandbox, sample.agent_user
-                            ),
+                            await harbor_env.enter_as_agent_user(sandbox, agent_user),
                             exec_timing,
                         )
-                        if sample.agent_user
+                        if agent_user
                         else root_sb
                     )
                     failure_stage = "agent"
