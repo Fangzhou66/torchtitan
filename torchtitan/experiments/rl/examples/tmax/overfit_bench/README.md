@@ -91,9 +91,11 @@ in region earth (`--gpu-target`) for fp8-rmsnorm-gemm, jax-speedrun-gpu and
 math-eval-grader; its docker-compose project, run on one docker-in-docker
 sandbox (11 tasks); the image's own non-root user for the agent (3); a
 healthcheck, collect hooks, verifier env and no-internet. That eval file
-predates these fields; rebuild it to get them. Sandbox requests above Daytona's
+predates these fields; rebuild it to get them. A sandbox request above Daytona's
 per-sandbox limits (4 vCPU, 8 GiB, 10 GiB disk; with a GPU 16 vCPU, 192 GiB,
-512 GiB) run at those limits, so 20 tasks run smaller than they declare.
+512 GiB) is clamped to them; 20 tasks have one. For a compose task that clamps
+the docker-in-docker host only: the compose project keeps the task's declared
+cpu/memory reservations, which can then exceed the host's.
 
 `SYNC_OVERFIT.md` describes a strictly synchronous variant of a job (one group
 in flight, the next group waiting for the rewrites it triggered) and how it is run.

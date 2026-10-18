@@ -704,10 +704,15 @@ async def grade_separate(
 
     The rest follows Harbor 0.22.0's trial: artifacts may name a compose service
     or carry ``exclude`` patterns, ``collect`` hooks run first (``_collect_phased``),
-    ``env`` is the verifier's ``[verifier.env]``, the verifier boots with the
-    block's GPU/region/no-internet fields; a block without them collects and
-    boots as before. The reward is read as Harbor's verifier reads it:
-    ``reward.json`` when the verifier wrote one, else ``reward.txt``."""
+    ``env`` is the verifier's ``[verifier.env]``, and the verifier boots with
+    the block's GPU/region/no-internet fields. Three things now hold for every
+    separate verifier, #242's rows included:
+    - the reward is read as Harbor's verifier reads it: ``reward.json`` when
+      the verifier wrote one, else ``reward.txt``;
+    - a directory artifact's target is emptied before it is restored;
+    - Harbor's ``/logs/artifacts`` is collected when the block names it
+      (``convention_dir``, which this builder writes on every TB4 row).
+    A block without the other fields boots as before."""
     sv = tmax["separate_verifier"]
     record: dict = {}
     bundles = await _collect_phased(sb, sv, record)
