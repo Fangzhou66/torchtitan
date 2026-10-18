@@ -649,6 +649,8 @@ class DaytonaSandbox:
                                                enforces (default 8). A larger
                                                per-task request is clamped to it
                                                rather than refused at create.
+      ``TT_DAYTONA_MAX_DISK_GB``           -- per-sandbox disk cap, the same way
+                                               (default 10).
       ``TT_DAYTONA_CREATE_TIMEOUT``        -- snapshot-build/boot wait (default 900s).
       ``TT_DAYTONA_EXEC_TIMEOUT_MIN``       -- SDK request timeout floor; does not
                                                extend the command runtime limit.
@@ -981,6 +983,19 @@ class DaytonaSandbox:
             if self.disk_gb is not None
             else int(_getenv("TT_DAYTONA_DISK_GB", default="6"))
         )
+        # The same cap for disk, for the same reason: Daytona refuses a create
+        # over 10 GiB ("Disk request 20GB exceeds maximum allowed per sandbox"),
+        # and 18 of the 66 TB4 tasks declare 15-1000 GiB. At the cap a task that
+        # really needs more fills its disk, which the disk issue kinds report.
+        disk_cap = int(_getenv("TT_DAYTONA_MAX_DISK_GB", default="10"))
+        if disk > disk_cap:
+            logger.warning(
+                "sandbox disk request %d GiB exceeds the per-sandbox cap "
+                "(%d GiB); requesting the cap instead",
+                disk,
+                disk_cap,
+            )
+            disk = disk_cap
         self.allocated_disk_gb = disk
         create_timeout = float(_getenv("TT_DAYTONA_CREATE_TIMEOUT", default="900"))
         # Cloud-side TTL so an orphan (left by a SIGKILL'd run that never reached
