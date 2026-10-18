@@ -657,6 +657,12 @@ def _provider_overrides() -> list[str]:
         f"model_providers.oai.name={'OpenAI' if WEB_SEARCH else 'openai'}",
         f"model_providers.oai.base_url={API_BASE}",
         "model_providers.oai.env_key=OPENAI_API_KEY",
+        # The CLI's defaults give up after a few 429s a few seconds apart; a
+        # pooled ChatGPT account under a large run rate-limits for longer, and
+        # each lost session is a lost rewrite (10-17: ~150 per r100 arm at 72
+        # concurrent). EVOLVE_CODEX_EXTRA_CONFIG, passed after, can override.
+        "model_providers.oai.request_max_retries=10",
+        "model_providers.oai.stream_max_retries=20",
         "model_provider=oai",
     ] + search + _extra_config()
 
