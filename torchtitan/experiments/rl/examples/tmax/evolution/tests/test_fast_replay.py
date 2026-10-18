@@ -270,9 +270,15 @@ def test_probe_reads_a_real_tmux_pane():
     directory = Path(tempfile.mkdtemp(prefix="terminus-", dir="/var/tmp"))
     session = "oracle-" + uuid.uuid4().hex
     env = {**os.environ, "TMUX_TMPDIR": str(directory)}
+    # TMUX inherited from the caller takes precedence over TMUX_TMPDIR.
+    # Bind creation and cleanup to this test's socket explicitly.
+    socket = directory / f"tmux-{os.getuid()}" / "default"
+    socket.parent.mkdir(mode=0o700)
 
     def tmux(*args):
-        subprocess.run(["tmux", *args], env=env, check=True, capture_output=True)
+        subprocess.run(
+            ["tmux", "-S", str(socket), *args], env=env, check=True, capture_output=True
+        )
 
     class LocalSandbox:
         async def exec(self, cmd, check=False, timeout=30):
@@ -300,7 +306,9 @@ def test_probe_reads_a_real_tmux_pane():
         seen = until(lambda s: s["idle"] and s["background"])
         assert len(seen["background"]) == 1
     finally:
-        subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
+        subprocess.run(
+            ["tmux", "-S", str(socket), "kill-server"], env=env, capture_output=True
+        )
         shutil.rmtree(directory, ignore_errors=True)
 
 
