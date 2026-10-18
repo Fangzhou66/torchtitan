@@ -531,9 +531,19 @@ class Controller(Configurable):
         leave the rest of the box to rollout collection. The pass then takes longer,
         which is why the in-flight skip in ``_start_async_validation`` exists -- a
         pass slower than ``validation.interval`` thins the eval curve rather than
-        stalling training. Tensor-parallel degree is the training generator's either
-        way: a model that needs TP to fit still needs it here.
+        stalling training. Tensor-parallel degree is the training generator's unless
+        ``eval_generator_tensor_parallel_degree`` is set.
         """
+
+        eval_generator_tensor_parallel_degree: int = 0
+        """Tensor-parallel degree of an eval generator; 0 (default) keeps the
+        training generator's."""
+
+        eval_generator_expert_parallel_degree: int = 0
+        """Expert-parallel degree of an eval generator; 0 (default) keeps the
+        training generator's. An MoE eval pass is latency bound (its long tail sets
+        the wall time), so several small independent engines (e.g. TP 2, EP 1)
+        avoid the per-step DP x EP lockstep of one host-wide engine group."""
 
         eval_generator_max_model_len: int = 0
         """vLLM ``max_model_len`` for the eval generators only.
@@ -622,11 +632,15 @@ class Controller(Configurable):
                     "eval_generator_max_model_len must be non-negative, got "
                     f"{self.eval_generator_max_model_len}"
                 )
-            if self.eval_generator_data_parallel_degree < 0:
-                raise ValueError(
-                    "eval_generator_data_parallel_degree must be non-negative, got "
-                    f"{self.eval_generator_data_parallel_degree}"
-                )
+            for name in (
+                "eval_generator_data_parallel_degree",
+                "eval_generator_tensor_parallel_degree",
+                "eval_generator_expert_parallel_degree",
+            ):
+                if getattr(self, name, 0) < 0:
+                    raise ValueError(
+                        f"{name} must be non-negative, got {getattr(self, name)}"
+                    )
             if (
                 self.eval_generator_data_parallel_degree > 0
                 and self.num_eval_generators == 0
@@ -748,12 +762,24 @@ class Controller(Configurable):
             ``setup_async`` builds the engine config from it. Deriving it twice is how
             a mesh ends up a different width than the engine spawned onto it.
             """
-            if not self.eval_generator_data_parallel_degree:
+            overrides = {
+                field_name: degree
+                for field_name, degree in (
+                    ("data_parallel_degree", self.eval_generator_data_parallel_degree),
+                    (
+                        "tensor_parallel_degree",
+                        getattr(self, "eval_generator_tensor_parallel_degree", 0),
+                    ),
+                    (
+                        "expert_parallel_degree",
+                        getattr(self, "eval_generator_expert_parallel_degree", 0),
+                    ),
+                )
+                if degree
+            }
+            if not overrides:
                 return self.generator.parallelism
-            return replace(
-                self.generator.parallelism,
-                data_parallel_degree=self.eval_generator_data_parallel_degree,
-            )
+            return replace(self.generator.parallelism, **overrides)
 
         def eval_generator_model_spec(self):
             """Model spec the eval generators are spawned with.

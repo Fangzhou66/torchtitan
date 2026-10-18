@@ -784,6 +784,15 @@ def rl_grpo_qwen3_5_9b_tmax(
     config.eval_generator_data_parallel_degree = int(
         os.environ.get("SWE_EVAL_GEN_DP", "0")
     )
+    # SWE_EVAL_GEN_TP / SWE_EVAL_GEN_EP: eval-only TP / EP (0 = the training
+    # generator's). With SWE_PACK_GENERATORS=1, an MoE eval host can run several
+    # small engines (e.g. TP 2, EP 1: four per host) instead of one DP x EP group.
+    config.eval_generator_tensor_parallel_degree = int(
+        os.environ.get("SWE_EVAL_GEN_TP", "0")
+    )
+    config.eval_generator_expert_parallel_degree = int(
+        os.environ.get("SWE_EVAL_GEN_EP", "0")
+    )
     config.num_eval_rollout_workers = (
         int(os.environ.get("SWE_NUM_EVAL_ROLLOUT_WORKERS", "4"))
         if config.num_eval_generators
