@@ -908,13 +908,88 @@ def _done(
     return rec
 
 
-def _restart_for_spec_repair(rewrite: layout.RewriteDir, seed_dir: Path) -> None:
+def _restart_for_spec_repair(
+    rewrite: layout.RewriteDir, seed_dir: Path, job: str
+) -> None:
     """Keep the declined attempt, then repair a clean copy of the input revision."""
-    declined = rewrite.path / "declined-simplify"
+    declined = rewrite.path / (
+        "declined-simplify" if job == "easier" else "declined-evolve"
+    )
     rewrite.package.rename(declined)
     shutil.copytree(seed_dir, rewrite.package)
     if (declined / "traces").exists():
         (declined / "traces").rename(rewrite.traces)
+
+
+def _spec_repair(ec, rec: dict, rewrite, task: dict, seed_dir: Path, deadline, job: str):
+    """Repair the defect an easier or harder session reported in place of its change.
+
+    Allowed by default (EVOLVE_SPEC_REPAIR=0 keeps the task as it is instead):
+    a defective task gives no signal in either direction -- a hidden
+    requirement keeps it at 0/k, an accepted shortcut at k/k. Every attempt is
+    reported in evolution/repairs.jsonl (see _report_spec_repair). Returns the
+    repaired package, or None with `rec` finished when no repair goes ahead.
+    """
+    report = (rewrite.package / "run" / "verdict.txt").read_text()
+    rec["spec_repair"] = {"reported": report, "direction": job}
+    rec["route"] = "repair_spec"
+    if os.environ.get("EVOLVE_SPEC_REPAIR", "1") != "1":
+        _done(rec, "kept", stage="repair_required", reason=report)
+        return None
+    rec["action"] = "repair_spec"
+    rec["family"] = "spec_repair"
+    try:
+        _restart_for_spec_repair(rewrite, seed_dir, job)
+        new = ec.evolve_agentic(
+            rewrite, task, "repair_spec", observed=report, deadline=deadline
+        )
+    except ec.Blocked as error:
+        _done(rec, "kept", stage="spec_repair_declined", reason=str(error))
+        return None
+    except Exception as error:  # noqa: BLE001 -- leave the input unchanged
+        _failed(rec, stage="spec_repair_agent", error=error)
+        return None
+    rec["spec_repair"]["declaration"] = new["_spec_repair"]
+    return new
+
+
+def _report_spec_repair(rec: dict) -> None:
+    """One line per spec repair in evolution/repairs.jsonl and loop.log.
+
+    A repair changes what the task asks or how it is graded, so each one is
+    surfaced for review rather than left inside its rewrite.json. A failure to
+    write the report is logged and does not cost the rewrite.
+    """
+    repair = rec.get("spec_repair")
+    if not repair:
+        return
+    declaration = repair.get("declaration") or {}
+    line = {
+        "time": time.time(),
+        "task": rec.get("task"),
+        "direction": repair.get("direction"),
+        "status": rec.get("status"),
+        "stage": rec.get("stage"),
+        "reported": repair.get("reported", "")[:2000],
+        "diagnosis": declaration.get("diagnosis"),
+        "evidence": declaration.get("evidence"),
+        "change": declaration.get("change"),
+        "retained_skill": declaration.get("retained_skill"),
+        "validation": declaration.get("validation"),
+        "changed": rec.get("changed"),
+        "reason": rec.get("reason"),
+    }
+    log.info(
+        "spec repair %s (%s): %s -- %s",
+        rec.get("task"),
+        repair.get("direction"),
+        rec.get("status"),
+        (declaration.get("diagnosis") or repair.get("reported", ""))[:200],
+    )
+    try:
+        layout.append_jsonl(layout.Root.from_env().evolution.repairs, line)
+    except Exception as error:  # noqa: BLE001 -- the report must not cost the rewrite
+        log.warning("spec repair report not written for %s: %s", rec.get("task"), error)
 
 
 def _failed(rec: dict, *, stage: str, error: Exception) -> dict:
@@ -1055,26 +1130,9 @@ def process_one(
                     )
                 if not str(e).startswith("BLOCKED: repair_required:"):
                     return _done(rec, "kept", stage="agent", reason=str(e))
-                report = (work / "run" / "verdict.txt").read_text()
-                rec["spec_repair"] = {"reported": report}
-                rec["route"] = "repair_spec"
-                if os.environ.get("EVOLVE_SPEC_REPAIR", "0") != "1":
-                    return _done(rec, "kept", stage="repair_required", reason=report)
-                rec["action"] = "repair_spec"
-                rec["family"] = "spec_repair"
-                try:
-                    _restart_for_spec_repair(rewrite, seed_dir)
-                    new = ec.evolve_agentic(
-                        rewrite, task, "repair_spec", observed=report,
-                        deadline=deadline,
-                    )
-                    rec["spec_repair"]["declaration"] = new["_spec_repair"]
-                except ec.Blocked as error:
-                    return _done(
-                        rec, "kept", stage="spec_repair_declined", reason=str(error)
-                    )
-                except Exception as error:  # noqa: BLE001 -- leave the input unchanged
-                    return _failed(rec, stage="spec_repair_agent", error=error)
+                new = _spec_repair(ec, rec, rewrite, task, seed_dir, deadline, job)
+                if new is None:
+                    return rec
             except Exception as e:  # noqa: BLE001 -- the task stays as it is
                 return _failed(rec, stage="agent", error=e)
             rec["hint"] = new.get("_hint")
@@ -1090,12 +1148,16 @@ def process_one(
                 new = _evolve_retrying_the_filter(
                     ec, rec, tid, rewrite, task, deadline, **agent_kw
                 )
-                rec["hint"] = new.get("_hint")
-                rec["agent_validated"] = new.get("_agent_validated")
             except ec.Blocked as e:
-                return _done(rec, "kept", stage="agent", reason=str(e))
+                if not str(e).startswith("BLOCKED: repair_required:"):
+                    return _done(rec, "kept", stage="agent", reason=str(e))
+                new = _spec_repair(ec, rec, rewrite, task, seed_dir, deadline, job)
+                if new is None:
+                    return rec
             except Exception as e:  # noqa: BLE001 -- the task stays as it is
                 return _failed(rec, stage="agent", error=e)
+            rec["hint"] = new.get("_hint")
+            rec["agent_validated"] = new.get("_agent_validated")
 
         _record_agent_diagnostics(rec, new)
         if new.get("_calibration"):
@@ -1235,3 +1297,4 @@ def process_one(
         rec["t_end"] = time.time()
         timings["total"] = round(rec["t_end"] - rec["t_start"], 1)
         rec["timings"] = timings
+        _report_spec_repair(rec)

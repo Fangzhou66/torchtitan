@@ -65,6 +65,7 @@ $TRL_BASE/
 ├── evolution/                    only the loop writes here
 │   ├── loop.log  loop.lock  loop.env
 │   ├── ledger.jsonl              one line per signal seen: when, which rewrite, outcome
+│   ├── repairs.jsonl             one line per spec repair attempted: the defect reported, the change, the outcome
 │   ├── status.json               refreshed during and after rounds; the trainer reads it
 │   ├── outcomes/<run>.jsonl       completed outcomes; sampled by that run at each training step
 │   └── tasks/<task>/
