@@ -285,21 +285,29 @@ class MixDir:
         """Which history file ``live.jsonl`` is: matched by inode, then by content."""
         if not self.live.exists():
             return None
+        # Newest first: live is almost always the latest version. On a mount
+        # without hardlinks (Manifold FUSE) the inode never matches, and an
+        # oldest-first content scan read every manifest, which grew to minutes
+        # with ~800 versions and stalled the trainer's data loop on each reload.
         try:
             ino = self.live.stat().st_ino
-            for version, p in self.versions():
-                if p.stat().st_ino == ino:
-                    return version, p
         except OSError:
-            pass
-        digest = sha256_file(self.live)
-        for version, p in self.versions():
-            manifest = self.manifest_of(p)
+            ino = None
+        digest: str | None = None
+        for version, p in reversed(self.versions()):
             try:
-                if json.loads(manifest.read_text()).get("sha256") == digest:
+                if ino is not None and p.stat().st_ino == ino:
                     return version, p
+            except OSError:
+                pass
+            if digest is None:
+                digest = sha256_file(self.live)
+            try:
+                manifest = json.loads(self.manifest_of(p).read_text())
             except (OSError, ValueError):
                 continue
+            if manifest.get("sha256") == digest:
+                return version, p
         return None
 
     def publish(
