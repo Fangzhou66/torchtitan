@@ -272,8 +272,13 @@ def _has_own_dockerfile(md: dict) -> bool:
     )
 
 
-async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
-    """Build and check two fresh sandboxes per task; resume from exact-row evidence."""
+async def verify_runtime(
+    rows: list[dict], evidence_dir: str, *, keep_going: bool = False
+) -> dict[str, str]:
+    """Build and check two fresh sandboxes per task; resume from exact-row evidence.
+
+    Raises on the first task that fails, unless ``keep_going``: then every task
+    is checked and the failures come back as ``{task_id: error}``."""
     from torchtitan.experiments.rl.examples.tmax.evolution.resolve_base_images import (
         head_digest,
         MEDIA,
@@ -296,6 +301,7 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
         ).hexdigest(),
         "probe_command": _TMUX_PROBE,
     }
+    failed: dict[str, str] = {}
     with (root / "progress.jsonl").open("a") as log:
 
         def event(task: str, state: str, **extra) -> None:
@@ -396,7 +402,10 @@ async def verify_runtime(rows: list[dict], evidence_dir: str) -> None:
                 event(tid, "pass", evidence=str(evidence), probes=probes)
             except Exception as error:
                 event(tid, "fail", error=str(error), row=row, probes=probes)
-                raise
+                if not keep_going:
+                    raise
+                failed[tid] = str(error)
+    return failed
 
 
 # Suffix carrying a base64-encoded binary grading fixture (see _BINARY_DECODE_PREAMBLE).
@@ -813,6 +822,12 @@ def main() -> None:
         "sandboxes per task before publishing the output; resumes from evidence",
     )
     ap.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="with --verify-runtime: check every task, leave the ones that fail out "
+        "of the output and list them in <out>.failed.json",
+    )
+    ap.add_argument(
         "--no-binary-fixtures",
         action="store_true",
         help="drop non-UTF-8 grading fixtures instead of shipping them base64 "
@@ -875,7 +890,15 @@ def main() -> None:
     if args.verify_runtime:
         if Path(args.out).exists():
             raise SystemExit(f"Refusing to overwrite {args.out}; use a new output path")
-        asyncio.run(verify_runtime(rows, args.verify_runtime))
+        failed = asyncio.run(
+            verify_runtime(rows, args.verify_runtime, keep_going=args.keep_going)
+        )
+        if failed:
+            # Left out of the output, with their reasons beside it.
+            rows = [r for r in rows if r["metadata"]["instance_id"] not in failed]
+            write_json_atomic(Path(args.out + ".failed.json"), failed)
+            for tid, why in sorted(failed.items()):
+                print(f"WARNING: runtime check failed {tid}: {why[:300]}", file=sys.stderr)
     _write_jsonl(rows, args.out)
     print(f"wrote {len(rows)} tasks -> {args.out}")
 
