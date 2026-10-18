@@ -484,6 +484,13 @@ def main() -> None:
         "workspace (repeatable)",
     )
     ap.add_argument(
+        "--row",
+        type=Path,
+        help="a JSONL file holding this package's row as training serves it (a "
+        "benchmark's eval row: its published image, separate verifier); the "
+        "package then supplies only the solution",
+    )
+    ap.add_argument(
         "--pretest-file",
         type=Path,
         help="the row's pin hook (a rewrite's pretest.json); graded "
@@ -511,6 +518,11 @@ def main() -> None:
                 protected=(
                     pack.Protected.from_pretest_file(args.pretest_file)
                     if args.pretest_file
+                    else None
+                ),
+                prepared_row=(
+                    json.loads(args.row.read_text().splitlines()[0])
+                    if args.row
                     else None
                 ),
             )

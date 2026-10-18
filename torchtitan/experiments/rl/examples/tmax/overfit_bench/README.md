@@ -70,11 +70,17 @@ bench.py new --tasks <tasks dir> --task <id> --sources <bench task tree> \
 TRL_PROFILE=<p> RUNNER_ENV=<hardware env> ./start_training.sh <job>
 <your rewriter> <job>        # or: ./start_reference_rewriter.sh <job>
 
+# the reference solution through the job's own row, on Daytona (a check that
+# the task runs as training serves it; nothing of the bench depends on it)
+evolution/daytona_revalidate.py <task package> --row <tasks dir>/<id>.jsonl
+
 # results, one line per job
 bench.py readout <job> [<job> ...]
 ```
 
 For TB2.1 the eval JSONL is `data/evalsets/tb2_1_tmux_f1640f428d48.jsonl`
 (built by `../prepare_tb2_1_data.py`, tmux preinstalled) and the task tree is
-`terminal-bench-2-1/`. TB4 needs separate-environment verification in the
-rollouter, which the trainer does not have yet.
+`terminal-bench-2-1/`. TB4 rows come from the same builder pointed at the TB4
+tree (`--expect-tasks 66`); every TB4 task grades in a separate verifier
+environment (`tmax.separate_verifier`), which the rollouter boots after the
+agent submits and fills with the task's declared artifacts.
