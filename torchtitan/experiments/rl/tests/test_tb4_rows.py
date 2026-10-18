@@ -211,3 +211,53 @@ def test_freecad_verifier_build_is_patched_and_published_rows_are_not(tmp_path):
     (task / "tests" / "Dockerfile").write_text("FROM python:3.11\n")
     with pytest.raises(ValueError, match="not found once"):
         B.separate_verifier(cfg, str(task), build=True)
+
+
+_SOURCE_TOML = """schema_version = "1.2"
+artifacts = ["/app/out.json"]
+
+[task]
+name = "terminal-bench/demo-task"
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+
+[agent]
+timeout_sec = 3600.0
+
+[environment]
+docker_image = "harborframework/terminal-bench:demo-environment@sha256:abc"
+cpus = 4
+memory_mb = 16384
+storage_mb = 30720
+gpus = 1
+gpu_types = ["H100"]
+allow_internet = false
+"""
+
+
+def test_a_verifier_without_its_own_environment_inherits_the_tasks(tmp_path):
+    """Harbor: no [verifier.environment] means a deep copy of [environment]
+    (60 of the 66 source-tree task.tomls). Not its image: the agent's image
+    does not hold /tests."""
+    task = _task(tmp_path, _SOURCE_TOML)
+    cfg = tomllib.loads(_SOURCE_TOML)
+    built, why = B.separate_verifier(cfg, str(task), build=True)
+    assert why == ""
+    assert (built["daytona_cpu"], built["daytona_mem_gb"], built["daytona_disk_gb"]) == (4, 16, 30)
+    assert (built["daytona_gpu"], built["daytona_gpu_type"]) == (1, ["H100"])
+    assert built["network_block_all"] is True
+    assert "image" not in built
+    published, why = B.separate_verifier(cfg, str(task), build=False)
+    assert published is None and "docker_image" in why
+    assert cfg["environment"]["docker_image"].endswith("sha256:abc")  # not mutated
+
+
+def test_a_compose_sidecar_built_from_a_context_is_refused(tmp_path):
+    compose = f"services:\n  main:\n    build: .\n  api:\n    build:\n      context: ./api\n  db:\n    image: x{_PIN}\n"
+    root = tmp_path / "tasks"
+    root.mkdir()
+    _task(root, compose=compose)
+    rows, skipped = B.build_rows(tasks_root=str(root))
+    assert rows == [] and "['api'] build from a context" in skipped["demo-task"]

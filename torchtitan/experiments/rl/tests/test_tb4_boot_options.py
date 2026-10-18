@@ -81,6 +81,7 @@ def test_compose_boots_a_compose_sandbox_with_the_row_image_as_main(monkeypatch)
     sb = _run(
         cpu=2,
         dockerfile="FROM img\nRUN tmux -V\n",
+        build_context={"a.txt": "eA=="},
         compose={"docker_compose": "services: {}\n", "project": "p"},
         sandbox_options={"target": "earth"},
     )
@@ -89,3 +90,4 @@ def test_compose_boots_a_compose_sandbox_with_the_row_image_as_main(monkeypatch)
     assert kw["project"] == "p" and kw["cpu"] == 2 and kw["target"] == "earth"
     assert kw["main_image"] == "img"
     assert kw["main_dockerfile"] == "FROM img\nRUN tmux -V\n"
+    assert kw["main_build_context"] == {"a.txt": "eA=="}

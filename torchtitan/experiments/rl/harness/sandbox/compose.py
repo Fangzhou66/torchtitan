@@ -27,10 +27,12 @@ digest-pinned image:
 
 Deliberate differences, all mechanical:
 
-* When the row carries a Dockerfile for its image (``FROM <pinned image>`` plus
+* ``main`` is built from the row's Dockerfile -- ``FROM <pinned image>`` plus
   the tmux layer the Terminus agent drives, as ``prepare_tb2_1_data
-  --verify-runtime`` writes it), ``main`` is built from it instead of pulled.
-  It is written to its own empty context, so nothing else changes.
+  --verify-runtime`` writes it, or a rewritten package's own -- in a context of
+  its own holding only that Dockerfile's ``build_context``. A row without one
+  builds ``FROM <its image>``, which is the image itself. Either way main's
+  ``build:`` in the task's compose file is overridden.
 * Images are pulled before ``up`` under the build timeout. Harbor pulls them
   inside ``up -d``, whose 120 s budget a cold DinD host can spend on pulls alone.
 * Commands reach a container with ``docker exec <id>`` rather than ``docker
@@ -74,6 +76,8 @@ _CONTAINER_ID = re.compile(r"[0-9a-f]{12,64}")
 _COMPOSE_DIR = "/harbor/compose"
 _ENVIRONMENT_DIR = "/harbor/environment"
 _MAIN_CONTEXT = f"{_COMPOSE_DIR}/main-context"
+# Named apart from anything a build context may carry (a COPY'd "Dockerfile").
+_MAIN_DOCKERFILE = ".tmax-main.Dockerfile"
 _RUNTIME_OVERRIDE = f"{_COMPOSE_DIR}/docker-compose-runtime.json"
 _MOUNTS_COMPOSE = f"{_COMPOSE_DIR}/docker-compose-mounts.json"
 # Harbor's agent environment self-binds these into main (trial.py
@@ -94,6 +98,7 @@ class DaytonaComposeSandbox:
         project: str,
         main_image: str,
         main_dockerfile: str | None = None,
+        main_build_context: dict[str, str] | None = None,
         cpu: int | None = None,
         memory: int | None = None,
         disk_gb: int | None = None,
@@ -107,10 +112,13 @@ class DaytonaComposeSandbox:
             raise ValueError("compose sandbox needs the task's docker-compose.yaml")
         if not main_image and not main_dockerfile:
             raise ValueError("compose sandbox needs main's image or Dockerfile")
+        if main_build_context and not main_dockerfile:
+            raise ValueError("main_build_context is only meaningful with a Dockerfile")
         self.docker_compose = docker_compose
         self.project = re.sub(r"[^a-z0-9_-]", "-", project.lower())
         self.main_image = main_image
-        self.main_dockerfile = main_dockerfile
+        self.main_dockerfile = main_dockerfile or f"FROM {main_image}\n"
+        self.main_build_context = dict(main_build_context or {})
         self.cpu = cpu
         self.memory = memory
         self.build_timeout_sec = int(build_timeout_sec)
@@ -169,14 +177,12 @@ class DaytonaComposeSandbox:
         return [{"type": "bind", "source": p, "target": p} for p in LOG_MOUNTS]
 
     def _runtime_override(self) -> dict:
-        """Our one change to the project: main from the row's Dockerfile, if any."""
-        if not self.main_dockerfile:
-            return {"services": {}}
+        """Our one change to the project: main is built from the row's Dockerfile."""
         return {
             "services": {
                 MAIN_SERVICE: {
                     "image": self._main_image_name(),
-                    "build": {"context": _MAIN_CONTEXT, "dockerfile": "Dockerfile"},
+                    "build": {"context": _MAIN_CONTEXT, "dockerfile": _MAIN_DOCKERFILE},
                     "pull_policy": "build",
                 }
             }
@@ -269,10 +275,16 @@ class DaytonaComposeSandbox:
         await self._host.write_file(
             f"{_ENVIRONMENT_DIR}/docker-compose.yaml", self.docker_compose
         )
-        if self.main_dockerfile:
+        for rel, b64 in sorted(self.main_build_context.items()):
+            rel_path = PurePosixPath(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts or rel == _MAIN_DOCKERFILE:
+                raise ValueError(f"main build context path {rel!r} is not allowed")
             await self._host.write_file(
-                f"{_MAIN_CONTEXT}/Dockerfile", self.main_dockerfile
+                f"{_MAIN_CONTEXT}/{rel_path}", base64.b64decode(b64)
             )
+        await self._host.write_file(
+            f"{_MAIN_CONTEXT}/{_MAIN_DOCKERFILE}", self.main_dockerfile
+        )
         await self._host.write_file(
             _RUNTIME_OVERRIDE, json.dumps(self._runtime_override(), indent=2)
         )

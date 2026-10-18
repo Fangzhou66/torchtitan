@@ -135,28 +135,34 @@ def test_compose_files_and_env_match_harbors_prebuilt_project(monkeypatch):
     assert [m["target"] for m in mounts["services"]["main"]["volumes"]] == list(
         compose_mod.LOG_MOUNTS
     )
-    # Without a row Dockerfile nothing is built: the project runs as released.
-    assert json.loads(host.files[compose_mod._RUNTIME_OVERRIDE]) == {"services": {}}
+    # Without a row Dockerfile main is built FROM its own image: the image itself.
+    assert host.files["/harbor/compose/main-context/.tmax-main.Dockerfile"] == (
+        f"FROM {PINNED}\n"
+    )
     order = [c.split(" ")[-1] for c, _ in host.cmds if c.startswith("docker compose")]
     assert order[:3] == ["--ignore-buildable", "build", "-d"]
 
 
 def test_a_row_dockerfile_builds_main_in_its_own_context(monkeypatch):
-    dockerfile = f"FROM {PINNED}\nUSER root\nRUN tmux -V\n"
-    _sb, host = _boot(monkeypatch, main_dockerfile=dockerfile)
-    assert host.files["/harbor/compose/main-context/Dockerfile"] == dockerfile
+    dockerfile = f"FROM {PINNED}\nCOPY app.py /app/\nUSER root\nRUN tmux -V\n"
+    context = {"app.py": base64.b64encode(b"print(1)\n").decode()}
+    _sb, host = _boot(monkeypatch, main_dockerfile=dockerfile, main_build_context=context)
+    assert host.files["/harbor/compose/main-context/.tmax-main.Dockerfile"] == dockerfile
+    assert host.files["/harbor/compose/main-context/app.py"] == b"print(1)\n"
     assert json.loads(host.files[compose_mod._RUNTIME_OVERRIDE]) == {
         "services": {
             "main": {
                 "image": "hb__ctr-optimization",
                 "build": {
                     "context": "/harbor/compose/main-context",
-                    "dockerfile": "Dockerfile",
+                    "dockerfile": ".tmax-main.Dockerfile",
                 },
                 "pull_policy": "build",
             }
         }
     }
+    with pytest.raises(ValueError, match="not allowed"):
+        _boot(monkeypatch, main_dockerfile=dockerfile, main_build_context={"../x": "eA=="})
 
 
 def test_exec_routes_main_through_a_login_shell_and_sidecars_through_sh(monkeypatch):
@@ -293,3 +299,7 @@ def test_constructor_needs_a_project_and_a_main():
         compose_mod.DaytonaComposeSandbox(docker_compose=" ", project="p", main_image=PINNED)
     with pytest.raises(ValueError, match="main's image"):
         compose_mod.DaytonaComposeSandbox(docker_compose=COMPOSE, project="p", main_image="")
+    with pytest.raises(ValueError, match="build_context is only meaningful"):
+        compose_mod.DaytonaComposeSandbox(
+            docker_compose=COMPOSE, project="p", main_image=PINNED, main_build_context={"a": ""}
+        )

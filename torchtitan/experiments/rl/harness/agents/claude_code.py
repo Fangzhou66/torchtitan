@@ -138,6 +138,7 @@ async def boot_agent_sandbox(
                 **compose,
                 main_image=image,
                 main_dockerfile=dockerfile,
+                main_build_context=build_context,
                 cpu=cpu,
                 memory=memory,
                 disk_gb=disk_gb,

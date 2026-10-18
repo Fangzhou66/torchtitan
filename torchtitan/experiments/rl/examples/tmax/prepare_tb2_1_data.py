@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -724,7 +725,19 @@ def separate_verifier(
     rewritten package must: a changed test is not in the published image."""
     if _get(cfg, "verifier", "environment_mode") != "separate":
         return None, ""
-    verifier_env = _get(cfg, "verifier", "environment") or {}
+    verifier_env = _get(cfg, "verifier", "environment")
+    if not isinstance(verifier_env, dict):
+        # Harbor (resolve_effective_verifier_env_config): with no
+        # [verifier.environment] the verifier runs in a deep copy of
+        # [environment] -- its resources, GPU and internet setting (60 of the
+        # 66 source-tree task.tomls). Not its docker_image: that is the agent's
+        # image, which does not hold /tests; every release task.toml names its
+        # verifier image in [verifier.environment].
+        verifier_env = {
+            k: v
+            for k, v in copy.deepcopy(cfg.get("environment") or {}).items()
+            if k != "docker_image"
+        }
     artifacts = cfg.get("artifacts")
     if not artifacts:
         return None, "separate verifier without artifacts"
@@ -843,6 +856,31 @@ def _agent_user(cfg: dict, task_dir: str) -> str:
     return name
 
 
+def _check_compose_sidecars(text: str) -> None:
+    """Refuse a compose project with a sidecar built from a context.
+
+    The row carries the compose file alone, so every service other than
+    ``main`` must be an image, as in the TB4 release tree (where each is
+    digest-pinned). ``main`` is built from the row's own Dockerfile. This module
+    stays stdlib-only (the evolution loop loads it under plain python), so
+    without PyYAML the check is skipped and such a project fails at boot."""
+    try:
+        import yaml
+    except ImportError:
+        return
+    services = (yaml.safe_load(text) or {}).get("services") or {}
+    built = sorted(
+        name
+        for name, svc in services.items()
+        if name != "main" and isinstance(svc, dict) and "build" in svc
+    )
+    if built:
+        raise ValueError(
+            f"compose services {built} build from a context; only image services "
+            "(the release tree's pinned images) are supported besides main"
+        )
+
+
 def _harbor_fields(cfg: dict, task_dir: str, gpu_target: str) -> dict:
     """Row fields for what a separate-verifier (TB4) task's Harbor environment
     declares beyond an image and its resources. Each is present only when the
@@ -852,11 +890,13 @@ def _harbor_fields(cfg: dict, task_dir: str, gpu_target: str) -> dict:
     compose_path = os.path.join(task_dir, "environment", "docker-compose.yaml")
     if os.path.exists(compose_path):
         with open(compose_path, encoding="utf-8", newline="") as f:
-            out["compose"] = {
-                "docker_compose": f.read(),
-                "build_timeout_sec": _positive_number(env.get("build_timeout_sec"))
-                or 600.0,
-            }
+            text = f.read()
+        _check_compose_sidecars(text)
+        out["compose"] = {
+            "docker_compose": text,
+            "build_timeout_sec": _positive_number(env.get("build_timeout_sec"))
+            or 600.0,
+        }
     if env.get("healthcheck"):
         out["healthcheck"] = {**_HEALTHCHECK_DEFAULTS, **dict(env["healthcheck"])}
     user = _agent_user(cfg, task_dir)
