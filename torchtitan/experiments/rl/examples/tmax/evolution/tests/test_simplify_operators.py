@@ -64,7 +64,7 @@ def test_turn_zero_needs_a_summary_line(tmp_path):
 
 
 def test_prompt_names_the_file_as_listed_and_the_summary_line():
-    text = so.prompt("vague")
+    text = " ".join(so.prompt("vague").split())
     assert "attempt-03.jsonl" in text and "or 0 for its first line" in text
     # A sandbox test of an attempt's implementation is recorded on that attempt.
     assert "evidence item for the attempt whose implementation you ran" in text
@@ -123,16 +123,16 @@ def test_prompt_has_no_menu_and_keeps_the_hint_levels():
 
 
 def test_prompt_states_the_goal_the_costs_and_the_general_rules():
-    text = so.prompt("vague")
+    text = " ".join(so.prompt("vague").split())
     # The target, and which error costs more.
     assert "lands in the learnable band" in text
     assert "Staying unlearnable is the costlier error" in text
     # A failed prediction is explained from the traces before the next change.
     assert "Write this comparison in previous" in text
     # Repair is part of the rewrite; nothing asks for a separate repair.
-    assert "Repairing\n  it is part of this rewrite" in text
+    assert "Repairing it is part of this rewrite" in text
     assert "Do not combine this repair" not in text
     # Guidance is checked against what the reference actually computes.
-    assert "Apply\n  your guidance literally" in text
+    assert "Apply your guidance literally" in text
     assert "BLOCKED: invalid_signal:" in text
     assert 'written as "k of n"' in text

@@ -1413,7 +1413,9 @@ def test_blind_verifier_is_told_how_the_instruction_changed(tmp_path):
 
 
 def test_easier_rewrites_every_sentence_of_a_narrowed_requirement():
-    assert "edit every sentence of\ninstruction.md that states or implies it" in so.prompt("vague")
+    assert "edit every sentence of instruction.md that states or implies it" in " ".join(
+        so.prompt("vague").split()
+    )
 
 
 def test_hardening_bisects_after_an_underpredicted_withdrawal():
