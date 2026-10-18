@@ -288,3 +288,32 @@ def test_spec_repairs_are_outside_simplification_denominator(tmp_path):
     assert metrics["evolution/rewrites/accepted_repair_spec"] == 1
     assert metrics["evolution/flow/rewrites_accepted"] == 2
     assert metrics["evolution/invalid_signal/kept"] == 1
+
+
+def test_repairs_made_inside_rewrites_are_counted(tmp_path):
+    root = layout.Root(tmp_path)
+    run = root.run("training")
+    fix = {"defect": "d", "evidence": "e", "change": "c"}
+    for index, (job, status, repair) in enumerate(
+        [
+            ("harder", "accepted", [fix, fix]),
+            ("harder", "rejected", [fix]),
+            ("easier", "accepted", [fix]),
+            ("easier", "accepted", None),
+        ]
+    ):
+        meta = {
+            "signal": f"training/t--g{index}",
+            "task": "t",
+            "job": job,
+            "status": status,
+        }
+        if repair:
+            meta["repair"] = repair
+        record_outcome(root, root.evolution.task("t").rewrite(job, f"rw{index}"), meta)
+    metrics = EvolutionMetrics(run, root).poll()
+    assert metrics["evolution/repairs/rewrites"] == 3
+    assert metrics["evolution/repairs/fixes"] == 4
+    assert metrics["evolution/repairs/accepted_rewrites"] == 2
+    assert metrics["evolution/repairs/harder"] == 2
+    assert metrics["evolution/repairs/easier"] == 1
