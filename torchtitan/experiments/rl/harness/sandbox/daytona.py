@@ -651,6 +651,8 @@ class DaytonaSandbox:
                                                rather than refused at create.
       ``TT_DAYTONA_MAX_DISK_GB``           -- per-sandbox disk cap, the same way
                                                (default 10).
+      ``TT_DAYTONA_MAX_CPU``               -- per-sandbox vCPU cap, the same way
+                                               (default 4).
       ``TT_DAYTONA_CREATE_TIMEOUT``        -- snapshot-build/boot wait (default 900s).
       ``TT_DAYTONA_EXEC_TIMEOUT_MIN``       -- SDK request timeout floor; does not
                                                extend the command runtime limit.
@@ -969,6 +971,17 @@ class DaytonaSandbox:
         # them live, and they had burned 704 rollout slots between them before this.
         # Running at the cap may still OOM, but an OOM is a measurement the
         # `oom_suspect` flag already reports; a refused create measures nothing.
+        # CPU likewise: Daytona refuses more than 4 vCPUs per sandbox at create,
+        # and 8 of the 66 TB4 tasks declare 8 or 16.
+        cpu_cap = int(_getenv("TT_DAYTONA_MAX_CPU", default="4"))
+        if cpu > cpu_cap:
+            logger.warning(
+                "sandbox cpu request %d exceeds the per-sandbox cap (%d); "
+                "requesting the cap instead",
+                cpu,
+                cpu_cap,
+            )
+            cpu = cpu_cap
         mem_cap = int(_getenv("TT_DAYTONA_MAX_MEM_GB", default="8"))
         if mem > mem_cap:
             logger.warning(
