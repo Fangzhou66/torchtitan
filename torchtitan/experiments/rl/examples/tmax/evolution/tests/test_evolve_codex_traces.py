@@ -195,6 +195,7 @@ def test_traces_spec_points_at_the_revision_contrast(tmp_path):
 def test_only_all_pass_after_simplify_uses_restoration_guidance(
     tmp_path, monkeypatch, has_previous, solved
 ):
+    monkeypatch.setattr(ec, "HARDER_GUIDANCE", "student")
     import agent_sandbox as sandbox
 
     rw = _rewrite(tmp_path, monkeypatch)

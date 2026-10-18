@@ -268,6 +268,7 @@ def test_blind_mode_runs_two_sessions_and_the_second_never_sees_the_solution(
 
 
 def test_harder_uses_student_feedback_without_operator_menu(tmp_path, monkeypatch):
+    monkeypatch.setattr(ec, "HARDER_GUIDANCE", "student")
     rw = _rewrite(tmp_path, monkeypatch)
     sessions, checks = [], []
     _wire(monkeypatch, sessions, checks)
@@ -283,6 +284,24 @@ def test_harder_uses_student_feedback_without_operator_menu(tmp_path, monkeypatc
     assert "no-supported-hardening" in prompt
     assert "_operator" not in out
     assert out["_harder_mode"] == "student"
+
+
+def test_harder_defaults_to_real_guidance_with_repair_in_the_rewrite(
+    tmp_path, monkeypatch
+):
+    rw = _rewrite(tmp_path, monkeypatch)
+    sessions, checks = [], []
+    _wire(monkeypatch, sessions, checks)
+    monkeypatch.setattr(ec, "WEB_SEARCH", "live")
+    assert ec.HARDER_GUIDANCE == "real"  # the module default
+    ec.evolve_agentic(rw, dict(SEED), "harder")
+    prompt = sessions[0]["prompt"]
+    assert "These tasks train an agent for real terminal work" in prompt
+    assert "Search with your web tool" in prompt
+    assert "Keep the existing instruction's wording" in prompt
+    assert "decoy files, a second candidate or stale copy" in prompt
+    assert "Record every repair in `run/repair.json`" in prompt
+    assert ec._STUDENT_HARDER_GUIDANCE not in prompt
 
 
 @pytest.mark.parametrize("job", ["harder", "easier"])

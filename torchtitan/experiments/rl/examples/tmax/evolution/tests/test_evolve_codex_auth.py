@@ -18,6 +18,7 @@ from torchtitan.experiments.rl.examples.tmax import layout
 
 
 def test_explicit_chatgpt_auth_is_private_and_cleaned(tmp_path, monkeypatch):
+    monkeypatch.setattr(ec, "WEB_SEARCH", "")
     root = layout.Root(tmp_path / "root")
     monkeypatch.setenv("TRL_BASE", str(root.path))
     rw = root.evolution.task("task-a").rewrite("harder")
@@ -48,6 +49,7 @@ def test_extra_config_reaches_both_providers(monkeypatch):
     """EVOLVE_CODEX_EXTRA_CONFIG adds `-c` overrides whichever way the session
     authenticates, split on whitespace so a systemd EnvironmentFile line
     carries it."""
+    monkeypatch.setattr(ec, "WEB_SEARCH", "")
     monkeypatch.setenv(
         "EVOLVE_CODEX_EXTRA_CONFIG",
         "model_providers.oai.stream_max_retries=20  model_providers.oai.stream_idle_timeout_ms=900000",
@@ -68,3 +70,19 @@ def test_extra_config_reaches_both_providers(monkeypatch):
     ]
     monkeypatch.delenv("EVOLVE_CODEX_EXTRA_CONFIG")
     assert ec._extra_config() == []
+
+
+def test_web_search_names_the_provider_openai_and_turns_the_tool_on(monkeypatch):
+    """codex 0.149 offers its web tool to a custom provider only when it is
+    named exactly OpenAI; the default turns the tool on that way."""
+    monkeypatch.delenv("EVOLVE_CODEX_ACCOUNT_HOME", raising=False)
+    monkeypatch.delenv("EVOLVE_CODEX_AUTH_FILE", raising=False)
+    monkeypatch.setattr(ec, "ACCOUNT_HOME", None)
+    monkeypatch.setattr(ec, "WEB_SEARCH", "live")
+    overrides = ec._provider_overrides()
+    assert "model_providers.oai.name=OpenAI" in overrides
+    assert "web_search=live" in overrides
+    monkeypatch.setattr(ec, "WEB_SEARCH", "")
+    overrides = ec._provider_overrides()
+    assert "model_providers.oai.name=openai" in overrides
+    assert not any(o.startswith("web_search=") for o in overrides)
