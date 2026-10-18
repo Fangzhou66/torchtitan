@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.examples.tmax import layout
+from torchtitan.experiments.rl.examples.tmax import harbor_env, layout
 from torchtitan.experiments.rl.training_lineage import canonical_json, content_revision
 from torchtitan.experiments.rl.types import SampleLineage
 
@@ -114,6 +114,19 @@ class TMaxSample:
     lineage: SampleLineage | None = field(default=None, compare=False)
     """Per-yield identity; excluded from equality because it is not task content."""
 
+    boot_kwargs: dict = field(default_factory=dict)
+    """Extra ``boot_agent_sandbox`` keywords from a Terminal-Bench 4 row that
+    declares them (a GPU in its region, a docker-compose project); see
+    ``harbor_env.boot_kwargs``. Empty for every other row, which therefore boots
+    exactly as before."""
+
+    healthcheck: dict | None = None
+    """Harbor ``[environment].healthcheck``, run before the agent. None = none."""
+
+    agent_user: str = ""
+    """The non-root user a TB4 image declares; the agent runs as it while the
+    harness keeps root. "" = the agent runs as root, as on every other row."""
+
 
 def _parse_sample_row(row: dict) -> TMaxSample:
     """One jsonl row -> TMaxSample; shared by __init__ and hot reload so a
@@ -161,6 +174,9 @@ def _parse_sample_row(row: dict) -> TMaxSample:
         or _coerce_prompt(row.get("prompt")),
         tmax=tmax,
         rev=int(md.get("rev") or 0),
+        boot_kwargs=harbor_env.boot_kwargs(md),
+        healthcheck=md.get("healthcheck") or None,
+        agent_user=md.get("agent_user") or "",
     )
 
 
