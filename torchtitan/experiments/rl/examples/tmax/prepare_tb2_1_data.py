@@ -86,7 +86,11 @@ _DEFAULT_WORKDIR = "/app"
 _EXPECTED_TASKS = 89
 
 # Run before evaluation, once per cached image. A failed install must fail the build.
+# As root: some images end on an unprivileged USER (TB4 risk-scorer-replay ends on
+# `nobody`, rs-archive-clone on `agent`), and apt-get then exits 100. Left at root:
+# the harness runs every command as root whatever the image's USER says.
 _TMUX_INSTALL = (
+    "USER root\n"
     "RUN if ! command -v tmux >/dev/null 2>&1; then "
     "apt-get update && DEBIAN_FRONTEND=noninteractive "
     "apt-get install -y --no-install-recommends tmux; fi\n"
