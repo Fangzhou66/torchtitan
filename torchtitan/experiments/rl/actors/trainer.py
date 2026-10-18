@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import pickle
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -162,6 +163,28 @@ class _MicrobatchProfiler:
             logger.info(f"[trainer] profiler top ops by {key}:\n{table}")
 
 
+def _pin_new_threads_to_device(device: torch.device) -> None:
+    """Make Python threads started from now on use this rank's GPU.
+
+    The CUDA current device is per thread. Every trainer process sees all eight
+    GPUs, so a helper thread (DCP/HF loader pools, asyncio.to_thread, ...) that
+    touches CUDA without set_device opens a ~0.5 GiB context on GPU 0: 7 ranks x
+    ~0.55 GiB is the ~4 GiB extra measured on local rank 0. Opt in with
+    SWE_PIN_THREAD_DEVICE=1. Threads created outside Python (Rust/C++) are not covered.
+    """
+    if os.environ.get("SWE_PIN_THREAD_DEVICE", "0") != "1":
+        return
+    bootstrap = threading.Thread._bootstrap_inner  # pyrefly: ignore [missing-attribute]
+
+    def _bootstrap_on_device(thread: threading.Thread) -> None:
+        torch.cuda.set_device(device)
+        bootstrap(thread)
+
+    threading.Thread._bootstrap_inner = (  # pyrefly: ignore [missing-attribute]
+        _bootstrap_on_device
+    )
+
+
 def _mem_log(tag: str) -> None:
     """SWE_TRAINER_MEM_LOG=1: print this rank's CUDA memory (every rank, not just
     the host's logging rank), to find the rank that runs out first."""
@@ -175,7 +198,8 @@ def _mem_log(tag: str) -> None:
         f"alloc={torch.cuda.memory_allocated() / gib:.1f} "
         f"reserved={torch.cuda.memory_reserved() / gib:.1f} "
         f"peak={torch.cuda.max_memory_allocated() / gib:.1f} "
-        f"device_used={(total - free) / gib:.1f}/{total / gib:.0f} GiB",
+        f"device_used={(total - free) / gib:.1f}/{total / gib:.0f} GiB "
+        f"retries={torch.cuda.memory_stats().get('num_alloc_retries', 0)}",
         flush=True,
     )
 
@@ -318,6 +342,7 @@ class PolicyTrainer(Actor, Configurable):
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         device_module.set_device(self.device)
+        _pin_new_threads_to_device(self.device)
 
         # Enable batch-invariant mode BEFORE init_distributed
         set_batch_invariance(config.debug.batch_invariant)

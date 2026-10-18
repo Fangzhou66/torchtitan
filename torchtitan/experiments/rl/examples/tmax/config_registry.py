@@ -1101,6 +1101,25 @@ def rl_grpo_qwen3_5_9b_tmax(
     # Caveat: the fla GDN kernel is a dynamo-disabled custom autograd op invisible to the
     # SAC aten policy, so the 75% GDN layers' kernel is recomputed regardless; the win is
     # capped and only materializes if the extra saved activations fit at seq 65536.
+    # SWE_LEAN_NORMS=1 / SWE_MOE_EXPERT_RECOMPUTE=1: trainer-only memory overrides
+    # with unchanged math (nested checkpoints; see the modules). Meant for the
+    # 122B-A10B trainer at seq 65536, where the norms' fp32 intermediates and the hot
+    # EP rank's expert activations are what push a rank to the memory limit.
+    for _flag, _mod in (
+        ("SWE_LEAN_NORMS", "torchtitan.experiments.rl.models.lean_norms"),
+        (
+            "SWE_MOE_EXPERT_RECOMPUTE",
+            "torchtitan.experiments.rl.models.moe_expert_recompute",
+        ),
+    ):
+        if os.environ.get(_flag, "0") == "1":
+            config.trainer = dataclasses.replace(
+                config.trainer,
+                override=dataclasses.replace(
+                    config.trainer.override,
+                    imports=[*config.trainer.override.imports, _mod],
+                ),
+            )
     _ac = os.environ.get("SWE_AC", "").lower()
     if _ac == "selective":
         config.trainer = dataclasses.replace(
