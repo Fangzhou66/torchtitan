@@ -538,6 +538,11 @@ class Evolution:
         return self.path / "ledger.jsonl"
 
     @property
+    def repairs(self) -> Path:
+        """One line per spec repair a rewrite attempted, for a human to review."""
+        return self.path / "repairs.jsonl"
+
+    @property
     def status(self) -> Path:
         return self.path / "status.json"
 

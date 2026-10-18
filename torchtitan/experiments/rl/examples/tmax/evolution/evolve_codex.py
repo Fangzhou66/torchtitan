@@ -1883,6 +1883,23 @@ the pipeline that built these tasks learned the hard way:
 
 Aim for a task a capable agent lands about half the time."""
 
+# A task solved every time can be solved for the wrong reason: hardening a task
+# whose verifier accepts a shortcut builds the new requirement on a check that
+# does not hold. The loop routes this report to the same spec repair the easier
+# direction uses, and records it in evolution/repairs.jsonl.
+_HARDER_REPAIR_NOTE = """
+
+Before hardening, check that the successful attempts earned their reward. If
+one passed with a result the instruction rules out -- a hard-coded answer where
+the task requires computing it, skipped required work the verifier does not
+check, an edited test or grading file -- or the task setup itself is broken,
+the task needs repair, not a harder requirement. Write `BLOCKED:
+repair_required: <the attempt, the shortcut it took, and the public
+requirement it violates>` to `run/verdict.txt` and stop without editing; a
+separate session repairs the task and the repair is reported for review. An
+attempt that solved the task the intended way is not a defect, however quickly
+it did so."""
+
 _EASIER_JOB = """This task was solved {solved} of {attempts} attempts.
 Diagnose the attempts and reduce one obstacle while retaining a stated skill.
 {guidance}"""
@@ -1965,7 +1982,7 @@ and your first command waits for it.
 
 Confirm with `./sandbox check` before you stop."""
 
-_SPEC_REPAIR_JOB = """A simplification attempt reported a possible task defect.
+_SPEC_REPAIR_JOB = """A simplification or hardening attempt reported a possible task defect.
 The report is in `run/failure.txt`; it is a claim to check, not an established
 fact. Read the public instruction, environment, verifier and actual attempts.
 Identify a concrete disagreement that prevents fair grading or execution.
@@ -1975,7 +1992,9 @@ fixed-output task; do not add requirements merely to reject that possibility.
 
 Repair only a demonstrated defect, preserving the task's intended capability.
 Make required inputs and API contracts available, reconcile contradictory
-requirements, or correct a verifier that rejects a valid result. Do not remove
+requirements, correct a verifier that rejects a valid result, or close a
+verifier that accepts a result the instruction rules out when an actual attempt
+in `traces/` produced that result. Do not remove
 the student goal, precompute its output, or replace a required implementation
 with a marker or mock that no longer exercises it. If a live external system
 cannot be provided faithfully, leave the task blocked and explain why.
@@ -3090,6 +3109,7 @@ def evolve_agentic(
                 ),
                 max_asserts=ts.MAX_ADDED_ASSERTS,
             )
+            + _HARDER_REPAIR_NOTE
             + (_UNSOLVED_HARDER_NOTE if task.get("_unsolved") else ""),
             "easier": _EASIER_JOB.format(
                 solved=solved,
