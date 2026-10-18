@@ -112,6 +112,7 @@ from torchtitan.experiments.rl.harness import (
     SandboxIssueTracker,
     SandboxLogContext,
 )
+from torchtitan.experiments.rl.harness.agents.spec import FORMAT_ERROR_CATEGORIES
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
@@ -482,6 +483,53 @@ def _timing_metrics(timings: list[Mapping[str, float]]) -> list[m.Metric]:
     return out
 
 
+def _format_breakdown_metrics(
+    breakdowns: list[Mapping[str, int] | None],
+) -> list[m.Metric]:
+    """Split the group's format errors by category, plus streak / repeat /
+    truncation counters. Only siblings whose harness reported a breakdown
+    (Terminus) count; with none, nothing is emitted."""
+    present = [b for b in breakdowns if b]
+    if not present:
+        return []
+    n = len(present)
+
+    def mean(values) -> m.Mean:
+        return m.Mean(sum(values) / n)
+
+    out = []
+    for category in FORMAT_ERROR_CATEGORIES:
+        counts = [b.get(category, 0) for b in present]
+        out += [
+            m.Metric(f"rollout/format_error_{category}_mean", mean(counts)),
+            m.Metric(
+                f"rollout/format_error_{category}_frac",
+                mean(1.0 if c > 0 else 0.0 for c in counts),
+            ),
+        ]
+    max_streaks = [b.get("max_streak", 0) for b in present]
+    out += [
+        m.Metric(
+            "rollout/format_error_opening_streak_mean",
+            mean(b.get("opening_streak", 0) for b in present),
+        ),
+        m.Metric("rollout/format_error_max_streak_mean", mean(max_streaks)),
+        m.Metric("rollout/format_error_max_streak_max", m.Max(float(max(max_streaks)))),
+        m.Metric(
+            "rollout/repeat_turn_frac_mean",
+            mean(
+                b.get("repeat_turns", 0) / b["replies"] if b.get("replies") else 0.0
+                for b in present
+            ),
+        ),
+        m.Metric(
+            "rollout/truncated_turns_mean",
+            mean(b.get("truncated_turns", 0) for b in present),
+        ),
+    ]
+    return out
+
+
 def _finish_reason_metrics(finish_reasons: list[str]) -> list[m.Metric]:
     """Return exhaustive per-reason fractions for one completed rollout group."""
     assert finish_reasons, "a TMax rollout group must contain at least one sibling"
@@ -698,6 +746,7 @@ def _write_rollout_record(
     started: str,
     verifier: dict | None = None,
     ctrf: dict | None = None,
+    format_breakdown: Mapping[str, int] | None = None,
 ) -> str | None:
     """Write one completed rollout as ``<task>/g<group>-r<idx>.jsonl``
     and return that path relative to the run, or None when nothing was written.
@@ -745,6 +794,7 @@ def _write_rollout_record(
             "finish_reason": finish_reason,
             "submitted": bool(submitted),
             "format_errors": int(fmt_errors),
+            "format_breakdown": dict(format_breakdown or {}),
             "infra_failed": sandbox_diagnostics.infra_failed,
             "failure": sandbox_diagnostics.failure,
             "terminal_events": sandbox_diagnostics.terminal_events,
@@ -1197,6 +1247,9 @@ class TMaxRollouter(Rollouter):
             m.Metric("rollout/nonsubmit_frac", m.Mean(nonsubmit_frac)),
             m.Metric("rollout/format_errors_mean", m.Mean(fmt_errors_mean)),
             m.Metric("rollout/format_error_frac", m.Mean(fmt_error_frac)),
+            *_format_breakdown_metrics(
+                [rollout.diagnostics.get("format_breakdown") for rollout in rollouts]
+            ),
             m.Metric("rollout/infra_failed_frac", m.Mean(infra_failed_frac)),
             m.Metric(
                 "rollout/infra_failed_group_frac",
@@ -1537,6 +1590,8 @@ class TMaxRollouter(Rollouter):
         submitted = False
         baseline_digests: dict[str, str] | None = None
         fmt_errors = 0  # total format errors this rollout (from run_vanillux_loop)
+        # Per-category split (AgentRun.format_breakdown); empty when not tracked.
+        format_breakdown: dict[str, int] = {}
         # Default for the timeout/exception paths where run_vanillux_loop never
         # returned (it sets its own reason on the normal path).
         finish_reason = "error"
@@ -1726,6 +1781,7 @@ class TMaxRollouter(Rollouter):
                     # trace, since a graded rollout is what the reward reflects.
                     submitted = agent_run.submitted is not False
                     fmt_errors = agent_run.format_errors
+                    format_breakdown = dict(agent_run.format_breakdown)
                     finish_reason = agent_run.finish_reason
                     # The harness's own turn count, which is what decides
                     # finish_reason (a harness reports hit_max_turns off ITS counter).
@@ -2026,6 +2082,7 @@ class TMaxRollouter(Rollouter):
                 started=layout.stamp(started_wall),
                 verifier=verifier,
                 ctrf=ctrf,
+                format_breakdown=format_breakdown,
             )
             if pane_text is not None:
                 _write_pane(run, sample, group_id, rollout_idx, pane_text)
@@ -2044,6 +2101,7 @@ class TMaxRollouter(Rollouter):
                     "finish_reason": finish_reason,
                     "agent_turns": agent_turns,
                     "format_errors": fmt_errors,
+                    "format_breakdown": format_breakdown,
                     "submitted": submitted,
                     "infra_failed": diagnostics.infra_failed,
                     "failure": diagnostics.failure,

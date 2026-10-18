@@ -8,6 +8,7 @@ import pytest
 
 from torchtitan.experiments.rl.harness.agents.terminus_xml import (
     SafeTerminusXMLParser,
+    SILENT_NOOP_WARNING,
     TerminusXMLPlainParser,
 )
 
@@ -67,3 +68,49 @@ def test_unrelated_parser_errors_propagate(monkeypatch):
         SafeTerminusXMLParser().parse_response(
             "<response><analysis/><plan/><commands/></response>"
         )
+
+
+_WRAP = "<response><analysis>a</analysis><plan>p</plan>{}</response>"
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        "<commands>\nwc -l < a.py\n</commands>",
+        '<commands><keystrokes duration="1.0">ls\n</keystystrokes></commands>',
+    ],
+    ids=["bare_command", "misspelled_closing_tag"],
+)
+def test_commands_text_without_keystrokes_warns(commands):
+    response = _WRAP.format(commands)
+    upstream = TerminusXMLPlainParser().parse_response(response)
+    assert (upstream.error, upstream.warning, upstream.commands) == ("", "", [])
+
+    result = SafeTerminusXMLParser().parse_response(response)
+    assert result.error == ""
+    assert result.commands == []
+    assert result.warning == f"- {SILENT_NOOP_WARNING}"
+
+
+def test_silent_noop_warning_is_appended_to_existing_warnings():
+    response = "junk " + _WRAP.format("<commands>ls</commands>")
+    upstream = TerminusXMLPlainParser().parse_response(response)
+    result = SafeTerminusXMLParser().parse_response(response)
+    assert upstream.warning
+    assert result.warning == f"{upstream.warning}\n- {SILENT_NOOP_WARNING}"
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        "<commands></commands>",
+        '<commands><keystrokes duration="1.0">ls\n</keystrokes></commands>',
+        "<commands>ls</commands><task_complete>true</task_complete>",
+    ],
+    ids=["empty_commands", "valid_keystrokes", "task_complete"],
+)
+def test_silent_noop_warning_only_where_harbor_is_silent(commands):
+    response = _WRAP.format(commands)
+    result = SafeTerminusXMLParser().parse_response(response)
+    assert result == TerminusXMLPlainParser().parse_response(response)
+    assert SILENT_NOOP_WARNING not in result.warning

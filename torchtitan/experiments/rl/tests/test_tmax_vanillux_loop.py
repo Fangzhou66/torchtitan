@@ -722,6 +722,7 @@ def test_rollout_record_is_one_header_line_then_one_line_per_turn(
         "finish_reason",
         "submitted",
         "format_errors",
+        "format_breakdown",
         "infra_failed",
         "failure",
         "terminal_events",
@@ -746,6 +747,7 @@ def test_rollout_record_is_one_header_line_then_one_line_per_turn(
         "finish_reason": "submit",
         "submitted": True,
         "format_errors": 0,
+        "format_breakdown": {},
         "infra_failed": False,
         "failure": {},
         "terminal_events": [],
@@ -886,6 +888,7 @@ def test_rollout_carries_its_finish_reason_and_format_errors() -> None:
     for key in (
         "finish_reason",
         "format_errors",
+        "format_breakdown",
         "submitted",
         "infra_failed",
         "record",

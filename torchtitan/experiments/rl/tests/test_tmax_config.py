@@ -505,7 +505,7 @@ def test_tmax_context_defaults_unchanged(monkeypatch):
     assert _engine_max_model_len(config.model_spec) == 65536
     assert config.eval_generator_max_model_len == 0
     assert config.eval_generator_model_spec() is config.model_spec
-    assert config.rollouter.max_context_tokens == 32768
+    assert config.rollouter.max_context_tokens == 65536 - 2048
     assert config.rollouter.eval_max_context_tokens == 0
 
 

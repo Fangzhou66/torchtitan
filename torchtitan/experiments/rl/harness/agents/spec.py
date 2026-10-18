@@ -65,6 +65,20 @@ class AgentTask:
     """Setup commands some corpora ship (swe_r2e); None for the rest."""
 
 
+# Labels for a counted format-error turn in ``AgentRun.format_breakdown``; a
+# harness that fills them in makes them sum to ``format_errors``.
+FORMAT_ERROR_CATEGORIES = (
+    "missing_wrapper",
+    "plain_text",
+    "no_commands",
+    "empty_commands",
+    "silent_noop",
+    "degenerate",
+    "truncated",
+    "other",
+)
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class AgentRun:
     """What a harness reports after its loop ends."""
@@ -83,6 +97,11 @@ class AgentRun:
 
     format_errors: int = 0
     """Responses the harness could not parse into an action."""
+
+    format_breakdown: dict[str, int] = field(default_factory=dict)
+    """Per-category format-error counts plus streak / repeat / truncation
+    counters (see terminus ``_CountingParser.breakdown``). Empty for harnesses
+    that do not track them."""
 
     finish_reason: str = "unknown"
     """How the loop ended: submit / hit_max_turns / hit_time_budget /

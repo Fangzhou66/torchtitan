@@ -63,6 +63,7 @@ from typing import Any, Callable
 from torchtitan.experiments.rl.harness.agents.spec import (
     AgentRun,
     AgentTask,
+    FORMAT_ERROR_CATEGORIES,
     register_agent,
 )
 
@@ -204,6 +205,10 @@ class _AdapterLLM:
         # the training trajectory like any other turn, so a run needs to be able
         # to see how much of its data came from one.
         self.subagent_calls = 0
+        # Turns cut off at the per-turn cap, and the last such text: Terminus-2
+        # parses it once more for warnings, which _CountingParser then labels.
+        self.truncated_turns = 0
+        self.last_truncated_text: str | None = None
 
     def get_model_context_limit(self) -> int:
         return self._max_context
@@ -338,6 +343,8 @@ class _AdapterLLM:
                 or in_tok + out_tok >= self._max_context - _CONTEXT_TAIL_MARGIN
             )
             if not at_context_wall:
+                self.truncated_turns += 1
+                self.last_truncated_text = text
                 raise OutputLengthExceededError(
                     f"turn hit the generation cap after {out_tok} tokens "
                     f"for {self._session_id}",
@@ -348,6 +355,15 @@ class _AdapterLLM:
                 f"(prompt={in_tok} completion={out_tok}) for {self._session_id}"
             )
         return LLMResponse(content=text)
+
+
+_XML_TAG_RE = re.compile(
+    r"<(response|analysis|plan|commands|keystrokes|task_complete)\b"
+)
+_WRAPPER_TAG_RE = re.compile(
+    r"</?(response|analysis|plan|commands|task_complete|think)\s*/?>"
+)
+_DEGENERATE_MAX_CHARS = 25
 
 
 class _CountingParser:
@@ -362,12 +378,24 @@ class _CountingParser:
     completion signal: whatever the model emitted, the terminal did not move.
     Delegation is by ``__getattr__`` because Terminus-2 feature-detects
     ``salvage_truncated_response`` on the parser.
+
+    Each counted turn also gets one ``FORMAT_ERROR_CATEGORIES`` label, and the
+    streak / repeat counters go into ``breakdown()``.
     """
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(self, inner: Any, llm: Any = None) -> None:
         self._inner = inner
+        self._llm = llm
         self.format_errors = 0
         self.completion_signals = 0
+        self.categories = dict.fromkeys(FORMAT_ERROR_CATEGORIES, 0)
+        self.replies = 0
+        self.repeat_turns = 0
+        self.opening_streak = 0
+        self.max_streak = 0
+        self._streak = 0
+        self._acted = False
+        self._prev: str | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -381,11 +409,58 @@ class _CountingParser:
                 self.completion_signals += 1
             else:
                 self.completion_signals = 0
+        text = content.strip() if isinstance(content, str) else ""
+        repeat = self._prev is not None and text == self._prev
+        self.replies += 1
+        self.repeat_turns += repeat
+        self._prev = text
         if not getattr(result, "commands", None) and not getattr(
             result, "is_task_complete", False
         ):
             self.format_errors += 1
+            self.categories[self._classify(content, text, result, repeat)] += 1
+            self._streak += 1
+            self.max_streak = max(self.max_streak, self._streak)
+            if not self._acted:
+                self.opening_streak += 1
+        else:
+            self._streak = 0
+            self._acted = True
         return result
+
+    def _classify(self, content: Any, text: str, result: Any, repeat: bool) -> str:
+        # terminus_xml imports harbor, which this module only imports lazily.
+        from torchtitan.experiments.rl.harness.agents.terminus_xml import (
+            SILENT_NOOP_WARNING,
+        )
+
+        if self._llm is not None and content == self._llm.last_truncated_text:
+            return "truncated"
+        if repeat or len(_WRAPPER_TAG_RE.sub("", text).strip()) < _DEGENERATE_MAX_CHARS:
+            return "degenerate"
+        error = getattr(result, "error", None)
+        warning = getattr(result, "warning", None)
+        warning = warning if isinstance(warning, str) else ""
+        if error == "No <response> tag found":
+            return "missing_wrapper" if _XML_TAG_RE.search(text) else "plain_text"
+        if error == "Missing <commands> section":
+            return "no_commands"
+        if not error and SILENT_NOOP_WARNING in warning:
+            return "silent_noop"
+        if not error and "Commands section is empty" in warning:
+            return "empty_commands"
+        return "other"
+
+    def breakdown(self, truncated_turns: int = 0) -> dict[str, int]:
+        """Per-rollout counts carried on ``AgentRun.format_breakdown``."""
+        return {
+            **self.categories,
+            "opening_streak": self.opening_streak,
+            "max_streak": self.max_streak,
+            "repeat_turns": self.repeat_turns,
+            "replies": self.replies,
+            "truncated_turns": truncated_turns,
+        }
 
 
 # Terminus-2 starts its pane with `pipe-pane 'cat > <agent_dir>/terminus_2.pane'`,
@@ -787,6 +862,7 @@ async def terminus_agent(
     submitted = False
     turns = 0
     format_errors = 0
+    format_breakdown: dict[str, int] = {}
     finish_reason = "unknown"
     agent = None
     parser: _CountingParser | None = None
@@ -842,7 +918,7 @@ async def terminus_agent(
             else:
                 if isinstance(inner_parser, TerminusXMLPlainParser):
                     inner_parser = SafeTerminusXMLParser()
-                parser = _CountingParser(inner_parser)
+                parser = _CountingParser(inner_parser, llm=llm)
                 agent._parser = parser
             _count_subagent_calls(agent, llm)
             context = AgentContext()
@@ -924,6 +1000,9 @@ async def terminus_agent(
         finally:
             if parser is not None:
                 format_errors = parser.format_errors
+                format_breakdown = parser.breakdown(
+                    llm.truncated_turns if llm is not None else 0
+                )
             if llm is not None and llm.subagent_calls:
                 # Summarization is off by default, so this is 0 on the normal path.
                 # Nonzero means that many of the captured turns are a subagent being
@@ -939,6 +1018,7 @@ async def terminus_agent(
         turns=turns,
         submitted=submitted,
         format_errors=format_errors,
+        format_breakdown=format_breakdown,
         finish_reason=finish_reason,
         exec_trace=env.exec_trace,
         # The pane lives in the sandbox, which is still up when this returns;

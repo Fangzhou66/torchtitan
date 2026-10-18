@@ -481,6 +481,32 @@ def test_a_turn_with_no_parsable_action_is_counted(monkeypatch):
     assert run.format_errors == 2
 
 
+def test_format_breakdown_rides_on_the_agent_run(monkeypatch):
+    from torchtitan.experiments.rl.harness.agents.spec import (
+        FORMAT_ERROR_CATEGORIES,
+    )
+
+    run = _run(
+        monkeypatch,
+        max_turns=150,
+        episodes=3,
+        pending_completion=False,
+        parse_results=[
+            _parse_result(commands=["ls"]),
+            _parse_result(),
+            _parse_result(),
+        ],
+    )
+    breakdown = run.format_breakdown
+    # The fake replays "<response/>" each turn: too short, then repeated.
+    assert sum(breakdown[c] for c in FORMAT_ERROR_CATEGORIES) == run.format_errors
+    assert breakdown["degenerate"] == 2
+    assert breakdown["opening_streak"] == 0
+    assert breakdown["max_streak"] == 2
+    assert (breakdown["repeat_turns"], breakdown["replies"]) == (2, 3)
+    assert breakdown["truncated_turns"] == 0
+
+
 def test_format_errors_survive_a_crash(monkeypatch):
     built = []
     with pytest.raises(RuntimeError, match="boom"):
