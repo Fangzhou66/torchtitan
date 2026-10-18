@@ -55,7 +55,48 @@ def _apply_router_scores(
         # the explicit cast/multiply/cast below without an R x D FP32 temporary.
         return torch.mul(routed_output_RD, scores_N1, out=routed_output_RD)
 
-    return (routed_output_RD.to(torch.float32) * scores_N1).to(routed_output_RD.dtype)
+    if routed_output_RD.shape[0] <= _SCORE_CHUNK_ROWS:
+        return (routed_output_RD.to(torch.float32) * scores_N1).to(
+            routed_output_RD.dtype
+        )
+    return _ChunkedRouterScores.apply(routed_output_RD, scores_N1)
+
+
+# Rows per chunk for training-time router scoring: 32768 x 3072 fp32 = 384 MiB.
+_SCORE_CHUNK_ROWS = 32768
+
+
+class _ChunkedRouterScores(torch.autograd.Function):
+    """``(y.float() * s).to(y.dtype)`` over row chunks, bitwise equal to eager.
+
+    Eager autograd keeps the R x D fp32 copy of ``y`` for backward and creates
+    three more R x D fp32 tensors in backward (6 GiB each for 64k tokens x top-8
+    x dim 3072). This saves ``y`` in its own dtype and runs the same elementwise
+    ops and the same per-row fp32 reduction one chunk at a time.
+    """
+
+    @staticmethod
+    def forward(ctx, y_RD: torch.Tensor, s_R1: torch.Tensor) -> torch.Tensor:
+        ctx.save_for_backward(y_RD, s_R1)
+        out = torch.empty_like(y_RD)
+        for i in range(0, y_RD.shape[0], _SCORE_CHUNK_ROWS):
+            j = i + _SCORE_CHUNK_ROWS
+            out[i:j] = (y_RD[i:j].to(torch.float32) * s_R1[i:j]).to(y_RD.dtype)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_RD: torch.Tensor):
+        y_RD, s_R1 = ctx.saved_tensors
+        grad_y = torch.empty_like(y_RD) if ctx.needs_input_grad[0] else None
+        grad_s = torch.empty_like(s_R1) if ctx.needs_input_grad[1] else None
+        for i in range(0, y_RD.shape[0], _SCORE_CHUNK_ROWS):
+            j = i + _SCORE_CHUNK_ROWS
+            g = grad_RD[i:j].to(torch.float32)
+            if grad_y is not None:
+                grad_y[i:j] = (g * s_R1[i:j]).to(y_RD.dtype)
+            if grad_s is not None:
+                grad_s[i:j] = (g * y_RD[i:j].to(torch.float32)).sum(-1, keepdim=True)
+        return grad_y, grad_s
 
 
 class LocalTokenDispatcher(Configurable):
@@ -661,10 +702,15 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             dtype=x_TD.dtype,
         )
 
-        routed_output_RD = (
-            routed_output_RD.to(torch.float32)
-            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-        ).to(routed_output_RD.dtype)
+        if torch.is_grad_enabled():
+            routed_output_RD = _apply_router_scores(
+                routed_output_RD, metadata.topk_scores_experts_sorted_N
+            )
+        else:
+            routed_output_RD = (
+                routed_output_RD.to(torch.float32)
+                * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
+            ).to(routed_output_RD.dtype)
 
         token_indices_experts_sorted_N = self._sp_global_token_indices(
             metadata.token_indices_experts_sorted_N,
