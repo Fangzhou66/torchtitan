@@ -630,6 +630,45 @@ def _tb_version(cfg: dict) -> str:
     return {"1.1": "2.1", "1.0": "2.0"}.get(schema, schema or "unknown")
 
 
+def separate_verifier(
+    cfg: dict, task_dir: str, *, build: bool
+) -> tuple[dict | None, str]:
+    """The ``tmax.separate_verifier`` block of a Harbor schema-1.1 task whose
+    ``[verifier] environment_mode = "separate"`` (every TB4 task): the verifier
+    runs in its own environment, which holds /tests, and sees only the declared
+    ``artifacts``, copied from the agent's container. ``(None, "")`` for a task
+    graded in its own container; ``(None, reason)`` for an unusable declaration.
+
+    ``build=False`` names the published verifier image. ``build=True`` builds it
+    from the package's ``tests/Dockerfile`` with ``tests/`` as the context, as a
+    rewritten package must: a changed test is not in the published image."""
+    if _get(cfg, "verifier", "environment_mode") != "separate":
+        return None, ""
+    verifier_env = _get(cfg, "verifier", "environment") or {}
+    artifacts = cfg.get("artifacts")
+    if not artifacts:
+        return None, "separate verifier without artifacts"
+    sv: dict = {
+        "artifacts": list(artifacts),
+        **_daytona_resources({"environment": verifier_env}),
+    }
+    if build:
+        tests = Path(task_dir) / _FIXTURE_ROOT
+        if not (tests / "Dockerfile").is_file():
+            return None, "separate verifier without tests/Dockerfile"
+        sv["dockerfile"] = (tests / "Dockerfile").read_text(encoding="utf-8")
+        sv["build_context"] = {
+            str(f.relative_to(tests)): base64.b64encode(f.read_bytes()).decode()
+            for f in sorted(tests.rglob("*"))
+            if f.is_file()
+        }
+    elif verifier_env.get("docker_image"):
+        sv["image"] = verifier_env["docker_image"]
+    else:
+        return None, "separate verifier without [verifier.environment].docker_image"
+    return sv, ""
+
+
 def _to_row(
     task_id: str,
     task_dir: str,
@@ -689,24 +728,13 @@ def _to_row(
         },
     }
     metadata.update(_daytona_resources(cfg))
-    # Harbor schema 1.1 `[verifier] environment_mode = "separate"` (every TB4 task):
-    # the verifier runs in its own image, which already holds /tests, and sees
-    # only the declared `artifacts`, copied from the agent's container.
-    if _get(cfg, "verifier", "environment_mode") == "separate":
-        verifier_env = _get(cfg, "verifier", "environment") or {}
-        verifier_image = verifier_env.get("docker_image")
-        artifacts = cfg.get("artifacts")
-        if not verifier_image:
-            return None, "separate verifier without [verifier.environment].docker_image"
-        if not artifacts:
-            return None, "separate verifier without artifacts"
-        # The image owns /tests, so the grading fixtures are never uploaded.
+    sv, why = separate_verifier(cfg, task_dir, build=False)
+    if why:
+        return None, why
+    if sv is not None:
+        # The verifier image owns /tests, so the grading fixtures are never uploaded.
         metadata["tmax"]["fixtures"] = {}
-        metadata["tmax"]["separate_verifier"] = {
-            "image": verifier_image,
-            "artifacts": list(artifacts),
-            **_daytona_resources({"environment": verifier_env}),
-        }
+        metadata["tmax"]["separate_verifier"] = sv
     return {"prompt": instruction, "label": task_id, "metadata": metadata}, "ok"
 
 

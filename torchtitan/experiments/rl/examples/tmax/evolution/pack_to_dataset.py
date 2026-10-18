@@ -351,6 +351,23 @@ def to_row(
             row["metadata"]["tmax"].update(fields)
     except ValueError as e:
         raise ValueError(f"{ident}: protected lists: {e}") from None
+    toml_path = Path(task_dir) / "task.toml"
+    if toml_path.is_file():
+        import tomllib
+
+        tb21 = _tmax_modules(
+            "layout", "prepare_tmax_data", "prepare_rts_data", "prepare_tb2_1_data"
+        )
+        sv, why = tb21.separate_verifier(
+            tomllib.loads(toml_path.read_text()), task_dir, build=True
+        )
+        if why:
+            raise ValueError(f"{ident}: {why}")
+        if sv is not None:
+            # Harbor separate verifier (TB4): built from this package's tests/,
+            # which hold the tests a rewrite may have changed.
+            tmax["fixtures"] = {}
+            tmax["separate_verifier"] = sv
     binding = Path(task_dir) / ".prebuilt-source.json"
     if binding.exists():
         captured = json.loads(binding.read_text())

@@ -92,9 +92,8 @@ from torchtitan.experiments.rl.examples.tmax.data import TMaxDataset, TMaxSample
 from torchtitan.experiments.rl.examples.tmax.env import TMaxEnv
 from torchtitan.experiments.rl.examples.tmax.grading import (
     ctrf_pass_fraction,
-    collect_artifacts,
+    grade_separate,
     grade_tmax,
-    restore_artifacts,
     read_ctrf_report,
     seed_workspace,
 )
@@ -1385,39 +1384,30 @@ class TMaxRollouter(Rollouter):
         self,
         sandbox,
         sample: TMaxSample,
-        separate: dict,
         *,
         verifier_sec: int,
         diagnostics: dict,
         rollout_id: str,
         labels: dict[str, str],
     ) -> tuple[float, dict | None]:
-        """Harbor ``environment_mode = "separate"``: copy the declared artifacts out
-        of the agent's sandbox into a fresh sandbox of the verifier image, which
-        holds its own ``/tests``, and grade there."""
-        artifacts = await collect_artifacts(sandbox, list(separate.get("artifacts") or []))
-        diagnostics["separate_verifier"] = {
-            "image": separate["image"],
-            "artifact_bytes": len(artifacts or b""),
-        }
-        async with boot_agent_sandbox(
-            separate["image"],
-            install_claude=False,
-            cpu=separate.get("daytona_cpu"),
-            memory=separate.get("daytona_mem_gb"),
-            disk_gb=separate.get("daytona_disk_gb"),
+        """Grade in a separate verifier sandbox (grading.grade_separate); the
+        CTRF report is read there, before that sandbox closes."""
+        ctrf: dict | None = None
+
+        async def read_report(verifier_sb) -> None:
+            nonlocal ctrf
+            ctrf = await self._read_ctrf_quietly(verifier_sb, rollout_id)
+
+        reward = await grade_separate(
+            sandbox,
+            sample.tmax,
+            workdir=sample.workdir,
+            boot=boot_agent_sandbox,
+            timeout_sec=verifier_sec,
+            diagnostics=diagnostics,
             labels=labels,
-        ) as verifier_sandbox:
-            await restore_artifacts(verifier_sandbox, artifacts)
-            reward = await grade_tmax(
-                verifier_sandbox,
-                sample.tmax,
-                workdir=sample.workdir,
-                timeout_sec=verifier_sec,
-                diagnostics=diagnostics,
-                upload_tests=False,
-            )
-            ctrf = await self._read_ctrf_quietly(verifier_sandbox, rollout_id)
+            after=read_report,
+        )
         return reward, ctrf
 
     def _apply_length_penalty(self, rollouts: list[Rollout]) -> list[m.Metric]:
@@ -1883,7 +1873,6 @@ class TMaxRollouter(Rollouter):
                             reward, ctrf = await self._grade_separate(
                                 sandbox,
                                 sample,
-                                separate,
                                 verifier_sec=verifier_sec,
                                 diagnostics=verifier,
                                 rollout_id=rollout_id,

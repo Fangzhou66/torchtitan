@@ -90,6 +90,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- configuration, not log
     ) from exc
 from torchtitan.experiments.rl.examples.tmax import layout  # noqa: E402
 from torchtitan.experiments.rl.examples.tmax.grading import (  # noqa: E402
+    grade_separate,
     grade_tmax,
     seed_workspace,
 )
@@ -365,17 +366,20 @@ async def _probe_once(
         log(f"run exit={code}")
         measured = await measure(sb, time.time() - t0, tail=(out or "") + (err or ""))
         grading = {}
-        reward = (
-            await grade_tmax(
+        if not execution["submitted"]:
+            reward = 0.0
+        elif tmax.get("separate_verifier"):
+            reward = await grade_separate(
+                sb, tmax, workdir=workdir, boot=boot_agent_sandbox, diagnostics=grading
+            )
+        else:
+            reward = await grade_tmax(
                 sb,
                 tmax,
                 workdir=workdir,
                 baseline_digests=baseline,
                 diagnostics=grading,
             )
-            if execution["submitted"]
-            else 0.0
-        )
     tail = (out + "\n" + err)[-400:]
     if shortcut is None:
         why = starved(measured, code, solve_timeout) if reward < 1.0 else ""

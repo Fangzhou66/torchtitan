@@ -217,8 +217,11 @@ def test_a_separate_verifier_grades_in_its_own_sandbox_from_the_artifacts(monkey
         calls.append((sandbox.sandbox_id, kwargs.get("upload_tests", True)))
         return 1.0
 
-    monkeypatch.setattr(rollouter_mod, "collect_artifacts", collect)
-    monkeypatch.setattr(rollouter_mod, "restore_artifacts", restore)
+    from torchtitan.experiments.rl.examples.tmax import grading as grading_mod
+
+    monkeypatch.setattr(grading_mod, "collect_artifacts", collect)
+    monkeypatch.setattr(grading_mod, "restore_artifacts", restore)
+    monkeypatch.setattr(grading_mod, "grade_tmax", grade)
     tmax = {
         "test_sh": "",
         "separate_verifier": {"image": "verifier/image", "artifacts": ["/app/out.step"]},

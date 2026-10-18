@@ -441,6 +441,59 @@ async def restore_artifacts(sb: Sandbox, data: bytes | None) -> None:
     )
 
 
+async def grade_separate(
+    sb: Sandbox,
+    tmax: dict,
+    *,
+    workdir: str,
+    boot,
+    timeout_sec: int | None = None,
+    diagnostics: dict | None = None,
+    labels: dict[str, str] | None = None,
+    after=None,
+) -> float:
+    """Harbor ``environment_mode = "separate"``: copy the declared artifacts out
+    of the agent's sandbox ``sb`` into a fresh sandbox of the verifier
+    environment, which holds its own ``/tests``, and grade there.
+
+    ``tmax["separate_verifier"]`` names that environment: a prebuilt ``image``,
+    or a ``dockerfile`` with ``build_context`` (the task's tests/ directory),
+    which is what a rewrite that changed the tests needs. ``boot`` is
+    ``boot_agent_sandbox`` (injected so this module stays importable without
+    the harness). ``after`` is awaited with the verifier sandbox while it is up
+    (the rollouter reads the CTRF report there)."""
+    sv = tmax["separate_verifier"]
+    artifacts = await collect_artifacts(sb, list(sv.get("artifacts") or []))
+    if diagnostics is not None:
+        diagnostics["separate_verifier"] = {
+            "image": sv.get("image"),
+            "built": bool(sv.get("dockerfile")),
+            "artifact_bytes": len(artifacts or b""),
+        }
+    async with boot(
+        sv.get("image") or "",
+        dockerfile=sv.get("dockerfile") or None,
+        build_context=sv.get("build_context") or None,
+        install_claude=False,
+        cpu=sv.get("daytona_cpu"),
+        memory=sv.get("daytona_mem_gb"),
+        disk_gb=sv.get("daytona_disk_gb"),
+        labels=labels,
+    ) as verifier_sb:
+        await restore_artifacts(verifier_sb, artifacts)
+        reward = await grade_tmax(
+            verifier_sb,
+            tmax,
+            workdir=workdir,
+            timeout_sec=timeout_sec,
+            diagnostics=diagnostics,
+            upload_tests=False,
+        )
+        if after is not None:
+            await after(verifier_sb)
+    return reward
+
+
 async def read_ctrf_report(
     sb: Sandbox, *, path: str = _DEFAULT_CTRF_PATH
 ) -> dict | None:

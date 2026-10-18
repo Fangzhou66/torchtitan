@@ -631,3 +631,28 @@ def test_a_shared_environment_task_has_no_separate_verifier(tmp_path):
     (row,), _ = build_rows(tasks_root=str(root))
 
     assert "separate_verifier" not in row["metadata"]["tmax"]
+
+
+def test_a_rewritten_separate_task_builds_its_verifier_from_tests(tmp_path):
+    """A rewrite may change the tests, which the published verifier image does
+    not hold: from a package, the verifier is built from tests/Dockerfile."""
+    import base64 as b64
+    import tomllib
+
+    from torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data import (
+        separate_verifier,
+    )
+
+    task = _write_task(tmp_path, "demo-task", task_toml=_SEPARATE_TOML)
+    (task / "tests" / "Dockerfile").write_text("FROM python:3.13-slim\nCOPY . /tests/\n")
+    cfg = tomllib.loads((task / "task.toml").read_text())
+
+    sv, why = separate_verifier(cfg, str(task), build=True)
+
+    assert why == "" and "image" not in sv
+    assert sv["dockerfile"].startswith("FROM python:3.13-slim")
+    assert b64.b64decode(sv["build_context"]["test.sh"]).decode() == _TEST_SH
+    assert "nested/case.txt" in sv["build_context"]
+    assert separate_verifier(
+        tomllib.loads(_TASK_TOML), str(task), build=True
+    ) == (None, "")
