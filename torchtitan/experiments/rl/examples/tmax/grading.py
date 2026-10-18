@@ -159,6 +159,25 @@ def _parse_reward(text: str) -> float:
     return max(0.0, min(1.0, val))
 
 
+def _parse_reward_json(text: str) -> float:
+    """Harbor's ``reward.json``: its ``reward``, or the one value it holds.
+
+    Clamped to [0, 1] like ``reward.txt``; 0.0 when the file is empty or holds
+    no single reward (Harbor fails such a trial instead of scoring it)."""
+    try:
+        rewards = json.loads(text or "")
+    except ValueError:
+        return 0.0
+    if not isinstance(rewards, dict):
+        return 0.0
+    value = rewards.get("reward")
+    if value is None and len(rewards) == 1:
+        value = next(iter(rewards.values()))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return max(0.0, min(1.0, float(value)))
+
+
 def parse_ctrf(text: str) -> dict | None:
     """Summarize a CTRF report into ``{tests, passed, failed}`` (failed = names).
 
@@ -244,12 +263,17 @@ async def grade_tmax(
     baseline_digests: dict[str, str] | None = None,
     diagnostics: dict | None = None,
     upload_tests: bool = True,
+    harbor_reward: bool = False,
+    env: dict[str, str] | None = None,
 ) -> float:
     """Grade a tmax task in the (already-run) sandbox ``sb`` and return reward.
 
     ``upload_tests=False`` is for a separate verifier sandbox whose image already
     holds ``/tests`` (Harbor ``environment_mode = "separate"``): nothing is
-    uploaded and the image's own ``/tests/test.sh`` runs.
+    uploaded and the image's own ``/tests/test.sh`` runs. ``harbor_reward`` reads
+    the reward as Harbor's verifier does: ``reward.json``'s ``reward`` when that
+    file exists, else ``reward.txt`` (four TB4 verifiers write only the JSON).
+    ``env`` is the task's ``[verifier.env]``, set for ``test.sh``.
 
     Creates ``/logs/verifier`` + ``/tests``, uploads ``test.sh`` and the grading
     fixtures (tests/*) to their destinations, runs ``bash /tests/test.sh``, then
@@ -279,8 +303,17 @@ async def grade_tmax(
         await sb.write_file(_TEST_SH, test_sh, user="root")
 
     nonce = _make_nonce()
+    reward_json = posixpath.join(
+        posixpath.dirname(reward_path) or _VERIFIER_DIR, "reward.json"
+    )
+    pre_grade = _pre_grade_command(reward_path, _ctrf_path_for(reward_path), nonce)
+    if harbor_reward:
+        pre_grade = (
+            f"chattr -i {shlex.quote(reward_json)} 2>/dev/null; "
+            f"rm -f {shlex.quote(reward_json)}; {pre_grade}"
+        )
     await sb.exec(
-        _pre_grade_command(reward_path, _ctrf_path_for(reward_path), nonce),
+        pre_grade,
         user="root",
         check=False,
         timeout=60,
@@ -371,6 +404,7 @@ async def grade_tmax(
         user="root",
         check=False,
         timeout=timeout,
+        **({"env": env} if env else {}),
     )
     # The verifier's exit and output are the only record of why an episode
     # scored below 1: reward.txt holds the number and nothing else. Kept for
@@ -381,6 +415,19 @@ async def grade_tmax(
     if diagnostics is not None:
         # Post-episode evidence for the task editor, never an agent observation.
         diagnostics.update(exit_code=rc, output_tail=verifier_output[-16000:])
+    if harbor_reward:
+        json_rc, _, _ = await sb.exec(
+            f"test -e {shlex.quote(reward_json)}", user="root", check=False, timeout=60
+        )
+        if json_rc == 0:
+            text = await sb.read_file(reward_json, user="root")
+            reward = _parse_reward_json(text)
+            if diagnostics is not None:
+                diagnostics.update(reward_file="reward.json", reward_json=text[-2000:])
+            logger.info("[tmax] graded reward=%.2f (reward.json)", reward)
+            return reward
+        if diagnostics is not None:
+            diagnostics["reward_file"] = "reward.txt"
     reward_txt = await sb.read_file(reward_path, user="root")
     reward = _parse_reward(reward_txt)
     _check_verifier_python_download(test_sh, verifier_output, reward)
@@ -428,17 +475,166 @@ async def collect_artifacts(sb: Sandbox, paths: list[str]) -> bytes | None:
     return base64.b64decode(text) if text else None
 
 
-async def restore_artifacts(sb: Sandbox, data: bytes | None) -> None:
-    """Unpack ``collect_artifacts``' tar at the same paths in ``sb``."""
+async def restore_artifacts(
+    sb: Sandbox, data: bytes | None, *, into: str | None = None
+) -> None:
+    """Unpack ``collect_artifacts``' tar at the same paths in ``sb``.
+
+    ``into``: the tar is one directory's contents (an artifact with ``exclude``
+    patterns); that directory is emptied first, as Harbor empties a directory
+    artifact's target before uploading it."""
     if not data:
         return
     await sb.write_file(_ARTIFACTS_TGZ, data, user="root")
+    prep = ""
+    root = "/"
+    if into is not None:
+        q = shlex.quote(into)
+        prep = f"rm -rf {q} && mkdir -p {q} && chmod 777 {q} && "
+        root = q
     await sb.exec(
-        f"tar -C / -xzf {_ARTIFACTS_TGZ} && rm -f {_ARTIFACTS_TGZ}",
+        f"{prep}tar -C {root} -xzf {_ARTIFACTS_TGZ} && rm -f {_ARTIFACTS_TGZ}",
         user="root",
         check=False,
         timeout=300,
     )
+
+
+async def _collect_excluding(sb: Sandbox, source: str, exclude: list[str]) -> bytes | None:
+    """One directory artifact with its tar ``--exclude`` patterns, as Harbor
+    downloads it (``tar czf - --exclude=... -C <source> .``); None if absent."""
+    flags = " ".join(f"--exclude={shlex.quote(p)}" for p in exclude)
+    q = shlex.quote(source)
+    await sb.exec(
+        f"rm -f {_ARTIFACTS_TGZ} {_ARTIFACTS_TGZ}.b64; [ -d {q} ] && "
+        f"tar -czf {_ARTIFACTS_TGZ} {flags} -C {q} . "
+        f"&& base64 -w0 {_ARTIFACTS_TGZ} > {_ARTIFACTS_TGZ}.b64; true",
+        user="root",
+        check=False,
+        timeout=300,
+    )
+    text = (await sb.read_file(f"{_ARTIFACTS_TGZ}.b64", user="root") or "").strip()
+    return base64.b64decode(text) if text else None
+
+
+_MAIN_SERVICE = "main"
+
+
+def _artifact_entries(sv: dict) -> list[dict]:
+    """Harbor's artifact entries as ``{source, service, exclude}``.
+
+    A bare string is a path in the agent's (main) container; a table may name a
+    compose ``service`` and tar ``exclude`` patterns. Harbor's convention dir,
+    collected for every task, is the row's ``convention_dir`` when it names one."""
+    entries = []
+    for a in list(sv.get("artifacts") or []) + (
+        [sv["convention_dir"]] if sv.get("convention_dir") else []
+    ):
+        if isinstance(a, str):
+            a = {"source": a}
+        entries.append(
+            {
+                "source": a["source"],
+                "service": a.get("service") or _MAIN_SERVICE,
+                "exclude": list(a.get("exclude") or []),
+            }
+        )
+    return entries
+
+
+def _backend(sb):
+    """The sandbox under the root-forcing wrappers (``_inner``), for its compose
+    services. Bounded: a mock answers every attribute."""
+    for _ in range(4):
+        inner = getattr(sb, "_inner", None)
+        if inner is None:
+            break
+        sb = inner
+    return sb
+
+
+async def _run_collect_hooks(sb, hooks: list[dict], record: list) -> None:
+    """Harbor's ``_run_collect_hooks``: best-effort; a failure never aborts."""
+    for hook in hooks:
+        service = hook.get("service") or _MAIN_SERVICE
+        timeout = max(1, int(float(hook.get("timeout_sec") or 60)))
+        entry: dict = {"service": service, "command": hook["command"][:200]}
+        try:
+            if service == _MAIN_SERVICE:
+                rc, out, err = await sb.exec(
+                    hook["command"],
+                    user=hook.get("user") or "root",
+                    check=False,
+                    timeout=timeout,
+                )
+            else:
+                rc, out, err = await _backend(sb).service_exec(
+                    hook["command"],
+                    service=service,
+                    user=hook.get("user"),
+                    timeout=timeout,
+                )
+            entry["rc"] = rc
+            if rc != 0:
+                entry["output_tail"] = ((out or "") + (err or ""))[-500:]
+        except Exception as error:  # noqa: BLE001 -- best-effort, as in Harbor
+            entry["error"] = f"{type(error).__name__}: {error}"[:500]
+        record.append(entry)
+
+
+async def _collect_phased(sb, sv: dict, record: dict) -> list[tuple[str | None, bytes]]:
+    """Harbor's ``_collect_artifacts_phased`` for a separate verifier.
+
+    Main-service collect hooks, then main artifacts; then, when an artifact or
+    hook names a sidecar, ``main`` is stopped (leftover agent processes cannot
+    touch the evidence), sidecar hooks run and sidecar artifacts are copied out
+    of their own containers. Returns ``(into, tar)`` pairs for
+    ``restore_artifacts``: ``into`` None for a tar rooted at ``/``."""
+    entries = _artifact_entries(sv)
+    hooks = list(sv.get("collect") or [])
+    main_hooks = [h for h in hooks if (h.get("service") or _MAIN_SERVICE) == _MAIN_SERVICE]
+    side_hooks = [h for h in hooks if h not in main_hooks]
+    sidecars = sorted(
+        {e["service"] for e in entries if e["service"] != _MAIN_SERVICE}
+        | {h["service"] for h in side_hooks}
+    )
+    if sidecars and not hasattr(_backend(sb), "service_exec"):
+        raise ValueError(
+            f"artifacts or collect hooks name compose services {sidecars}, "
+            "but the agent sandbox is not a compose project"
+        )
+    record["hooks"] = []
+    bundles: list[tuple[str | None, bytes]] = []
+    await _run_collect_hooks(sb, main_hooks, record["hooks"])
+    plain = [e["source"] for e in entries if e["service"] == _MAIN_SERVICE and not e["exclude"]]
+    data = await collect_artifacts(sb, plain) if plain else None
+    if data:
+        bundles.append((None, data))
+    for e in entries:
+        if e["service"] == _MAIN_SERVICE and e["exclude"]:
+            data = await _collect_excluding(sb, e["source"], e["exclude"])
+            if data:
+                bundles.append((e["source"], data))
+    if sidecars:
+        try:
+            await _backend(sb).stop_service(_MAIN_SERVICE)
+        except Exception as error:  # noqa: BLE001 -- Harbor logs and continues
+            record["stop_main_error"] = f"{type(error).__name__}: {error}"[:500]
+        await _run_collect_hooks(sb, side_hooks, record["hooks"])
+        record["sidecar_artifacts"] = {}
+        for e in entries:
+            if e["service"] == _MAIN_SERVICE:
+                continue
+            key = f"{e['service']}:{e['source']}"
+            try:
+                data = await _backend(sb).copy_out(e["service"], e["source"])
+            except Exception as error:  # noqa: BLE001 -- best-effort, as in Harbor
+                record["sidecar_artifacts"][key] = f"{type(error).__name__}: {error}"[:300]
+                continue
+            record["sidecar_artifacts"][key] = len(data or b"")
+            if data:
+                bundles.append((None, data))
+    return bundles
 
 
 async def grade_separate(
@@ -461,15 +657,29 @@ async def grade_separate(
     which is what a rewrite that changed the tests needs. ``boot`` is
     ``boot_agent_sandbox`` (injected so this module stays importable without
     the harness). ``after`` is awaited with the verifier sandbox while it is up
-    (the rollouter reads the CTRF report there)."""
+    (the rollouter reads the CTRF report there).
+
+    The rest follows Harbor 0.22.0's trial: artifacts may name a compose service
+    or carry ``exclude`` patterns, ``collect`` hooks run first (``_collect_phased``),
+    ``env`` is the verifier's ``[verifier.env]``, the verifier boots with the
+    block's GPU/region/no-internet fields; a block without them collects and
+    boots as before. The reward is read as Harbor's verifier reads it:
+    ``reward.json`` when the verifier wrote one, else ``reward.txt``."""
     sv = tmax["separate_verifier"]
-    artifacts = await collect_artifacts(sb, list(sv.get("artifacts") or []))
+    record: dict = {}
+    bundles = await _collect_phased(sb, sv, record)
     if diagnostics is not None:
         diagnostics["separate_verifier"] = {
             "image": sv.get("image"),
             "built": bool(sv.get("dockerfile")),
-            "artifact_bytes": len(artifacts or b""),
+            "artifact_bytes": sum(len(data) for _, data in bundles),
+            "timeout_sec": timeout_sec if timeout_sec is not None else _eval_timeout_sec(),
+            **{k: v for k, v in record.items() if v},
         }
+    # TB4 rows that declare them: a GPU (in its region) and no internet.
+    from torchtitan.experiments.rl.examples.tmax.harbor_env import sandbox_options
+
+    options = sandbox_options(sv)
     async with boot(
         sv.get("image") or "",
         dockerfile=sv.get("dockerfile") or None,
@@ -479,8 +689,10 @@ async def grade_separate(
         memory=sv.get("daytona_mem_gb"),
         disk_gb=sv.get("daytona_disk_gb"),
         labels=labels,
+        **({"sandbox_options": options} if options else {}),
     ) as verifier_sb:
-        await restore_artifacts(verifier_sb, artifacts)
+        for into, data in bundles:
+            await restore_artifacts(verifier_sb, data, **({"into": into} if into else {}))
         reward = await grade_tmax(
             verifier_sb,
             tmax,
@@ -488,6 +700,8 @@ async def grade_separate(
             timeout_sec=timeout_sec,
             diagnostics=diagnostics,
             upload_tests=False,
+            harbor_reward=True,
+            env=sv.get("env") or None,
         )
         if after is not None:
             await after(verifier_sb)
