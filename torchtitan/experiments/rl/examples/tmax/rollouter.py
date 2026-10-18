@@ -659,6 +659,71 @@ _ENTRYPOINT_SETTLE_SEC = 2.0
 _ENTRYPOINT_LOG = "/tmp/.titan_entrypoint.log"
 
 
+# SWE_SYNC_WAIT_FOR_REWRITES=1: the next training group is drawn only after
+# every evolution signal under TRL_BASE has a ledger line, i.e. the evolve loop
+# has finished (and published) or declined every rewrite asked for so far. With
+# one active group (slots release after the weight pull) this makes a step
+# rollout -> train -> sync -> rewrites done -> next rollout.
+_SYNC_WAIT_FOR_REWRITES = os.environ.get("SWE_SYNC_WAIT_FOR_REWRITES", "0") == "1"
+_SYNC_REWRITE_TIMEOUT_SEC = float(
+    os.environ.get("SWE_SYNC_REWRITE_TIMEOUT_SEC", "14400")
+)
+
+
+def _pending_signals(root: layout.Root) -> list[str]:
+    """Signal ids under ``root`` that the evolve loop has not written a ledger
+    line for yet."""
+    signals = {
+        f"{run.name}/{path.stem}"
+        for run in root.run_dirs()
+        if run.signals.is_dir()
+        for path in run.signals.glob("*.json")
+    }
+    if not signals:
+        return []
+    ledger = root.evolution.ledger
+    seen = set()
+    if ledger.is_file():
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            try:
+                seen.add(json.loads(line).get("signal"))
+            except ValueError:
+                continue
+    return sorted(signals - seen)
+
+
+def _wait_for_rewrites() -> bool:
+    """Block until no signal is pending; True when it waited at all."""
+    root = layout.Root.from_env()
+    if root is None:
+        return False
+    start = time.monotonic()
+    last_log = 0.0
+    blocked = False
+    while pending := _pending_signals(root):
+        waited = time.monotonic() - start
+        if waited > _SYNC_REWRITE_TIMEOUT_SEC:
+            logger.warning(
+                f"[tmax] sync: {len(pending)} rewrite(s) still pending after "
+                f"{waited:.0f}s (SWE_SYNC_REWRITE_TIMEOUT_SEC); drawing anyway: "
+                f"{pending[:3]}"
+            )
+            return True
+        if waited - last_log >= 300 or last_log == 0.0:
+            last_log = waited or 1e-9
+            logger.info(
+                f"[tmax] sync: next group waits for {len(pending)} rewrite(s) "
+                f"({waited:.0f}s so far): {pending[:3]}"
+            )
+        time.sleep(15)
+        blocked = True
+    if blocked:
+        logger.info(
+            f"[tmax] sync: rewrites done after {time.monotonic() - start:.0f}s"
+        )
+    return blocked
+
+
 _RUN_DIR_UNSET_LOGGED = False
 
 
@@ -1504,6 +1569,15 @@ class TMaxRollouter(Rollouter):
         if declared is None:
             return self._eval_timeout_sec
         return max(int(declared), self._eval_timeout_sec)
+
+    def get_training_sample(self) -> TMaxSample:
+        # Runs in a worker thread after the controller frees a group slot, so a
+        # wait here holds back only the next group's rollouts.
+        if _SYNC_WAIT_FOR_REWRITES and _wait_for_rewrites():
+            reload = getattr(self._train_dataset, "_maybe_reload", None)
+            if reload is not None:
+                reload(min_interval_sec=0.0)
+        return super().get_training_sample()
 
     def _maybe_emit_evolution_signal(
         self, sample: TMaxSample, rollouts: list[Rollout]
