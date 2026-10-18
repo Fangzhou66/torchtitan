@@ -299,7 +299,7 @@ def test_harder_defaults_to_real_guidance_with_repair_in_the_rewrite(
     assert "These tasks train an agent for real terminal work" in prompt
     assert "Search with your web tool" in prompt
     assert "Keep the existing instruction's wording" in prompt
-    assert "decoy files, a second candidate or stale copy" in prompt
+    assert "These are not hardening" in prompt
     assert "Record every repair in `run/repair.json`" in prompt
     assert ec._STUDENT_HARDER_GUIDANCE not in prompt
 
