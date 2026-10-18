@@ -90,9 +90,14 @@ def freeze(args) -> None:
             shutil.copytree(source, args.output / "packages" / tid, symlinks=False)
             for path in sorted((source / "solution").rglob("*")):
                 if path.is_file():
-                    payload["solution"][
-                        str(path.relative_to(source / "solution"))
-                    ] = path.read_text()
+                    rel = str(path.relative_to(source / "solution"))
+                    try:
+                        payload["solution"][rel] = path.read_text()
+                    except UnicodeDecodeError:
+                        # A binary solution file (TB-4 ships images, PDFs,
+                        # executables) is recorded by digest; probe uploads it
+                        # from the frozen package itself.
+                        payload["solution"][rel] = {"sha256": digest(path.read_bytes())}
         write_json(args.output / "inputs" / f"{tid}.json", payload)
     manifest["input_sha256"] = {
         tid: digest((args.output / "inputs" / f"{tid}.json").read_bytes())
@@ -143,6 +148,9 @@ async def run(args) -> int:
         },
         "manifest_sha256": digest((args.output / "manifest.json").read_bytes()),
     }
+    if args.shortcut is not None:
+        # Only recorded when used, so an existing attempt's run.json still matches.
+        config["shortcut"] = args.shortcut
     config_file = attempt / "run.json"
     if config_file.exists():
         if json.loads(config_file.read_text()) != config:
@@ -185,7 +193,7 @@ async def run(args) -> int:
                 async with asyncio.timeout(payload["solve_timeout"] + 1800):
                     result = await dr.probe(
                         args.output / "packages" / tid,
-                        None,
+                        args.shortcut,
                         payload["solve_timeout"],
                         resources=resources,
                         prepared_row=payload["row"],
@@ -254,6 +262,12 @@ def main():
     parser.add_argument("--label", default="environment_validation")
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--ids", nargs="+")
+    parser.add_argument(
+        "--shortcut",
+        default=None,
+        help="run: probe this command instead of the reference solution (e.g. "
+        "'true' for an empty arm); the result's `passed` says whether it scored",
+    )
     args = parser.parse_args()
     if args.action == "freeze":
         if args.mix is None or not args.packages:
