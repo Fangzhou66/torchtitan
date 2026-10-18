@@ -80,7 +80,11 @@ bench.py readout <job> [<job> ...]
 
 For TB2.1 the eval JSONL is `data/evalsets/tb2_1_tmux_f1640f428d48.jsonl`
 (built by `../prepare_tb2_1_data.py`, tmux preinstalled) and the task tree is
-`terminal-bench-2-1/`. TB4 rows come from the same builder pointed at the TB4
-tree (`--expect-tasks 66`); every TB4 task grades in a separate verifier
-environment (`tmax.separate_verifier`), which the rollouter boots after the
-agent submits and fills with the task's declared artifacts.
+`terminal-bench-2-1/`. TB4: `data/evalsets/tb4_tmux_493ef156d.jsonl` (66 tasks,
+the same builder pointed at the TB4 tree with `--expect-tasks 66
+--verify-runtime <dir> --keep-going`). Every TB4 task grades in a separate
+verifier environment (`tmax.separate_verifier`), which the rollouter boots
+after the agent submits and fills with the task's declared artifacts. Sandbox
+requests above Daytona's per-sandbox limits (4 vCPU, 8 GiB, 10 GiB disk) run at
+those limits; fp8-rmsnorm-gemm, jax-speedrun-gpu and math-eval-grader declare
+an H100, which a Daytona sandbox does not have.
