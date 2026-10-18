@@ -124,7 +124,6 @@ own is revalidated at that size.
 |---|---|---|
 | `SWE_EVOLVE_SIMPLIFY` | `0` (default) | The easier arm. At `0`, an all-fail signal is written to the ledger as `deferred` and the task stays as it is. At `1`, the loop simplifies it. The bound on how much the reference solution may grow does not apply to this direction, so a simplification is rejected only when the reference solution fails the verifier, when an untouched workspace passes it, or when the edit touches files its operator may not; the "Simplification" section of [`EVOLVE_LOOP.md`](EVOLVE_LOOP.md) has the detail. |
 | `SWE_SIMPLIFY_HINT` | `vague` | How much guidance a simplification may write into the instruction. `specific` writes where-to-look hints in, and the holdout experiment described in that same section showed the policy learning to follow hints rather than to solve. |
-| `EVOLVE_SPEC_REPAIR` | `1` (default) | An evidence-based `repair_required` report from a simplification agent (a hidden requirement or broken setup behind 0/k) or a hardening agent (a shortcut the verifier accepts behind k/k) starts a separate `repair_spec` attempt from the unmodified input revision, under the same rewrite deadline. Every repair attempt, accepted or not, is reported as one line in `evolution/repairs.jsonl` and in `loop.log`. Repairs retain their own route and metrics; they do not immediately trigger another simplification or hardening. At `0` the task is kept as it is. Transient sandbox/provider failures or unusable evidence are `invalid_signal`, not repair requests. |
 | `EVOLVE_HARDER_GUIDANCE` | `real` (default) | What a harder rewrite is asked for. `real`: research one real-world difficulty that fits the task (a version behavior change, an upstream issue and its fix, a format or protocol detail), pin the real upstream artifact, reproduce it in the sandbox, cite sources in `run/hardening.md`; decoys, extra edge-case clauses and stricter formatting are ruled out and the existing instruction wording is kept. `student`: the earlier trace-guided guidance, which on the r100 tasks produced mostly decoys, records-in-effect and input edge cases. |
 | `EVOLVE_CODEX_WEB_SEARCH` | `live` (default) | Gives Codex sessions the built-in web tool (`web__run`). Codex 0.149 offers it to a custom provider only when the provider is named exactly `OpenAI`, so the loop names its provider that way when this is set. Empty: no web tool; sessions still have shell network access. |
 | `SWE_POLICY_CANARY_K` | `0` (disabled) | At `0`, task-valid rewrites publish without dedicated student rollouts; ordinary training groups on the new revision provide difficulty feedback. At two or more trials per arm, accepted candidates must pass a fresh original/candidate student-policy check before publication. Export the same value for both the trainer and evolution loop; the 9B TMax recipe selects the admission controller automatically. See "Student-policy admission" below. |
@@ -183,10 +182,15 @@ enter training batches, create evolution signals or contribute to fixed
 validation rewards. Pending policy admission occupies an evolution-worker slot.
 The controller cancels its probes when optimization ends, before final evaluation.
 
-Track `evolution/evolve/*`, `evolution/simplify/*`, `evolution/repair_spec/*`
-and `evolution/invalid_signal/*` separately; `evolution/rewrites_by_stage/*`
-says where each verdict was reached. Repairs are counted in
-`evolution/rewrites/accepted_repair_spec`, not `accepted_easier`.
+Track `evolution/evolve/*`, `evolution/simplify/*` and
+`evolution/invalid_signal/*` separately; `evolution/rewrites_by_stage/*`
+says where each verdict was reached. Repair is part of a harder or easier
+rewrite: a session that finds the task defective (a requirement the verifier
+checks but the instruction never states, a shortcut the verifier accepts, a
+broken setup) fixes it in the same rewrite and declares each fix in
+`run/repair.json`. Every declared fix is one line in `evolution/repairs.jsonl`
+(task, direction, defect, evidence, change, outcome) and one line in
+`loop.log`; read that file to review what the loop changed beyond difficulty.
 `evolution/policy_canary/active` and `waiting` show controller admission load.
 
 A free worker takes the next pending signal at once, newest first, one per

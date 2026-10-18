@@ -540,7 +540,7 @@ def test_process_one_rejects_the_retired_chat_arm(
     assert (rw.package / "instruction.md").read_text() == SEED["instruction"]
 
 
-@pytest.mark.parametrize("declaration", ["_simplify", "_spec_repair"])
+@pytest.mark.parametrize("declaration", ["_simplify", "_repair"])
 def test_easier_uses_full_validation_without_harder_growth(
     tmp_path, monkeypatch, declaration
 ):
@@ -673,58 +673,11 @@ def test_easier_records_decision_and_can_decline(tmp_path, monkeypatch):
     assert "operator" not in rec and rec["family"] == "simplify" and rec["agent_validated"]
 
     def decline(*args, **kwargs):
-        raise ec.Blocked("repair_required: invalid task")
+        raise ec.Blocked("BLOCKED: the environment lacks a required tool")
 
     ec.simplify_codex = decline
     rec = fb.process_one(rw, {**SIGNAL, "solved": 0}, job="easier", seed_dir=r0)
-    assert rec["status"] == "kept" and "repair_required" in rec["reason"]
-
-
-def test_spec_defect_keeps_the_input_revision_without_starting_repair(
-    tmp_path, monkeypatch
-):
-    rw, r0 = _rewrite(tmp_path, monkeypatch)
-    ec = _fake_ec()
-    report = (
-        "BLOCKED: repair_required: " + "visible contract disagrees with the check " * 8
-    )
-    original = {
-        str(path.relative_to(r0)): path.read_bytes()
-        for path in r0.rglob("*")
-        if path.is_file()
-    }
-
-    def simplify(rewrite, task, **kwargs):
-        (rewrite.package / "run").mkdir()
-        (rewrite.package / "run/verdict.txt").write_text(report)
-        rewrite.traces.mkdir(exist_ok=True)
-        (rewrite.traces / "attempt-01.jsonl").write_text('{"reward": 0}\n')
-        (rewrite.package / "environment/partial-edit.txt").write_text("unfinished")
-        raise ec.Blocked(report[:200])
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("a declined simplify started repair or validation")
-
-    ec.simplify_codex, ec.evolve_agentic = simplify, unexpected
-    monkeypatch.setitem(sys.modules, "evolve_codex", ec)
-    monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
-    monkeypatch.setenv("EVOLVE_SPEC_REPAIR", "0")
-    monkeypatch.setattr(fb, "revalidate", unexpected)
-    rec = fb.process_one(rw, {**SIGNAL, "solved": 0}, job="easier", seed_dir=r0)
-    assert rec["action"] == "simplify" and "simplify" not in rec
-    assert rec["spec_repair"]["reported"] == report
-    assert rec["status"] == "kept" and rec["stage"] == "repair_required"
-    # Kept or not, the reported defect is in the review file.
-    [line] = layout.read_jsonl(layout.Root.from_env().evolution.repairs)
-    assert line["direction"] == "easier" and line["stage"] == "repair_required"
-    assert rec["reason"] == report[:300]
-    assert {
-        str(path.relative_to(r0)): path.read_bytes()
-        for path in r0.rglob("*")
-        if path.is_file()
-    } == original
-    assert (rw.package / "environment/partial-edit.txt").read_text() == "unfinished"
-    assert (rw.traces / "attempt-01.jsonl").read_text() == '{"reward": 0}\n'
+    assert rec["status"] == "kept" and "lacks a required tool" in rec["reason"]
 
 
 def test_an_unsolved_task_is_hardened_by_the_agent(tmp_path, monkeypatch):
@@ -767,104 +720,51 @@ def test_an_unsolved_seed_does_not_bound_the_solution_length(tmp_path, monkeypat
     assert not verdict["ok"] and verdict["stage"] == "step_size"
 
 
-@pytest.mark.parametrize("validated", [True, False])
-def test_spec_repair_restarts_from_seed_and_does_not_simplify_again(
-    tmp_path, monkeypatch, validated
+@pytest.mark.parametrize("job", ["harder", "easier"])
+def test_a_repair_made_in_the_rewrite_is_recorded_and_reported(
+    tmp_path, monkeypatch, job
 ):
     rw, r0 = _rewrite(tmp_path, monkeypatch)
     ec = _fake_ec()
-    report = "BLOCKED: repair_required: verifier requires an unspecified spelling"
+    repair = [
+        {
+            "defect": "the verifier accepts a hand-written report",
+            "evidence": "attempt-03 turn 4",
+            "change": "the report is recomputed from a changed input",
+        }
+    ]
     calls = []
 
-    def simplify(rewrite, task, **kwargs):
-        calls.append("simplify")
-        (rewrite.package / "run").mkdir()
-        (rewrite.package / "run/verdict.txt").write_text(report)
-        (rewrite.package / "instruction.md").write_text("Unfinished simplification")
-        (rewrite.package / "environment/partial.txt").write_text("partial")
-        rewrite.traces.mkdir()
-        (rewrite.traces / "attempt-01.jsonl").write_text('{"reward": 0}\n')
-        raise ec.Blocked(report)
+    def agent(rewrite, task, *args, **kwargs):
+        calls.append(task["_direction"])
+        return {**task, "test_state_py": "assert recomputed()\n", "_repair": repair}
 
-    declaration = {
-        "diagnosis": "unstated exact spelling", "evidence": "attempt-01 turn 0",
-        "change": "check semantic error", "retained_skill": "handle a refresh error",
-        "validation": "valid and invalid implementations graded independently",
-    }
-
-    def repair(rewrite, task, job, **kwargs):
-        calls.append(job)
-        assert job == "repair_spec" and kwargs["observed"] == report
-        assert kwargs["deadline"].expires_at == 10**12
-        assert (rewrite.package / "instruction.md").read_text() == SEED["instruction"]
-        assert not (rewrite.package / "environment/partial.txt").exists()
-        assert not (rewrite.package / "run/verdict.txt").exists()
-        assert (rewrite.traces / "attempt-01.jsonl").is_file()
-        assert (rewrite.path / "declined-simplify/run/verdict.txt").read_text() == report
-        return {**task, "test_state_py": "assert semantic_error()\n", "_spec_repair": declaration}
-
-    def validate(work, task, **kwargs):
-        calls.append("validate")
-        assert task["_spec_repair"] == declaration and "_simplify" not in task
-        return {"ok": validated, "stage": "daytona_oracle", "why": "oracle failed"}
-
-    ec.simplify_codex, ec.evolve_agentic = simplify, repair
+    ec.evolve_agentic = ec.simplify_codex = agent
     monkeypatch.setitem(sys.modules, "evolve_codex", ec)
     monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
-    monkeypatch.setenv("EVOLVE_SPEC_REPAIR", "1")
-    monkeypatch.setattr(fb, "revalidate", validate)
-    rec = fb.process_one(rw, {**SIGNAL, "solved": 0}, job="easier", seed_dir=r0)
-    assert calls == ["simplify", "repair_spec", "validate"]
-    assert rec["status"] == ("accepted" if validated else "rejected")
-    assert rec["route"] == rec["action"] == "repair_spec"
-    assert rec["spec_repair"]["declaration"] == declaration
-    assert "simplify" not in rec
+    monkeypatch.setattr(fb, "revalidate", lambda *a, **k: {"ok": True})
+    signal = SIGNAL if job == "harder" else {**SIGNAL, "solved": 0}
+    rec = fb.process_one(rw, signal, job=job, seed_dir=r0)
+    # One session changes the task and repairs it; no route of its own.
+    assert calls == [job] and rec["status"] == "accepted"
+    assert rec["route"] == ("evolve" if job == "harder" else "simplify")
+    assert rec["repair"] == repair
+    [line] = layout.read_jsonl(layout.Root.from_env().evolution.repairs)
+    assert line["direction"] == job and line["status"] == "accepted"
+    assert line["defect"] == repair[0]["defect"]
 
 
-def test_a_harder_session_reporting_a_shortcut_starts_a_reported_repair(
-    tmp_path, monkeypatch
-):
+def test_a_rewrite_without_repairs_reports_nothing(tmp_path, monkeypatch):
     rw, r0 = _rewrite(tmp_path, monkeypatch)
-    ec = _fake_ec()
-    report = (
-        "BLOCKED: repair_required: attempt-03 wrote the expected report by hand; "
-        "the instruction requires computing it and the verifier checks only the bytes"
-    )
-    calls = []
-    declaration = {
-        "diagnosis": "verifier accepts a hand-written report",
-        "evidence": "attempt-03 turn 4 echo > /app/report.txt",
-        "change": "recompute the report from a changed input",
-        "retained_skill": "compute the report",
-        "validation": "hand-written report rejected, computed one accepted",
-    }
-
-    def agent(rewrite, task, job, **kwargs):
-        calls.append(job)
-        if job == "harder":
-            (rewrite.package / "run").mkdir()
-            (rewrite.package / "run/verdict.txt").write_text(report)
-            raise ec.Blocked(report[:200])
-        assert job == "repair_spec" and kwargs["observed"] == report
-        assert (rewrite.path / "declined-evolve/run/verdict.txt").read_text() == report
-        return {**task, "test_state_py": "assert recomputed()\n", "_spec_repair": declaration}
-
-    ec.evolve_agentic = agent
+    ec = _fake_ec(evolve_agentic=lambda rewrite, task, *a, **k: {**task, "test_state_py": "assert x\n"})
     monkeypatch.setitem(sys.modules, "evolve_codex", ec)
-    monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
-    monkeypatch.delenv("EVOLVE_SPEC_REPAIR", raising=False)  # allowed by default
     monkeypatch.setattr(fb, "revalidate", lambda *a, **k: {"ok": True})
     rec = fb.process_one(rw, SIGNAL, job="harder", seed_dir=r0)
-    assert calls == ["harder", "repair_spec"]
-    assert rec["status"] == "accepted"
-    assert rec["route"] == rec["action"] == "repair_spec"
-    assert rec["spec_repair"]["direction"] == "harder"
-    [line] = layout.read_jsonl(layout.Root.from_env().evolution.repairs)
-    assert line["direction"] == "harder" and line["status"] == "accepted"
-    assert line["diagnosis"] == declaration["diagnosis"] and line["reported"] == report
+    assert rec["status"] == "accepted" and "repair" not in rec
+    assert not layout.Root.from_env().evolution.repairs.exists()
 
 
-def test_invalid_signal_never_starts_spec_repair(tmp_path, monkeypatch):
+def test_invalid_signal_keeps_the_task_unchanged(tmp_path, monkeypatch):
     rw, r0 = _rewrite(tmp_path, monkeypatch)
     ec = _fake_ec()
 
@@ -872,10 +772,9 @@ def test_invalid_signal_never_starts_spec_repair(tmp_path, monkeypatch):
         raise ec.Blocked("BLOCKED: invalid_signal: all attempts lost their sandbox")
 
     ec.simplify_codex = decline
-    ec.evolve_agentic = lambda *a, **k: pytest.fail("invalid evidence started repair")
+    ec.evolve_agentic = lambda *a, **k: pytest.fail("invalid evidence started another session")
     monkeypatch.setitem(sys.modules, "evolve_codex", ec)
     monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
-    monkeypatch.setenv("EVOLVE_SPEC_REPAIR", "1")
     monkeypatch.setattr(fb, "revalidate", lambda *a, **k: pytest.fail("invalid evidence was validated"))
     rec = fb.process_one(rw, {**SIGNAL, "solved": 0}, job="easier", seed_dir=r0)
     assert rec["route"] == rec["action"] == rec["stage"] == "invalid_signal"

@@ -42,7 +42,7 @@ RUN = "tmax-9b--20260904-181500Z"
 VERDICTS = {"oracle": "pass", "dark_paths": [], "dark_literals": [], "step": []}
 
 
-@pytest.mark.parametrize("route", ["simplify", "evolve", "repair_spec"])
+@pytest.mark.parametrize("route", ["simplify", "evolve"])
 @pytest.mark.parametrize(
     "prior_admission",
     [
@@ -487,22 +487,15 @@ def test_round_persists_simplify_choice(tmp_path, monkeypatch):
     assert meta["simplify"] == choice
 
 
-def test_round_records_a_spec_repair_separately_from_simplification(
-    tmp_path, monkeypatch
-):
+def test_round_carries_a_rewrites_repairs_into_its_record(tmp_path, monkeypatch):
     root = _root(tmp_path, monkeypatch)
     _signal(root, direction="easier")
-    repair = {"diagnosis": "missing public format"}
-    seen = _stub(
-        monkeypatch, action="repair", family="repair", operator=None, spec_repair=repair
-    )
+    repair = [{"defect": "unstated format", "evidence": "attempt-01 turn 3", "change": "stated"}]
+    seen = _stub(monkeypatch, repair=repair)
     od.run_round(root, workers=1)
     meta = json.loads(seen[0]["rewrite"].meta.read_text())
     assert meta["status"] == "accepted" and meta["result_rev"] == 1
-    assert meta["action"] == "repair" and meta["spec_repair"] == repair
-    assert "simplify" not in meta
-    events = layout.read_jsonl(root.evolution.task("tw_a").lineage)
-    assert next(e for e in events if e["event"] == "rewrite")["action"] == "repair"
+    assert meta["repair"] == repair
 
 
 def test_next_revision_receives_prior_simplification_and_current_outcome(

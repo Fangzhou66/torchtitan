@@ -1968,20 +1968,20 @@ Aim for a task a capable agent lands about half the time."""
 
 # A task solved every time can be solved for the wrong reason: hardening a task
 # whose verifier accepts a shortcut builds the new requirement on a check that
-# does not hold. The loop routes this report to the same spec repair the easier
-# direction uses, and records it in evolution/repairs.jsonl.
+# does not hold. Repair is part of the rewrite, not a separate route; the loop
+# records each one in evolution/repairs.jsonl.
 _HARDER_REPAIR_NOTE = """
 
 Before hardening, check that the successful attempts earned their reward. If
 one passed with a result the instruction rules out -- a hard-coded answer where
 the task requires computing it, skipped required work the verifier does not
 check, an edited test or grading file -- or the task setup itself is broken,
-the task needs repair, not a harder requirement. Write `BLOCKED:
-repair_required: <the attempt, the shortcut it took, and the public
-requirement it violates>` to `run/verdict.txt` and stop without editing; a
-separate session repairs the task and the repair is reported for review. An
-attempt that solved the task the intended way is not a defect, however quickly
-it did so."""
+repairing that is part of this rewrite: make the requirement the shortcut
+skipped explicit and checkable, or fix the setup, then harden the repaired
+task. Record every repair in `run/repair.json`: a list of objects with
+nonempty "defect", "evidence" (attempt file and turn) and "change"; each repair
+is reported for review. An attempt that solved the task the intended way is not
+a defect, however quickly it did so."""
 
 _EASIER_JOB = """This task was solved {solved} of {attempts} attempts.
 Diagnose the attempts and reduce one obstacle while retaining a stated skill.
@@ -2064,40 +2064,6 @@ corrected task next. The container you had is gone; a fresh one is booting,
 and your first command waits for it.
 
 Confirm with `./sandbox check` before you stop."""
-
-_SPEC_REPAIR_JOB = """A simplification or hardening attempt reported a possible task defect.
-The report is in `run/failure.txt`; it is a claim to check, not an established
-fact. Read the public instruction, environment, verifier and actual attempts.
-Identify a concrete disagreement that prevents fair grading or execution.
-Compilation, a student's success claim, or a hypothetical shortcut is not
-proof of a grading error. An oracle-informed constant can satisfy a valid
-fixed-output task; do not add requirements merely to reject that possibility.
-
-Repair only a demonstrated defect, preserving the task's intended capability.
-Make required inputs and API contracts available, reconcile contradictory
-requirements, correct a verifier that rejects a valid result, or close a
-verifier that accepts a result the instruction rules out when an actual attempt
-in `traces/` produced that result. Do not remove
-the student goal, precompute its output, or replace a required implementation
-with a marker or mock that no longer exercises it. If a live external system
-cannot be provided faithfully, leave the task blocked and explain why.
-Do not combine the repair with a difficulty adjustment. Student rollouts on
-the repaired revision will determine whether it still needs simplification.
-
-Before editing, write `run/repair.json` with nonempty string fields diagnosis,
-evidence, change, retained_skill, and validation. Evidence must identify the
-conflicting public requirement and actual observation, with file locations or
-trace turns. Validation states what would demonstrate that the defect is fixed.
-If the report is unsupported or no faithful repair is possible, write
-`GIVE UP: <reason>` to `run/verdict.txt` and stop without changing the task.
-
-Use `./sandbox grade` to check any claimed grading counterexample. For a
-verifier repair, demonstrate acceptance of a valid result and rejection of an
-invalid result; record both outcomes in `run/repair.json`. Static fixture contradictions can
-be established by inspecting the exact bytes and the public format together.
-Finish with `./sandbox check`; the caller independently checks the repaired
-reference solution and the untouched workspace before publishing the revision.
-"""
 
 _VERIFIER_JOB = """The task in this package was revised through a change to its
 requirements or workflow. Write the verifier for the task as the
@@ -3111,6 +3077,28 @@ def _notify_handoff(
         log.warning("handoff notification failed: %s", str(error)[:200])
 
 
+def _read_repairs(pkg: Path) -> list[dict]:
+    """The defects a harder or easier rewrite repaired on the way, from run/repair.json.
+
+    Repair is part of the rewrite rather than a route of its own; the loop
+    reports each entry in evolution/repairs.jsonl. A malformed declaration
+    fails the rewrite, as a malformed simplify declaration does.
+    """
+    path = pkg / "run" / "repair.json"
+    if not path.exists():
+        return []
+    repairs = json.loads(path.read_text())
+    if isinstance(repairs, dict):
+        repairs = [repairs]
+    if not isinstance(repairs, list):
+        raise ValueError("run/repair.json must be a list of repairs")
+    for repair in repairs:
+        for key in ("defect", "evidence", "change"):
+            if not isinstance(repair, dict) or not str(repair.get(key) or "").strip():
+                raise ValueError(f"each repair in run/repair.json needs a nonempty {key}")
+    return repairs
+
+
 def evolve_agentic(
     rewrite: layout.RewriteDir,
     task: dict,
@@ -3131,7 +3119,7 @@ def evolve_agentic(
     revalidates afterwards; the agent's own pass is not the gate, it is what
     stops the agent from finishing on a rewrite it never ran.
 
-    `job` is "harder", "easier", "repair", or "repair_spec". The attempts are the records
+    `job` is "harder", "easier", or "repair". The attempts are the records
     the loop hardlinked under ``traces/``. Raises on failure; raises Blocked
     when the agent declined.
 
@@ -3164,8 +3152,8 @@ def evolve_agentic(
     if calibration:
         task = {**task, "_calibration": True}
     fmap = _prepare_package(pkg, task)
-    if job in ("easier", "repair_spec"):
-        # Simplification and specification repair do not use the hardening size rule.
+    if job == "easier":
+        # Simplification does not use the hardening size rule.
         (pkg / "run" / "seed_size.json").unlink(missing_ok=True)
     if observed:
         (pkg / "run" / "failure.txt").write_text(observed)
@@ -3211,7 +3199,6 @@ def evolve_agentic(
             )
             + (_UNSOLVED_NOTE if task.get("_unsolved") else ""),
             "repair": _REPAIR_JOB.format(exit_code=exit_code),
-            "repair_spec": _SPEC_REPAIR_JOB,
         }[job]
         + _traces_spec(rewrite.traces)
         + _budget(author_timeout)
@@ -3328,12 +3315,8 @@ def evolve_agentic(
         decision["hint_level"] = task.get("_simplify_hint", "vague")
         out["_simplify"] = decision
         out["_family"] = "simplify"
-    if job == "repair_spec":
-        repair = json.loads((pkg / "run" / "repair.json").read_text())
-        for key in ("diagnosis", "evidence", "change", "retained_skill", "validation"):
-            if not isinstance(repair.get(key), str) or not repair[key].strip():
-                raise ValueError(f"repair declaration needs a nonempty {key}")
-        out["_spec_repair"] = repair
+    if job in ("harder", "easier") and (repairs := _read_repairs(pkg)):
+        out["_repair"] = repairs
     if vsession is not None:
         out["_verifier_author"] = "blind"
         out["_verifier_session"] = str(vsession.path)
