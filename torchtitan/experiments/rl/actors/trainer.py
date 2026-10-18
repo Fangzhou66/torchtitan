@@ -162,6 +162,24 @@ class _MicrobatchProfiler:
             logger.info(f"[trainer] profiler top ops by {key}:\n{table}")
 
 
+def _mem_log(tag: str) -> None:
+    """SWE_TRAINER_MEM_LOG=1: print this rank's CUDA memory (every rank, not just
+    the host's logging rank), to find the rank that runs out first."""
+    if os.environ.get("SWE_TRAINER_MEM_LOG", "0") != "1":
+        return
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    gib = 1 << 30
+    free, total = torch.cuda.mem_get_info()
+    print(
+        f"[trainer-mem] rank={rank} {tag}: "
+        f"alloc={torch.cuda.memory_allocated() / gib:.1f} "
+        f"reserved={torch.cuda.memory_reserved() / gib:.1f} "
+        f"peak={torch.cuda.max_memory_allocated() / gib:.1f} "
+        f"device_used={(total - free) / gib:.1f}/{total / gib:.0f} GiB",
+        flush=True,
+    )
+
+
 def _maybe_regional_compile(model: torch.nn.Module) -> None:
     """SWE_TRAINER_REGIONAL_COMPILE=1: torch.compile each block's feed-forward and
     norms, leaving attention and GatedDeltaNet eager. Whole-block compile fails on
@@ -696,6 +714,7 @@ class PolicyTrainer(Actor, Configurable):
         # The model forward is where FSDP2 fully_shard issues its unshard
         # all-gather; under a multi-host dp_shard this is a cross-host collective.
         logger.info(f"[trainer] dp_rank={self.dp_rank}: model forward start")
+        _mem_log("forward start")
         with self._profiler.maybe_profile():
             with sl.log_trace_span("model_forward"), torch.profiler.record_function(
                 "rl_model_forward"
@@ -704,6 +723,7 @@ class PolicyTrainer(Actor, Configurable):
                     token_ids, attention_masks=attention_masks, positions=positions
                 )
             logger.info(f"[trainer] dp_rank={self.dp_rank}: model forward done")
+            _mem_log("forward done")
             if dump_batch:
                 # With ChunkedLossWrapper the model returns final hidden states (the
                 # lm_head runs inside the loss), so save those: lm_head is re-applied
@@ -733,12 +753,14 @@ class PolicyTrainer(Actor, Configurable):
                     metric_denominator=num_packed_valid_tokens,
                 )
             logger.info(f"[trainer] dp_rank={self.dp_rank}: loss done")
+            _mem_log("loss done")
 
             with sl.log_trace_span("model_backward"), torch.profiler.record_function(
                 "rl_model_backward"
             ):
                 loss.backward()
             logger.info(f"[trainer] dp_rank={self.dp_rank}: backward done")
+            _mem_log("backward done")
 
         sum_reduced_metrics = {
             key: value
