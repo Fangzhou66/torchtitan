@@ -310,9 +310,17 @@ async def grade_tmax(
     )
     pre_grade = _pre_grade_command(reward_path, _ctrf_path_for(reward_path), nonce)
     if harbor_reward:
+        # Harbor runs empty_dirs([verifier_dir], chmod=True) before the
+        # verifier: the directory is 777, so a verifier that drops to its own
+        # user can write there (live-database-cutover's starts postgres, which
+        # logs to /logs/verifier/pg.log). The sentinel is opened the same way,
+        # so such a verifier can also replace it. The separate verifier sandbox
+        # is ours alone; the agent never touches it.
+        q_dir = shlex.quote(posixpath.dirname(reward_path) or _VERIFIER_DIR)
         pre_grade = (
             f"chattr -i {shlex.quote(reward_json)} 2>/dev/null; "
-            f"rm -f {shlex.quote(reward_json)}; {pre_grade}"
+            f"rm -f {shlex.quote(reward_json)}; {pre_grade}; "
+            f"chmod 777 {q_dir}; chmod 666 {shlex.quote(reward_path)}"
         )
     await sb.exec(
         pre_grade,
@@ -477,6 +485,25 @@ async def collect_artifacts(sb: Sandbox, paths: list[str]) -> bytes | None:
     return base64.b64decode(text) if text else None
 
 
+def _empty_dir_command(path: str) -> str:
+    """Harbor's ``empty_dirs(..., chmod=True)`` for one directory: make it an
+    empty directory opened 777, WITHOUT replacing the directory itself.
+
+    Removing and recreating it instead (``rm -rf d && mkdir d``) leaves any
+    process whose working directory is ``d`` in a deleted directory. Our exec
+    runs through a long-lived Daytona session shell, so every later command,
+    test.sh included, inherits it: medical-claims-processing's verifier image
+    has ``WORKDIR /shared`` and a ``/shared`` directory artifact, and its
+    pytest died in ``os.getcwd()`` with FileNotFoundError."""
+    q = shlex.quote(path)
+    return (
+        f"if [ -L {q} ] || {{ [ -e {q} ] && [ ! -d {q} ]; }}; then rm -rf {q}; fi"
+        f" && mkdir -p {q}"
+        f" && find {q} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +"
+        f" && chmod 777 {q}"
+    )
+
+
 async def restore_artifacts(
     sb: Sandbox,
     data: bytes | None,
@@ -490,7 +517,8 @@ async def restore_artifacts(
     (``empty_dirs([target], chmod=True)``): ``empty`` names the directory
     artifacts of a tar rooted at ``/``, and ``into`` says the tar is one
     directory's contents (an artifact with ``exclude`` patterns). Either way
-    those directories are emptied and opened (777) first."""
+    those directories are emptied in place and opened (777) first
+    (``_empty_dir_command``)."""
     if not data:
         return
     await sb.write_file(_ARTIFACTS_TGZ, data, user="root")
@@ -499,10 +527,7 @@ async def restore_artifacts(
     if into is not None:
         targets.append(into)
         root = shlex.quote(into)
-    prep = "".join(
-        f"rm -rf {q} && mkdir -p {q} && chmod 777 {q} && "
-        for q in map(shlex.quote, targets)
-    )
+    prep = "".join(f"{_empty_dir_command(t)} && " for t in targets)
     await sb.exec(
         f"{prep}tar -C {root} -xzf {_ARTIFACTS_TGZ} && rm -f {_ARTIFACTS_TGZ}",
         user="root",

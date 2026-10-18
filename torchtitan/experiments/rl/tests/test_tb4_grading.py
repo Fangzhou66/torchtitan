@@ -93,6 +93,17 @@ def test_a_stale_reward_json_is_removed_before_the_verifier_runs():
     assert got == 0.0
 
 
+def test_the_separate_verifier_can_write_its_outputs_as_its_own_user():
+    """Harbor opens /logs/verifier (777) before the verifier runs; a verifier
+    that drops privileges (live-database-cutover's postgres) writes there. The
+    sentinel is opened too, so such a verifier can also replace it."""
+    _reward, _diag, sb = _grade({T: "1"})
+    pre = next(cmd for cmd, _ in sb.cmds if "tmax-sentinel-" in cmd)
+    assert pre.endswith("; chmod 777 /logs/verifier; chmod 666 /logs/verifier/reward.txt")
+    _reward, _diag, plain = _grade({T: "1"}, harbor_reward=False)
+    assert not any("chmod 777 /logs/verifier" in cmd for cmd, _ in plain.cmds)
+
+
 def test_without_harbor_reward_json_is_ignored_and_no_env_is_passed():
     got, diagnostics, sb = _grade({J: '{"reward": 1.0}'}, harbor_reward=False)
     assert got == 0.0 and "reward_file" not in diagnostics
@@ -302,8 +313,7 @@ def test_restore_into_empties_the_directory_first():
     sb = _Sb()
     asyncio.run(grading.restore_artifacts(sb, b"x", into="/workspace/gen"))
     assert sb.cmds[0].startswith(
-        "rm -rf /workspace/gen && mkdir -p /workspace/gen && chmod 777 /workspace/gen"
-        " && tar -C /workspace/gen -xzf "
+        grading._empty_dir_command("/workspace/gen") + " && tar -C /workspace/gen -xzf "
     )
     sb = _Sb()
     asyncio.run(grading.restore_artifacts(sb, b"x"))
@@ -348,8 +358,50 @@ def test_directory_artifacts_are_emptied_before_restore_as_harbor_does():
     sb = _Sb()
     asyncio.run(grading.restore_artifacts(sb, data, empty=["/app/output"]))
     assert sb.cmds[0].startswith(
-        "rm -rf /app/output && mkdir -p /app/output && chmod 777 /app/output && tar -C / -xzf "
+        grading._empty_dir_command("/app/output") + " && tar -C / -xzf "
     )
+
+
+def test_emptying_keeps_the_directory_a_shell_is_standing_in(tmp_path):
+    """Harbor's empty_dirs empties in place. Our exec runs in a long-lived
+    session shell; if that shell stands in the directory (a verifier image's
+    WORKDIR that is also a directory artifact, as medical-claims-processing's
+    /shared is), replacing the directory leaves every later command in a
+    deleted one. Emptying in place does not."""
+    import os
+    import subprocess
+
+    d = tmp_path / "shared"
+    (d / "sub").mkdir(parents=True)
+    (d / "old.txt").write_text("x")
+    (d / ".hidden").write_text("x")
+    inode = d.stat().st_ino
+    getcwd = 'python3 -c "import os; print(os.getcwd())"'
+
+    def in_shell_standing_in_d(command):
+        return subprocess.run(
+            ["sh", "-c", f"{command} && {getcwd}"],
+            cwd=d,
+            capture_output=True,
+            text=True,
+        )
+
+    ok = in_shell_standing_in_d(grading._empty_dir_command(str(d)))
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stdout.strip() == str(d)
+    assert list(d.iterdir()) == [] and d.stat().st_ino == inode
+    assert oct(d.stat().st_mode & 0o777) == "0o777"
+
+    # The replace-the-root form this replaces: the shell's cwd is gone.
+    bad = in_shell_standing_in_d(f"rm -rf {d} && mkdir -p {d}")
+    assert bad.returncode != 0 and "FileNotFoundError" in bad.stderr
+
+    # A symlink or a file where the directory should be is replaced, as Harbor does.
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "elsewhere")
+    assert subprocess.run(["sh", "-c", grading._empty_dir_command(str(link))]).returncode == 0
+    assert link.is_dir() and not link.is_symlink()
+    assert not os.path.exists(tmp_path / "elsewhere")
 
 
 def test_grade_separate_empties_the_directory_artifacts_it_restores(monkeypatch):
