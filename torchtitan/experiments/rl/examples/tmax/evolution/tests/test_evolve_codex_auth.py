@@ -62,6 +62,8 @@ def test_extra_config_reaches_both_providers(monkeypatch):
         "model_providers.oai.stream_idle_timeout_ms=900000",
     ]
     assert "model_provider=oai" in overrides
+    # Pooled-account rate limits outlast the CLI's default retries.
+    assert "model_providers.oai.request_max_retries=10" in overrides
     monkeypatch.setenv("EVOLVE_CODEX_AUTH_FILE", "/nonexistent")
     assert ec._provider_overrides() == [
         "model_provider=openai",
