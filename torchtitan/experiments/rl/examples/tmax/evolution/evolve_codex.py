@@ -639,9 +639,10 @@ def _extra_config() -> list[str]:
     return os.environ.get("EVOLVE_CODEX_EXTRA_CONFIG", "").split()
 
 
-# EVOLVE_CODEX_WEB_SEARCH=live gives sessions codex's web tool (web__run:
-# search_query / open). Off by default, so existing arms keep their tool set.
-WEB_SEARCH = os.environ.get("EVOLVE_CODEX_WEB_SEARCH", "")
+# EVOLVE_CODEX_WEB_SEARCH=live (the default) gives sessions codex's web tool
+# (web__run: search_query / open), which the real hardening guidance uses to
+# find sources; set it empty to run sessions without the tool.
+WEB_SEARCH = os.environ.get("EVOLVE_CODEX_WEB_SEARCH", "live")
 
 
 def _provider_overrides() -> list[str]:
@@ -1689,13 +1690,14 @@ support a useful change within the size limits, write
 `GIVE UP: no-supported-hardening — <why>` and stop.
 """
 
-# Which hardening a student-guided harder rewrite asks for. "student" is the
-# guidance above. "real" grounds the change in researched real-world software
-# behavior: on the r100 Sol arm 82 of 93 accepted hardenings were a decoy, a
-# record to pick, or an input edge case, with a median of +1 solution line, and
-# policies trained on them over-check and fill the context on Terminal-Bench,
-# whose hard tasks are real builds, real formats and real upstream bugs.
-HARDER_GUIDANCE = os.environ.get("EVOLVE_HARDER_GUIDANCE", "student")
+# Which hardening a student-guided harder rewrite asks for. "real" (the
+# default) grounds the change in researched real-world software behavior;
+# "student" is the guidance above. On the r100 Sol arm 82 of 93 accepted
+# "student" hardenings were a decoy, a record to pick, or an input edge case,
+# with a median of +1 solution line, while Terminal-Bench's hard tasks are real
+# builds, real formats and real upstream bugs. On the same 100 tasks "real"
+# produced no decoys and about a third grounded in a pinned upstream artifact.
+HARDER_GUIDANCE = os.environ.get("EVOLVE_HARDER_GUIDANCE", "real")
 
 _REAL_HARDER_GUIDANCE = """These tasks train an agent for real terminal work, the
 kind Terminal-Bench measures: building, configuring, debugging and repairing
