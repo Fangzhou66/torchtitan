@@ -1115,7 +1115,7 @@ def handle(
     for key in (
         "action",
         "route",
-        "spec_repair",
+        "repair",
         "policy_canary",
         "operator",
         "harder_mode",

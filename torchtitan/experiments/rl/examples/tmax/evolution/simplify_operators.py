@@ -96,8 +96,14 @@ alone is not evidence of wrong grading or a reason to discard the task.
 Transient sandbox/provider failures, unscored attempts and missing required
 trace evidence are not difficulty measurements: write
 BLOCKED: invalid_signal: <reason> to run/verdict.txt and stop without edits.
-Inconsistent specifications, broken task setup and wrong grading require repair:
-write BLOCKED: repair_required: <reason> to run/verdict.txt and stop.
+Inconsistent specifications, broken task setup and wrong grading are defects;
+repairing them is part of this rewrite. State in the instruction a requirement
+the verifier checks but the instruction never gives, fix a broken setup, or
+reconcile contradictory requirements, then make the simplification the
+attempts call for on the repaired task. Record every repair in run/repair.json:
+a list of objects with nonempty "defect", "evidence" (attempt file and turn, or
+the conflicting file locations) and "change"; each repair is reported for
+review.
 If the work is already correct but the agent fails to submit, do not remove
 unrelated task requirements. With insufficient evidence, write GIVE UP with
 the reason and keep the task unchanged.

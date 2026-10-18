@@ -82,59 +82,22 @@ def test_account_cleanup_preserves_source_auth_and_private_trace(
     assert (account / "auth.json").read_text() == "credential must stay here"
 
 
-@pytest.mark.parametrize("has_evidence", [True, False])
-def test_spec_repair_requires_a_declaration_and_has_no_growth_floor(
-    tmp_path, monkeypatch, has_evidence
-):
-    rw = _rewrite(tmp_path, monkeypatch)
-
-    def prepare(pkg, task):
-        (pkg / "run").mkdir()
-        (pkg / "run/seed_size.json").write_text("{}")
-        return ec.ev.file_map(task)
-
-    def run_codex(run, pkg, prompt):
-        assert not (pkg / "run/seed_size.json").exists()
-        assert (pkg / "run/failure.txt").read_text() == "suspected mismatch"
-        assert "claim to check" in prompt
-        (pkg / "instruction.md").write_text("clarified instruction")
-        repair = {
-            key: "documented observation"
-            for key in (
-                "diagnosis",
-                "evidence",
-                "change",
-                "retained_skill",
-                "validation",
-            )
-        }
-        if not has_evidence:
-            repair.pop("evidence")
-        (pkg / "run/repair.json").write_text(json.dumps(repair))
-        return subprocess.CompletedProcess([], 0, stdout="")
-
-    monkeypatch.setattr(ec, "_require_codex", lambda: None)
-    monkeypatch.setattr(ec, "_prepare_package", prepare)
-    monkeypatch.setattr(
-        ec,
-        "session",
-        lambda *a, **k: nullcontext(
-            SimpleNamespace(dir=SimpleNamespace(path=tmp_path / "session"))
-        ),
-    )
-    monkeypatch.setattr(ec, "_run_codex", run_codex)
-    monkeypatch.setattr(ec, "_sandbox_down", lambda pkg: None)
-    monkeypatch.setattr(ec, "_require_checked", lambda pkg, result=None: None)
-    monkeypatch.setattr(ec, "_agent_checked", lambda pkg: True)
-    if has_evidence:
-        result = ec.evolve_agentic(
-            rw, TASK, "repair_spec", observed="suspected mismatch"
-        )
-        assert result["_spec_repair"]["evidence"] == "documented observation"
-        assert "_simplify" not in result
-    else:
-        with pytest.raises(ValueError, match="nonempty evidence"):
-            ec.evolve_agentic(rw, TASK, "repair_spec", observed="suspected mismatch")
+def test_a_rewrite_declares_its_repairs_in_run_repair_json(tmp_path):
+    pkg = tmp_path / "pkg"
+    (pkg / "run").mkdir(parents=True)
+    assert ec._read_repairs(pkg) == []
+    repair = {
+        "defect": "the verifier requires signer_email; the instruction names service_account_email",
+        "evidence": "attempt-03 turn 12; tests/test_outputs.py:41",
+        "change": "the instruction names signer_email",
+    }
+    (pkg / "run/repair.json").write_text(json.dumps([repair]))
+    assert ec._read_repairs(pkg) == [repair]
+    (pkg / "run/repair.json").write_text(json.dumps(repair))
+    assert ec._read_repairs(pkg) == [repair]
+    (pkg / "run/repair.json").write_text(json.dumps([{**repair, "evidence": " "}]))
+    with pytest.raises(ValueError, match="nonempty evidence"):
+        ec._read_repairs(pkg)
 
 
 def _rewrite(tmp_path, monkeypatch, job: str = "harder") -> layout.RewriteDir:
@@ -232,6 +195,7 @@ def test_traces_spec_points_at_the_revision_contrast(tmp_path):
 def test_only_all_pass_after_simplify_uses_restoration_guidance(
     tmp_path, monkeypatch, has_previous, solved
 ):
+    monkeypatch.setattr(ec, "HARDER_GUIDANCE", "student")
     import agent_sandbox as sandbox
 
     rw = _rewrite(tmp_path, monkeypatch)

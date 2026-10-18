@@ -639,16 +639,26 @@ def _extra_config() -> list[str]:
     return os.environ.get("EVOLVE_CODEX_EXTRA_CONFIG", "").split()
 
 
+# EVOLVE_CODEX_WEB_SEARCH=live (the default) gives sessions codex's web tool
+# (web__run: search_query / open), which the real hardening guidance uses to
+# find sources; set it empty to run sessions without the tool.
+WEB_SEARCH = os.environ.get("EVOLVE_CODEX_WEB_SEARCH", "live")
+
+
 def _provider_overrides() -> list[str]:
     """The provider settings both drivers pass; the SDK takes them as a list."""
+    search = [f"web_search={WEB_SEARCH}"] if WEB_SEARCH else []
     if ACCOUNT_HOME or os.environ.get("EVOLVE_CODEX_AUTH_FILE"):
-        return ["model_provider=openai"] + _extra_config()
+        return ["model_provider=openai"] + search + _extra_config()
     return [
-        "model_providers.oai.name=openai",
+        # codex 0.149 offers the web tool to a custom provider only when its
+        # name is exactly "OpenAI" (captured requests, 2026-10-17); "openai"
+        # gets none, whatever web_search says.
+        f"model_providers.oai.name={'OpenAI' if WEB_SEARCH else 'openai'}",
         f"model_providers.oai.base_url={API_BASE}",
         "model_providers.oai.env_key=OPENAI_API_KEY",
         "model_provider=oai",
-    ] + _extra_config()
+    ] + search + _extra_config()
 
 
 def _session_cmd(run: SessionRun, cwd: Path, *, resume: str | None) -> list[str]:
@@ -1680,6 +1690,79 @@ support a useful change within the size limits, write
 `GIVE UP: no-supported-hardening — <why>` and stop.
 """
 
+# Which hardening a student-guided harder rewrite asks for. "real" (the
+# default) grounds the change in researched real-world software behavior;
+# "student" is the guidance above. On the r100 Sol arm 82 of 93 accepted
+# "student" hardenings were a decoy, a record to pick, or an input edge case,
+# with a median of +1 solution line, while Terminal-Bench's hard tasks are real
+# builds, real formats and real upstream bugs. On the same 100 tasks "real"
+# produced no decoys and about a third grounded in a pinned upstream artifact.
+HARDER_GUIDANCE = os.environ.get("EVOLVE_HARDER_GUIDANCE", "real")
+
+_REAL_HARDER_GUIDANCE = """These tasks train an agent for real terminal work, the
+kind Terminal-Bench measures: building, configuring, debugging and repairing
+real software, recovering data in real formats, applying a known algorithm under
+a real constraint. A harder task needs more of that work or deeper knowledge of
+a real system. It does not need more care in reading the workspace.
+
+Start from the student's attempts in `traces/`: what the successful strategy
+did, and which real work the task currently spares it -- a dependency that
+already installs cleanly, a version whose behavior is the one everyone
+remembers, a format reduced to its easy subset, a service that needs no
+configuration.
+
+Then research one real difficulty that fits this task's domain and tools: a
+documented behavior change between two versions of a package the task uses, a
+known issue in an upstream project's tracker together with its fix, a detail of
+a file format or protocol from its specification, a failure an operator of this
+software meets in practice. Your own recollection decides what to look for;
+it is never the source. Your shell has network access: read the primary source
+there -- the project's documentation or changelog page, the issue thread
+through GitHub's REST API (`api.github.com/repos/<owner>/<repo>/issues/<n>`,
+`/releases`), a package's PyPI JSON, the specification, the code at a tag.
+Cite only what you fetched.
+
+The difficulty must be real in this environment. Pin the actual upstream
+artifact it comes from (`package==version`, a repository at a commit, a URL
+with its sha256) in the Dockerfile, and confirm in `./sandbox exec` that the
+behavior the source describes happens here: the error, the wrong output, the
+crash. A library, tool, version or bug that does not exist upstream is not
+allowed, and neither is a vendored imitation of one.
+
+Write `run/hardening.md` before editing the task: the sources by URL with the
+sentence of each that you rely on, the pinned artifacts, the reproduction
+command with the output you observed, what the student must now do that the
+successful attempts did not, and why that is one modest step from the skills
+those attempts show.
+
+These are not hardening, whatever their effect on the solve rate: decoy files,
+a second candidate or stale copy to choose between, a log that contradicts a
+config, an extra edge-case clause for the input, stricter output formatting, a
+longer instruction. Keep the existing instruction's wording: removing what it
+already says is a withdrawal of help, not the real difficulty, and it mixes
+the two in the student's measured solve rate. State any new requirement the
+way a user would, in a sentence or two -- the goal and the deliverable. Do not
+list the pitfalls; the agent meets them as error messages, logs and behavior
+in the environment, the way the real software presents them.
+
+The student has 2400 seconds of wall clock per attempt, and generating its own
+turns takes most of that: in measured attempts its commands ran for about 100
+seconds in total. So the reference solution's commands, as `./sandbox check`
+times them, stay well under 300 seconds, and anything slow that is not the
+point of the task -- a large download, a full build of a dependency -- happens
+in the Dockerfile, at image build. What is left to the student is a debug and
+rebuild loop measured in minutes. Its context is limited too: a correct
+solution must not require reading an unbounded build log or data dump.
+
+Preserve the original user goal and requirements unrelated to the change.
+Aim for a modest reduction in this student's solve rate toward mixed success,
+not universal failure; in `run/hardening.md`, write the solved count you
+expect from the next group of the same size as a number ("5 of 8"). If no real
+difficulty that fits this task can be reproduced here, write
+`GIVE UP: no-real-difficulty — <what you searched and why it did not fit>` and
+stop.
+"""
+
 _CALIBRATION_GUIDANCE = (
     """The previous simplification now has all attempts passing.
 Read `traces/previous-simplify.json` and the current attempts. When the record
@@ -1885,20 +1968,20 @@ Aim for a task a capable agent lands about half the time."""
 
 # A task solved every time can be solved for the wrong reason: hardening a task
 # whose verifier accepts a shortcut builds the new requirement on a check that
-# does not hold. The loop routes this report to the same spec repair the easier
-# direction uses, and records it in evolution/repairs.jsonl.
+# does not hold. Repair is part of the rewrite, not a separate route; the loop
+# records each one in evolution/repairs.jsonl.
 _HARDER_REPAIR_NOTE = """
 
 Before hardening, check that the successful attempts earned their reward. If
 one passed with a result the instruction rules out -- a hard-coded answer where
 the task requires computing it, skipped required work the verifier does not
 check, an edited test or grading file -- or the task setup itself is broken,
-the task needs repair, not a harder requirement. Write `BLOCKED:
-repair_required: <the attempt, the shortcut it took, and the public
-requirement it violates>` to `run/verdict.txt` and stop without editing; a
-separate session repairs the task and the repair is reported for review. An
-attempt that solved the task the intended way is not a defect, however quickly
-it did so."""
+repairing that is part of this rewrite: make the requirement the shortcut
+skipped explicit and checkable, or fix the setup, then harden the repaired
+task. Record every repair in `run/repair.json`: a list of objects with
+nonempty "defect", "evidence" (attempt file and turn) and "change"; each repair
+is reported for review. An attempt that solved the task the intended way is not
+a defect, however quickly it did so."""
 
 _EASIER_JOB = """This task was solved {solved} of {attempts} attempts.
 Diagnose the attempts and reduce one obstacle while retaining a stated skill.
@@ -1981,40 +2064,6 @@ corrected task next. The container you had is gone; a fresh one is booting,
 and your first command waits for it.
 
 Confirm with `./sandbox check` before you stop."""
-
-_SPEC_REPAIR_JOB = """A simplification or hardening attempt reported a possible task defect.
-The report is in `run/failure.txt`; it is a claim to check, not an established
-fact. Read the public instruction, environment, verifier and actual attempts.
-Identify a concrete disagreement that prevents fair grading or execution.
-Compilation, a student's success claim, or a hypothetical shortcut is not
-proof of a grading error. An oracle-informed constant can satisfy a valid
-fixed-output task; do not add requirements merely to reject that possibility.
-
-Repair only a demonstrated defect, preserving the task's intended capability.
-Make required inputs and API contracts available, reconcile contradictory
-requirements, correct a verifier that rejects a valid result, or close a
-verifier that accepts a result the instruction rules out when an actual attempt
-in `traces/` produced that result. Do not remove
-the student goal, precompute its output, or replace a required implementation
-with a marker or mock that no longer exercises it. If a live external system
-cannot be provided faithfully, leave the task blocked and explain why.
-Do not combine the repair with a difficulty adjustment. Student rollouts on
-the repaired revision will determine whether it still needs simplification.
-
-Before editing, write `run/repair.json` with nonempty string fields diagnosis,
-evidence, change, retained_skill, and validation. Evidence must identify the
-conflicting public requirement and actual observation, with file locations or
-trace turns. Validation states what would demonstrate that the defect is fixed.
-If the report is unsupported or no faithful repair is possible, write
-`GIVE UP: <reason>` to `run/verdict.txt` and stop without changing the task.
-
-Use `./sandbox grade` to check any claimed grading counterexample. For a
-verifier repair, demonstrate acceptance of a valid result and rejection of an
-invalid result; record both outcomes in `run/repair.json`. Static fixture contradictions can
-be established by inspecting the exact bytes and the public format together.
-Finish with `./sandbox check`; the caller independently checks the repaired
-reference solution and the untouched workspace before publishing the revision.
-"""
 
 _VERIFIER_JOB = """The task in this package was revised through a change to its
 requirements or workflow. Write the verifier for the task as the
@@ -3028,6 +3077,28 @@ def _notify_handoff(
         log.warning("handoff notification failed: %s", str(error)[:200])
 
 
+def _read_repairs(pkg: Path) -> list[dict]:
+    """The defects a harder or easier rewrite repaired on the way, from run/repair.json.
+
+    Repair is part of the rewrite rather than a route of its own; the loop
+    reports each entry in evolution/repairs.jsonl. A malformed declaration
+    fails the rewrite, as a malformed simplify declaration does.
+    """
+    path = pkg / "run" / "repair.json"
+    if not path.exists():
+        return []
+    repairs = json.loads(path.read_text())
+    if isinstance(repairs, dict):
+        repairs = [repairs]
+    if not isinstance(repairs, list):
+        raise ValueError("run/repair.json must be a list of repairs")
+    for repair in repairs:
+        for key in ("defect", "evidence", "change"):
+            if not isinstance(repair, dict) or not str(repair.get(key) or "").strip():
+                raise ValueError(f"each repair in run/repair.json needs a nonempty {key}")
+    return repairs
+
+
 def evolve_agentic(
     rewrite: layout.RewriteDir,
     task: dict,
@@ -3048,7 +3119,7 @@ def evolve_agentic(
     revalidates afterwards; the agent's own pass is not the gate, it is what
     stops the agent from finishing on a rewrite it never ran.
 
-    `job` is "harder", "easier", "repair", or "repair_spec". The attempts are the records
+    `job` is "harder", "easier", or "repair". The attempts are the records
     the loop hardlinked under ``traces/``. Raises on failure; raises Blocked
     when the agent declined.
 
@@ -3081,8 +3152,8 @@ def evolve_agentic(
     if calibration:
         task = {**task, "_calibration": True}
     fmap = _prepare_package(pkg, task)
-    if job in ("easier", "repair_spec"):
-        # Simplification and specification repair do not use the hardening size rule.
+    if job == "easier":
+        # Simplification does not use the hardening size rule.
         (pkg / "run" / "seed_size.json").unlink(missing_ok=True)
     if observed:
         (pkg / "run" / "failure.txt").write_text(observed)
@@ -3099,7 +3170,17 @@ def evolve_agentic(
             "harder": (_HARDER_JOB_BLIND if blind else _HARDER_JOB).format(
                 solved=solved,
                 attempts=attempts_n,
-                guidance=_CALIBRATION_GUIDANCE if calibration else _STUDENT_HARDER_GUIDANCE,
+                guidance=_CALIBRATION_GUIDANCE
+                if calibration
+                else _REAL_HARDER_GUIDANCE.replace(
+                    "Your shell has network access",
+                    "Search with your web tool to find candidate sources. Your shell "
+                    "also has network access",
+                )
+                if HARDER_GUIDANCE == "real" and WEB_SEARCH
+                else _REAL_HARDER_GUIDANCE
+                if HARDER_GUIDANCE == "real"
+                else _STUDENT_HARDER_GUIDANCE,
                 seed_lines=seed_size["solution_lines"],
                 seed_asserts=seed_size["verifier_asserts"],
                 growth_bound=(
@@ -3118,7 +3199,6 @@ def evolve_agentic(
             )
             + (_UNSOLVED_NOTE if task.get("_unsolved") else ""),
             "repair": _REPAIR_JOB.format(exit_code=exit_code),
-            "repair_spec": _SPEC_REPAIR_JOB,
         }[job]
         + _traces_spec(rewrite.traces)
         + _budget(author_timeout)
@@ -3235,12 +3315,8 @@ def evolve_agentic(
         decision["hint_level"] = task.get("_simplify_hint", "vague")
         out["_simplify"] = decision
         out["_family"] = "simplify"
-    if job == "repair_spec":
-        repair = json.loads((pkg / "run" / "repair.json").read_text())
-        for key in ("diagnosis", "evidence", "change", "retained_skill", "validation"):
-            if not isinstance(repair.get(key), str) or not repair[key].strip():
-                raise ValueError(f"repair declaration needs a nonempty {key}")
-        out["_spec_repair"] = repair
+    if job in ("harder", "easier") and (repairs := _read_repairs(pkg)):
+        out["_repair"] = repairs
     if vsession is not None:
         out["_verifier_author"] = "blind"
         out["_verifier_session"] = str(vsession.path)

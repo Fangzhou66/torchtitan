@@ -106,7 +106,9 @@ probe_provider() {
   local key=${OPENAI_API_KEY:-$(sed -n 's/^OPENAI_API_KEY=//p' "${SYNTH_ENV_FILE:-/dev/null}" 2>/dev/null)}
   local body=$TRL_BASE/tmp/provider-probe.json code
   local req
-  req=$(printf '{"model":"%s","input":"ping","max_output_tokens":16}' "${SYNTH_MODEL:-gpt-5.6-sol}")
+  # Codex's own request shape: the dev.zhifei.li forward rejects a string input
+  # ("Input must be a list") and a stored response ("Store must be set to false").
+  req=$(printf '{"model":"%s","input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}],"store":false,"stream":true}' "${SYNTH_MODEL:-gpt-5.6-sol}")
   code=$(curl -s -m 180 -o "$body" -w '%{http_code}' "${SYNTH_API_BASE:-https://us.api.openai.com/v1}/responses" \
     -H "Authorization: Bearer $key" -H 'Content-Type: application/json' -d "$req")
   echo "http=$code $(head -c 300 "$body" 2>/dev/null | tr '\n' ' ')"
