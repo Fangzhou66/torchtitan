@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import pickle
+import re
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -234,6 +235,29 @@ def _maybe_regional_compile(model: torch.nn.Module) -> None:
     logger.info(f"[trainer] regional compile: {compiled} feed-forward/norm modules")
 
 
+def _keep_milestone_checkpoints(checkpointer: CheckpointManager, every: int) -> None:
+    """Make ``checkpointer`` skip steps that are multiples of ``every`` when purging.
+
+    Same selection as ``CheckpointManager._purge_stale_checkpoints`` (keep the
+    newest ``keep_latest_k``), except milestone steps are never queued.
+    """
+
+    def purge() -> None:
+        if not checkpointer._should_purge():
+            return
+        found = []
+        for name in os.listdir(checkpointer.folder):
+            match = re.search(r"step-(\d+)", name)
+            if match:
+                found.append((int(match.group(1)), os.path.join(checkpointer.folder, name)))
+        found.sort()
+        for step, path in found[: -checkpointer.keep_latest_k]:
+            if step % every != 0:
+                checkpointer.purge_queue.put(path)
+
+    checkpointer._purge_stale_checkpoints = purge
+
+
 class PolicyTrainer(Actor, Configurable):
     """Updates policy based on collected TrainingSample using TorchTitan components.
 
@@ -282,6 +306,12 @@ class PolicyTrainer(Actor, Configurable):
 
         checkpoint_training_data: bool = False
         """Include controller dataset state and pending prompts in full checkpoints."""
+
+        checkpoint_keep_every: int = 0
+        """Never purge checkpoints whose step is a multiple of this (0 = off).
+
+        ``checkpoint.keep_latest_k`` still bounds the rolling resume copies;
+        these milestone steps are kept on top of them, e.g. for later eval."""
 
     def __init__(
         self,
@@ -437,6 +467,8 @@ class PolicyTrainer(Actor, Configurable):
             sd_adapter=self.sd_adapter,
             base_folder=config.dump_folder,
         )
+        if config.checkpoint_keep_every > 0:
+            _keep_milestone_checkpoints(self.checkpointer, config.checkpoint_keep_every)
         self.checkpointer.load()
         if config.initial_policy_version and self.policy_version != config.initial_policy_version:
             raise ValueError("Loaded training state disagrees with initial_policy_version")
