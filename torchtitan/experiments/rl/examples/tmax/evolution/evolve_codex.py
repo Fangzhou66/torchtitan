@@ -1736,10 +1736,12 @@ those attempts show.
 These are not hardening, whatever their effect on the solve rate: decoy files,
 a second candidate or stale copy to choose between, a log that contradicts a
 config, an extra edge-case clause for the input, stricter output formatting, a
-longer instruction. Keep the instruction as short as a user would write it:
-the goal and the deliverable. Do not list the pitfalls; the agent meets them
-as error messages, logs and behavior in the environment, the way the real
-software presents them.
+longer instruction. Keep the existing instruction's wording: removing what it
+already says is a withdrawal of help, not the real difficulty, and it mixes
+the two in the student's measured solve rate. State any new requirement the
+way a user would, in a sentence or two -- the goal and the deliverable. Do not
+list the pitfalls; the agent meets them as error messages, logs and behavior
+in the environment, the way the real software presents them.
 
 The student has 2400 seconds of wall clock per attempt, and generating its own
 turns takes most of that: in measured attempts its commands ran for about 100
