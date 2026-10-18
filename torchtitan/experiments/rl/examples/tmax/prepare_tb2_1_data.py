@@ -35,6 +35,14 @@ Each row carries its declared ``verifier_timeout_sec`` and the rollouter grades 
 it, floored at ``TMAX_EVAL_TIMEOUT_SEC``; there is nothing to set for a full-suite
 eval. Output is ~26 MB; the base64 fixtures dominate.
 
+Pointed at the Terminal-Bench 4 release tree (``terminal-bench-prebuilt-v4.0.0``,
+where every environment, verifier and compose service is a digest-pinned image),
+it emits TB4 rows: those grade in a separate verifier (``tmax.separate_verifier``)
+and, where the task declares them, carry what else its Harbor environment needs
+(see ``_harbor_fields``): a GPU in ``--gpu-target``, its docker-compose project,
+a healthcheck, the image's own non-root user, collect hooks, verifier env and
+no-internet. Rows of tasks graded in their own container never get these.
+
     python -m torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data \
         --out tb2_1_eval.jsonl [--tasks-root /path/to/terminal-bench-2-1]
 """
@@ -80,6 +88,24 @@ _FIXTURE_ROOT = "tests"
 # Fallback workdir when a task Dockerfile declares no WORKDIR. TB-2.1: 86 of 89
 # tasks use /app (the others /workspace, /app/dclm, /app/personal-site).
 _DEFAULT_WORKDIR = "/app"
+
+# Daytona region with the GPU quota; a TB4 task that declares a GPU runs there.
+_DEFAULT_GPU_TARGET = "earth"
+
+# Harbor's convention artifacts dir, collected for every separate-verifier task
+# whatever it declares (harbor/models/task/artifacts.py with_convention_entry).
+_CONVENTION_ARTIFACTS_DIR = "/logs/artifacts"
+
+# Harbor's defaults for a declared [environment].healthcheck and a
+# [[verifier.collect]] hook (harbor/models/task/config.py).
+_HEALTHCHECK_DEFAULTS = {
+    "interval_sec": 5.0,
+    "timeout_sec": 30.0,
+    "start_period_sec": 0.0,
+    "start_interval_sec": 5.0,
+    "retries": 3,
+}
+_COLLECT_DEFAULTS = {"service": "main", "timeout_sec": 60.0}
 
 # TB-2.1 ships exactly this many tasks. Asserted so a layout change surfaces as an
 # error rather than as a short eval file.
@@ -227,6 +253,47 @@ fi
         ),
     },
 }
+
+
+# Terminal-Bench 4: patches to a separate verifier's tests/Dockerfile, keyed by the
+# task's [task].name. They apply only where that Dockerfile is built: a rewritten
+# package (``separate_verifier(build=True)``, pack_to_dataset). A benchmark row
+# pulls the published verifier image, which was built when its dependencies
+# still resolved, and is never patched. Each entry is (old, new, upstream);
+# ``old`` must occur exactly once.
+_VERIFIER_DOCKERFILE_PATCHES: dict[str, tuple[str, str, str]] = {
+    # gnucleus-freecad-validator[render] pulls pyvista unpinned. pyvista 0.49.0
+    # (2026-09-08) requires vtk>=9.3.1, and pip cannot replace the conda-installed
+    # vtk 9.2.6 that freecad brings ("Cannot uninstall vtk 9.2.6 ... distutils
+    # installed project"), so the image no longer builds. 0.48.x accepts
+    # vtk>=9.2.2 and is what the published images (2026-08-26) hold.
+    **{
+        f"terminal-bench/{name}": (
+            "'gnucleus-freecad-validator[render]==0.1.3'",
+            "'gnucleus-freecad-validator[render]==0.1.3' 'pyvista<0.49'",
+            "harbor-framework/terminal-bench#2002 (pins pyvista below 0.49 "
+            "instead of installing it from conda-forge)",
+        )
+        for name in (
+            "freecad-impeller",
+            "freecad-platform-drawing",
+            "freecad-spring-clip",
+        )
+    },
+}
+
+
+def _patch_verifier_dockerfile(cfg: dict, dockerfile: str) -> tuple[str, str | None]:
+    """``dockerfile`` with this task's verifier patch applied, and its upstream."""
+    patch = _VERIFIER_DOCKERFILE_PATCHES.get(_get(cfg, "task", "name") or "")
+    if patch is None:
+        return dockerfile, None
+    old, new, upstream = patch
+    if new in dockerfile:
+        return dockerfile, upstream
+    if dockerfile.count(old) != 1:
+        raise ValueError(f"verifier patch for {_get(cfg, 'task', 'name')}: {old!r} not found once")
+    return dockerfile.replace(old, new), upstream
 
 
 def _after_shebang(test_sh: str, block: str) -> str:
@@ -644,7 +711,7 @@ def _tb_version(cfg: dict) -> str:
 
 
 def separate_verifier(
-    cfg: dict, task_dir: str, *, build: bool
+    cfg: dict, task_dir: str, *, build: bool, gpu_target: str = _DEFAULT_GPU_TARGET
 ) -> tuple[dict | None, str]:
     """The ``tmax.separate_verifier`` block of a Harbor schema-1.1 task whose
     ``[verifier] environment_mode = "separate"`` (every TB4 task): the verifier
@@ -665,11 +732,16 @@ def separate_verifier(
         "artifacts": list(artifacts),
         **_daytona_resources({"environment": verifier_env}),
     }
+    sv.update(_verifier_fields(cfg, verifier_env, gpu_target))
     if build:
         tests = Path(task_dir) / _FIXTURE_ROOT
         if not (tests / "Dockerfile").is_file():
             return None, "separate verifier without tests/Dockerfile"
-        sv["dockerfile"] = (tests / "Dockerfile").read_text(encoding="utf-8")
+        sv["dockerfile"], patched = _patch_verifier_dockerfile(
+            cfg, (tests / "Dockerfile").read_text(encoding="utf-8")
+        )
+        if patched:
+            sv["env_patch"] = patched
         sv["build_context"] = {
             str(f.relative_to(tests)): base64.b64encode(f.read_bytes()).decode()
             for f in sorted(tests.rglob("*"))
@@ -682,6 +754,117 @@ def separate_verifier(
     return sv, ""
 
 
+def _gpu_fields(env: dict, gpu_target: str) -> dict:
+    """``daytona_gpu`` / ``daytona_gpu_type`` / ``daytona_target`` for an
+    environment that declares ``gpus``; {} for one that does not."""
+    gpus = env.get("gpus")
+    if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus <= 0:
+        return {}
+    out: dict = {"daytona_gpu": gpus}
+    if env.get("gpu_types"):
+        out["daytona_gpu_type"] = [str(t) for t in env["gpu_types"]]
+    out["daytona_target"] = gpu_target
+    return out
+
+
+def _verifier_fields(
+    cfg: dict, verifier_env: dict, gpu_target: str = _DEFAULT_GPU_TARGET
+) -> dict:
+    """What a separate verifier needs beyond its image, resources and artifacts,
+    each only when the task declares it: ``collect`` hooks, ``env``
+    ([verifier.env]), ``network_block_all`` (allow_internet = false) and its GPU.
+    ``convention_dir`` is Harbor's, collected for every task."""
+    out: dict = {"convention_dir": _CONVENTION_ARTIFACTS_DIR}
+    hooks = _get(cfg, "verifier", "collect") or []
+    if hooks:
+        out["collect"] = [{**_COLLECT_DEFAULTS, **dict(h)} for h in hooks]
+    env = _get(cfg, "verifier", "env") or {}
+    if env:
+        out["env"] = {str(k): str(v) for k, v in env.items()}
+    if verifier_env.get("allow_internet") is False:
+        out["network_block_all"] = True
+    out.update(_gpu_fields(verifier_env, gpu_target))
+    return out
+
+
+_DOCKER_HEREDOC = re.compile(r"<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?")
+_ROOT_USERS = ("", "root", "0", "0:0", "root:root")
+
+
+def _image_user(task_dir: str) -> str:
+    """The user ``environment/Dockerfile``'s final stage runs as: its last USER,
+    else the stage it builds FROM; "" when none says (the bases TB4 uses are
+    root). Heredoc bodies (``RUN <<EOF``) are skipped, not parsed."""
+    path = os.path.join(task_dir, "environment", "Dockerfile")
+    if not os.path.exists(path):
+        return ""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = re.sub(r"\\\r?\n", " ", f.read()).splitlines()
+    stages: list[dict] = []
+    pending: list[str] = []
+    for line in lines:
+        if pending:
+            if line.strip() == pending[0]:
+                pending.pop(0)
+            continue
+        m = re.match(r"\s*([A-Za-z]+)\s+(.*)", line)
+        if not m:
+            continue
+        key, args = m.group(1).upper(), m.group(2).strip()
+        pending = _DOCKER_HEREDOC.findall(args)
+        if key == "FROM":
+            words = [w for w in args.split() if not w.startswith("--")]
+            alias = words[2].lower() if len(words) > 2 and words[1].upper() == "AS" else ""
+            stages.append({"base": words[0].lower(), "alias": alias, "user": ""})
+        elif key == "USER" and stages:
+            stages[-1]["user"] = args.split()[0]
+    index = len(stages) - 1
+    while index >= 0:
+        if stages[index]["user"]:
+            return stages[index]["user"]
+        base = stages[index]["base"]
+        index = next(
+            (j for j in range(index - 1, -1, -1) if stages[j]["alias"] == base), -1
+        )
+    return ""
+
+
+def _agent_user(cfg: dict, task_dir: str) -> str:
+    """Who the agent runs as: ``[agent].user``, else the image's own user, as in
+    Harbor. "" for root. The image itself is left at root by the tmux layer
+    (``_TMUX_INSTALL``), so the harness keeps root and only the agent drops."""
+    declared = _get(cfg, "agent", "user")
+    user = str(declared) if declared is not None else _image_user(task_dir)
+    if user in _ROOT_USERS:
+        return ""
+    name = user.split(":", 1)[0]
+    if not name or name.isdigit():
+        raise ValueError(f"agent user {user!r}: a numeric uid is not supported")
+    return name
+
+
+def _harbor_fields(cfg: dict, task_dir: str, gpu_target: str) -> dict:
+    """Row fields for what a separate-verifier (TB4) task's Harbor environment
+    declares beyond an image and its resources. Each is present only when the
+    task declares it, so a plain TB4 row gains nothing here."""
+    env = cfg.get("environment") if isinstance(cfg.get("environment"), dict) else {}
+    out: dict = dict(_gpu_fields(env, gpu_target))
+    compose_path = os.path.join(task_dir, "environment", "docker-compose.yaml")
+    if os.path.exists(compose_path):
+        with open(compose_path, encoding="utf-8", newline="") as f:
+            out["compose"] = {
+                "docker_compose": f.read(),
+                "build_timeout_sec": _positive_number(env.get("build_timeout_sec"))
+                or 600.0,
+            }
+    if env.get("healthcheck"):
+        out["healthcheck"] = {**_HEALTHCHECK_DEFAULTS, **dict(env["healthcheck"])}
+    user = _agent_user(cfg, task_dir)
+    if user:
+        out["agent_user"] = user
+    return out
+
+
 def _to_row(
     task_id: str,
     task_dir: str,
@@ -689,6 +872,7 @@ def _to_row(
     image_prefix: str,
     include_binary: bool = True,
     source: str = _HF_REPO,
+    gpu_target: str = _DEFAULT_GPU_TARGET,
 ) -> tuple[dict | None, str]:
     """Build one row from a TB-2.1 task dir, or ``(None, reason)`` when unusable."""
     instr_path = os.path.join(task_dir, "instruction.md")
@@ -741,13 +925,17 @@ def _to_row(
         },
     }
     metadata.update(_daytona_resources(cfg))
-    sv, why = separate_verifier(cfg, task_dir, build=False)
+    sv, why = separate_verifier(cfg, task_dir, build=False, gpu_target=gpu_target)
     if why:
         return None, why
     if sv is not None:
         # The verifier image owns /tests, so the grading fixtures are never uploaded.
         metadata["tmax"]["fixtures"] = {}
         metadata["tmax"]["separate_verifier"] = sv
+        try:
+            metadata.update(_harbor_fields(cfg, task_dir, gpu_target))
+        except ValueError as e:
+            return None, str(e)
     return {"prompt": instruction, "label": task_id, "metadata": metadata}, "ok"
 
 
@@ -758,6 +946,7 @@ def build_rows(
     image_prefix: str = _DEFAULT_IMAGE_PREFIX,
     include_binary: bool = True,
     env_patches: bool = True,
+    gpu_target: str = _DEFAULT_GPU_TARGET,
 ) -> tuple[list[dict], dict[str, str]]:
     """Convert every TB-2.1 task dir to a row. Returns ``(rows, {task_id: reason})``.
 
@@ -778,6 +967,7 @@ def build_rows(
             image_prefix=image_prefix,
             include_binary=include_binary,
             source=tasks_root or _HF_REPO,
+            gpu_target=gpu_target,
         )
         if row is None:
             skipped[entry] = reason
@@ -846,6 +1036,12 @@ def main() -> None:
         "(see _ENV_PATCHES)",
     )
     ap.add_argument(
+        "--gpu-target",
+        default=_DEFAULT_GPU_TARGET,
+        help="Daytona region for the sandboxes of a task that declares a GPU "
+        "(TB4); written into those rows only",
+    )
+    ap.add_argument(
         "--expect-tasks",
         type=int,
         default=_EXPECTED_TASKS,
@@ -874,6 +1070,7 @@ def main() -> None:
             image_prefix=args.image_prefix,
             include_binary=not args.no_binary_fixtures,
             env_patches=not args.no_env_patches,
+            gpu_target=args.gpu_target,
         )
     if skipped:
         for tid, reason in sorted(skipped.items()):
