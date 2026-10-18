@@ -78,6 +78,7 @@ $TRL_BASE/
 │           ├── pretest.json      the input row's pin hook (pre_test_sh + environment stamp); only when the row has one
 │           ├── package/          the working copy; renamed to r<N+1>/ when accepted
 │           │   └── traces/attempt-NN.jsonl   hardlinks to the run's rollout records
+│           ├── notes/            the author's run/ notes (hardening.md, simplify.json, repair.json), kept when a fold strips run/
 │           └── sessions/<stamp>--<kind>/     one codex invocation (agent, repair, verifier, oracle)
 │               ├── session.json  prompt.md  stdout.txt  stderr.txt
 │               └── codex/        the CLI's own session jsonl

@@ -637,6 +637,13 @@ class RewriteDir:
         return self.path / "package"
 
     @property
+    def notes(self) -> Path:
+        """The author's run/ notes (hardening.md, simplify.json, repair.json),
+        copied out of the package before a fold strips run/, so later rewrites
+        of the task can read what an accepted rewrite intended and predicted."""
+        return self.path / "notes"
+
+    @property
     def traces(self) -> Path:
         return self.package / "traces"
 

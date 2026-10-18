@@ -359,16 +359,33 @@ def _write_history(
             diff_text = _package_diff(base, result)
             (out / f"{name}.diff").write_text(diff_text)
             entry["diff"] = f"{name}.diff"
-        notes = [
-            f"## {rel}\n\n{(earlier.package / rel).read_text(errors='replace')}\n"
-            for rel in ("run/hardening.md", "run/simplify.json", "run/failure.txt")
-            if (earlier.package / rel).is_file()
-        ]
+        # An accepted rewrite's package is stripped and renamed by the fold;
+        # its notes were kept beside it (_keep_author_notes).
+        notes = []
+        for rel in AUTHOR_NOTES:
+            for path in (earlier.package / rel, earlier.notes / Path(rel).name):
+                if path.is_file():
+                    notes.append(f"## {rel}\n\n{path.read_text(errors='replace')}\n")
+                    break
         if notes:
             (out / f"{name}.notes.md").write_text("\n".join(notes))
             entry["notes"] = f"{name}.notes.md"
         lines.append(entry)
         texts[name] = diff_text
+    # What training measured on each accepted rewrite's result: the next
+    # rewrite's input measurement, or for the newest revision the signal being
+    # handled now (its attempts are this rewrite's traces/). This is what an
+    # author's prediction is checked against.
+    for entry in lines:
+        if entry.get("status") != "accepted" or entry.get("result_rev") is None:
+            continue
+        later = [e for e in lines if e.get("input_rev") == entry["result_rev"]]
+        if later and later[0].get("measured_on_input"):
+            entry["measured_next"] = later[0]["measured_on_input"]
+        elif current and current.get("rev") == entry["result_rev"]:
+            entry["measured_next"] = {
+                k: current.get(k) for k in ("run", "group", "rev", "solved", "total")
+            } | {"current_signal": True}
     if lines:
         (out / "index.jsonl").write_text("".join(json.dumps(e) + "\n" for e in lines))
     if lines:
@@ -510,6 +527,14 @@ def _history_summary(task_id: str, attempts: list[dict], texts: dict[str, str]) 
             f"\n## {e['rewrite']}: {e.get('job')} r{e.get('input_rev')}{produced}, "
             f"{e.get('status')}{' at ' + e['stage'] if e.get('stage') else ''}\n"
             f"- Training on r{e.get('input_rev')} before it: {measured(e)}\n"
+            + (
+                f"- Training on r{e['result_rev']} after it: "
+                f"{e['measured_next'].get('solved')}/{e['measured_next'].get('total')} solved"
+                + (" (the signal being handled now; its attempts are traces/)"
+                   if e["measured_next"].get("current_signal") else "")
+                + "; compare with the prediction in its notes\n"
+                if e.get("measured_next") else ""
+            )
             + (f"- Reason: {e['reason']}\n" if e.get("reason") else "")
             + (f"- Changed: {_diff_stat(texts.get(e['rewrite'], ''))}\n- Diff: {e['diff']}\n"
                if e.get("diff") else "- Changed: no package left to compare\n")
@@ -1174,6 +1199,24 @@ def handle(
     return {"signal": sig, "rewrite": rewrite, "meta": meta, "status": status}
 
 
+# What a later rewrite of the task reads from an earlier one's run/: its
+# intent, its predicted solve count and the defects it repaired.
+AUTHOR_NOTES = ("run/hardening.md", "run/simplify.json", "run/repair.json", "run/failure.txt")
+
+
+def _keep_author_notes(package: Path) -> None:
+    """Copy the author's notes beside the package before a fold strips run/.
+
+    Without this an accepted rewrite's intent and prediction vanish, and the
+    next rewrite cannot compare that prediction with what was measured next.
+    """
+    notes = layout.RewriteDir(package.parent).notes
+    for rel in AUTHOR_NOTES:
+        if (package / rel).is_file():
+            notes.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(package / rel, notes / Path(rel).name)
+
+
 def strip_harness(pkg: Path) -> None:
     """Take out what the harness put in, before a package becomes a revision."""
     for name in ec.HARNESS:
@@ -1297,6 +1340,7 @@ def _prepare_fold_row(
     package: Path, input_line: str, meta: dict, policy_canary: dict
 ) -> dict:
     """Strip one package and build its row. Touches only that package."""
+    _keep_author_notes(package)
     strip_harness(package)
     # The directory is `package` now and `r<N>` once renamed, so the row's
     # identity is passed rather than read off the name; so is the hook, which

@@ -659,7 +659,7 @@ def _declaring_author(monkeypatch, bad: dict, change_task_on_repair=False):
             evidence = bad if not resume else good
             (cwd / "run/simplify.json").write_text(json.dumps(dict(
                 retained_skill="compare", bottleneck="b", change="c", restore="r",
-                prediction="p", evidence=[evidence])))
+                prediction="p", expected="3 of 12", evidence=[evidence])))
             if resume and change_task_on_repair:
                 (cwd / "instruction.md").write_text("something else\n")
         return p
