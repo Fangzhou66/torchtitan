@@ -57,6 +57,7 @@ from torchtitan.experiments.rl.examples.swe_r2e.config_registry import (
 from torchtitan.experiments.rl.examples.tmax.data import TMaxDataset
 from torchtitan.experiments.rl.examples.tmax.rollouter import TMaxRollouter
 from torchtitan.experiments.rl.losses import DPPOLoss, GRPOLoss
+from torchtitan.tools.logging import logger
 
 # tmax JSONL path, supplied by the launcher (PROMPT_DATA -> SWE_PROMPT_DATA).
 # Empty by default; TMaxDataset raises a clear error if it is not set.
@@ -656,13 +657,18 @@ def rl_grpo_qwen3_5_9b_tmax(
         for worker_concurrency in worker_concurrencies
     )
     if min_work_conserving_groups > max_active_rollout_groups:
-        raise ValueError(
+        msg = (
             "The rollout-worker split cannot keep every trajectory gate supplied: "
             f"it needs at least {min_work_conserving_groups} active groups, but "
             f"SWE_MAX_ACTIVE_GROUPS={max_active_rollout_groups}. Reduce "
             "SWE_ROLLOUT_CONCURRENCY or SWE_NUM_ROLLOUT_WORKERS, or increase "
             "SWE_MAX_ACTIVE_GROUPS."
         )
+        # SWE_ALLOW_IDLE_ROLLOUT_SLOTS=1: a deliberately synchronous run (one
+        # active group) accepts slots idling through each group's tail.
+        if os.environ.get("SWE_ALLOW_IDLE_ROLLOUT_SLOTS", "0") != "1":
+            raise ValueError(msg)
+        logger.warning(f"{msg} Continuing: SWE_ALLOW_IDLE_ROLLOUT_SLOTS=1.")
     default_initial_active_groups = min(
         max_active_rollout_groups,
         max(oi_initial_active_groups, min_work_conserving_groups),
