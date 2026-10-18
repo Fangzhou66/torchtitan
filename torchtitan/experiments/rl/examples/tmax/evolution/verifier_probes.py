@@ -12,6 +12,7 @@ import datetime
 import errno
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -167,6 +168,13 @@ def verify_probes(
     ``down_own=False`` leaves ``pkg``'s own container alone: the agent running
     ``./sandbox probes`` from its workspace keeps the container it works in.
     """
+    # EVOLVE_PROBE_COMMAND_TIMEOUT_SEC caps every probe command (host side and
+    # the in-sandbox exec): a witness that deadlocks, e.g. on a mismatched
+    # collective, otherwise holds its case for the rest of the rewrite budget.
+    # 0 (default) leaves the budget as the only cap.
+    cap = int(os.environ.get("EVOLVE_PROBE_COMMAND_TIMEOUT_SEC", "0"))
+    if cap > 0:
+        timeout = min(timeout, cap)
     probes = pkg / "run" / "verifier-probes"
     contract, names, scripts = load_probe_contract(pkg)
     log_path = pkg / "run" / "verifier-probe-results.jsonl"

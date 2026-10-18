@@ -117,6 +117,16 @@ class SemanticProbeTests(unittest.TestCase):
             3,
         )
 
+    def test_command_timeout_cap_reaches_the_sandbox_exec(self):
+        with patch.dict(probes.os.environ, {"EVOLVE_PROBE_COMMAND_TIMEOUT_SEC": "7"}):
+            calls = self.execute()
+        setups = [
+            call for call in calls
+            if call[0] == "exec" and not call[1].startswith("if [")
+        ]
+        self.assertTrue(setups)
+        self.assertTrue(all(call[-2:] == ["--timeout", "7"] for call in setups))
+
     def test_wrong_solution_passing_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "wrong-1/grade"):
             self.execute(6, 0)
