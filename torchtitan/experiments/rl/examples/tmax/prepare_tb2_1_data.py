@@ -689,6 +689,24 @@ def _to_row(
         },
     }
     metadata.update(_daytona_resources(cfg))
+    # Harbor schema 1.1 `[verifier] environment_mode = "separate"` (every TB4 task):
+    # the verifier runs in its own image, which already holds /tests, and sees
+    # only the declared `artifacts`, copied from the agent's container.
+    if _get(cfg, "verifier", "environment_mode") == "separate":
+        verifier_env = _get(cfg, "verifier", "environment") or {}
+        verifier_image = verifier_env.get("docker_image")
+        artifacts = cfg.get("artifacts")
+        if not verifier_image:
+            return None, "separate verifier without [verifier.environment].docker_image"
+        if not artifacts:
+            return None, "separate verifier without artifacts"
+        # The image owns /tests, so the grading fixtures are never uploaded.
+        metadata["tmax"]["fixtures"] = {}
+        metadata["tmax"]["separate_verifier"] = {
+            "image": verifier_image,
+            "artifacts": list(artifacts),
+            **_daytona_resources({"environment": verifier_env}),
+        }
     return {"prompt": instruction, "label": task_id, "metadata": metadata}, "ok"
 
 

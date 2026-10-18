@@ -48,7 +48,7 @@ def _rollouter(*, shadow: bool) -> TMaxRollouter:
     return r
 
 
-def _run(rollouter, monkeypatch, *, submitted: bool, grade):
+def _run(rollouter, monkeypatch, *, submitted: bool, grade, tmax=None, boot=None):
     @contextlib.asynccontextmanager
     async def fake_boot(*args, **kwargs):
         sandbox = AsyncMock()
@@ -64,7 +64,7 @@ def _run(rollouter, monkeypatch, *, submitted: bool, grade):
         )
 
     monkeypatch.delenv("TRL_RUN_DIR", raising=False)
-    monkeypatch.setattr(rollouter_mod, "boot_agent_sandbox", fake_boot)
+    monkeypatch.setattr(rollouter_mod, "boot_agent_sandbox", boot or fake_boot)
     monkeypatch.setattr(rollouter_mod, "get_agent", lambda name: fake_agent)
     monkeypatch.setattr(rollouter_mod, "seed_workspace", AsyncMock())
     monkeypatch.setattr(rollouter_mod, "grade_tmax", grade)
@@ -89,6 +89,7 @@ def _run(rollouter, monkeypatch, *, submitted: bool, grade):
         image="example/image",
         workdir="/app",
         problem_statement="do the thing",
+        **({"tmax": tmax} if tmax is not None else {}),
     )
     rollout, *_ = asyncio.run(
         rollouter._run_agent_rollout(
@@ -186,3 +187,52 @@ def test_group_metrics():
     # submitted 1, 0 + shadow 1, 0 -> 0.5; the failed shadow and the infra failure
     # are out of the denominator.
     assert got["rollout/shadow_reward_mean"] == pytest.approx(0.5)
+
+
+
+def test_a_separate_verifier_grades_in_its_own_sandbox_from_the_artifacts(monkeypatch):
+    """Harbor environment_mode="separate": the submitted rollout's artifacts are
+    copied into a sandbox of the verifier image and graded there, with no
+    upload of the tests the image already holds, and no shadow grading."""
+    booted: list = []
+    moved: list = []
+    calls: list = []
+
+    @contextlib.asynccontextmanager
+    async def boot(image, **kwargs):
+        sandbox = AsyncMock()
+        sandbox.sandbox_id = f"sb-{len(booted)}"
+        sandbox.disk_gb = 1
+        booted.append(image)
+        yield sandbox
+
+    async def collect(sandbox, paths):
+        moved.append(("collect", sandbox.sandbox_id, paths))
+        return b"tar"
+
+    async def restore(sandbox, data):
+        moved.append(("restore", sandbox.sandbox_id, data))
+
+    async def grade(sandbox, tmax, *, workdir, **kwargs):
+        calls.append((sandbox.sandbox_id, kwargs.get("upload_tests", True)))
+        return 1.0
+
+    monkeypatch.setattr(rollouter_mod, "collect_artifacts", collect)
+    monkeypatch.setattr(rollouter_mod, "restore_artifacts", restore)
+    tmax = {
+        "test_sh": "",
+        "separate_verifier": {"image": "verifier/image", "artifacts": ["/app/out.step"]},
+    }
+    rollout = _run(
+        _rollouter(shadow=True), monkeypatch, submitted=True, grade=grade,
+        tmax=tmax, boot=boot,
+    )
+
+    assert booted == ["example/image", "verifier/image"]
+    assert moved == [
+        ("collect", "sb-0", ["/app/out.step"]),
+        ("restore", "sb-1", b"tar"),
+    ]
+    assert calls == [("sb-1", False)]
+    assert rollout.turns[-1].env_rewards == {"tmax_reward": 1.0}
+    assert rollout.diagnostics["infra_failed"] is False
