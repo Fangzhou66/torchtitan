@@ -26,6 +26,7 @@ import os
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.models.common.nn_modules import Linear
@@ -87,6 +88,19 @@ def _split_tf32(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     carries what was dropped. A contiguous CUDA tensor takes one fused pass (the
     same mask and subtraction, bitwise identical to the eager ops below).
     """
+    if isinstance(t, DTensor):
+        # Under trainer TP the lm_head operands stay DTensors. The kernel indexes
+        # raw storage by numel(), which on a DTensor is the global size, so split
+        # the local shard (elementwise: placements are unchanged) and rewrap.
+        # Only gradient operands of the custom autograd backward come here, so no
+        # autograd edge crosses this to_local.
+        hi, lo = _split_tf32(t.to_local())
+        return tuple(
+            DTensor.from_local(
+                part, t.device_mesh, t.placements, shape=t.shape, stride=t.stride()
+            )
+            for part in (hi, lo)
+        )
     if triton is not None and t.is_cuda and t.is_contiguous():
         hi, lo = torch.empty_like(t), torch.empty_like(t)
         n = t.numel()
