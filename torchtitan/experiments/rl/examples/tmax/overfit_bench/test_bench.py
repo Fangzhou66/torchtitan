@@ -1,0 +1,85 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench  # noqa: E402
+import publish_mix  # noqa: E402
+
+
+def _row(task: str, test: str = "exit 0") -> dict:
+    return {
+        "prompt": f"solve {task}",
+        "label": task,
+        "metadata": {
+            "instance_id": task,
+            "image": "ubuntu:24.04",
+            "tmax": {"test_sh": test, "fixtures": {}, "reward_path": "/logs/verifier/reward.txt"},
+        },
+    }
+
+
+@pytest.fixture
+def job(tmp_path):
+    evalset = tmp_path / "bench.jsonl"
+    evalset.write_text("".join(json.dumps(_row(t)) + "\n" for t in ("a", "b")))
+    tasks = tmp_path / "tasks"
+    manifest = bench.split(evalset, "tb21", tasks)
+    assert sorted(manifest["tasks"]) == ["a", "b"]
+    corpus = tmp_path / "terminal-bench-2-1"
+    (corpus / "tasks" / "a").mkdir(parents=True)
+    (corpus / "tasks" / "a" / "instruction.md").write_text("solve a")
+    return bench.new_job(tasks, "a", corpus, "ref", tmp_path / "jobs", None)
+
+
+def test_job_starts_from_the_original_alone_and_reads_it_out(job):
+    assert job.name == "a--ref" and job.parent.name == "tb21"
+    live = (job / "data/mix/live.jsonl").read_text().splitlines()
+    assert [json.loads(r)["metadata"]["instance_id"] for r in live] == ["a"]
+    readout = json.loads((job / "data/evalsets/original.jsonl").read_text())
+    assert readout == _row("a")
+    assert (job / "data/sources/terminal-bench-2-1/tasks/a/instruction.md").is_file()
+
+
+def test_publish_refuses_a_file_with_any_unparseable_row(job, tmp_path):
+    rows = tmp_path / "mix.jsonl"
+    bad = _row("a2")
+    del bad["metadata"]["tmax"]
+    rows.write_text(json.dumps(_row("a1")) + "\n" + json.dumps(bad) + "\n")
+    with pytest.raises(SystemExit):
+        publish_mix.check_rows(rows.read_text())
+    good = publish_mix.check_rows(json.dumps(_row("a1")) + "\n" + json.dumps(_row("a")) + "\n")
+    version, _ = bench.layout.Root(job).mix.publish(good)
+    assert version == 2
+
+
+def test_readout_takes_the_original_task_from_every_run(job):
+    def index(run, step, passes, n=16):
+        d = job / "runs" / run / "trainer/validation_traces" / f"step-{step}"
+        d.mkdir(parents=True)
+        lines = ["| Task | Trial | State | Reward |", "|---|---|---|---:|"]
+        lines += [f"| a | [t{i}](x) | {'PASS' if i < passes else 'FAIL'} | 1 |" for i in range(n)]
+        lines += ["| other | [o](x) | PASS | 1 |"]
+        (d / "INDEX.md").write_text("\n".join(lines) + "\n")
+
+    index("tmax-9b--20261001-000000Z", 0, 0)
+    index("tmax-9b--20261001-000000Z", 5, 1)
+    index("tmax-9b--20261002-000000Z", 10, 8)
+    index("tmax-9b--20261002-000000Z", 15, 9)
+    index("tmax-9b--20261002-000000Z", 20, 12)
+    r = bench.readout(job)
+    assert [p["step"] for p in r["curve"]] == [0, 5, 10, 15, 20]
+    assert r["curve"][1]["passes"] == 1 and r["curve"][1]["attempts"] == 16
+    assert r["first_pass_step"] == 5
+    assert r["stable_solve_step"] == 10
+    assert r["curve"][0]["pass_at_5"] == 0.0
+    assert bench.pass_at_k(16, 16) == 1.0
+    assert abs(bench.pass_at_k(16, 1) - 5 / 16) < 1e-9
