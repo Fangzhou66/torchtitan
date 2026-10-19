@@ -126,7 +126,16 @@ class Blocked(Exception):  # noqa: N818 -- existing exception name used by calle
     report = ""
 
 
-CODEX_MODEL = os.environ.get("SYNTH_MODEL", "gpt-5.6-sol")
+# EVOLVE_CODEX_HARNESS=local ("local-harness"): sessions run the codex CLI
+# installed on this machine (EVOLVE_CODEX_LOCAL_BIN, else `codex` on PATH) with
+# its own sign-in and provider. No provider override is passed, so the CLI
+# reaches whatever endpoint it is configured for; the chat calls keep
+# SYNTH_API_BASE / SYNTH_MODEL. EVOLVE_CODEX_MODEL names the sessions' model
+# when it differs from SYNTH_MODEL.
+LOCAL_HARNESS = os.environ.get("EVOLVE_CODEX_HARNESS", "") == "local"
+CODEX_MODEL = os.environ.get("EVOLVE_CODEX_MODEL") or os.environ.get(
+    "SYNTH_MODEL", "gpt-5.6-sol"
+)
 # Same knob as the chat calls: high unless SYNTH_EFFORT says otherwise. Left
 # unset, the CLI ran the sessions at its own default, which the session log
 # records as reasoning_effort=null.
@@ -197,6 +206,13 @@ def _tool_bin() -> Path:
 
 
 def _codex_bin() -> Path:
+    if LOCAL_HARNESS:
+        local = os.environ.get("EVOLVE_CODEX_LOCAL_BIN") or shutil.which("codex")
+        if not local:
+            raise FileNotFoundError(
+                "EVOLVE_CODEX_HARNESS=local but no codex CLI: set EVOLVE_CODEX_LOCAL_BIN"
+            )
+        return Path(local)
     return _tool_bin() / "codex"
 
 
@@ -648,6 +664,9 @@ WEB_SEARCH = os.environ.get("EVOLVE_CODEX_WEB_SEARCH", "live")
 def _provider_overrides() -> list[str]:
     """The provider settings both drivers pass; the SDK takes them as a list."""
     search = [f"web_search={WEB_SEARCH}"] if WEB_SEARCH else []
+    if LOCAL_HARNESS:
+        # The local CLI's own provider; any override here would bypass it.
+        return search + _extra_config()
     if ACCOUNT_HOME or os.environ.get("EVOLVE_CODEX_AUTH_FILE"):
         return ["model_provider=openai"] + search + _extra_config()
     return [

@@ -88,3 +88,30 @@ def test_web_search_names_the_provider_openai_and_turns_the_tool_on(monkeypatch)
     overrides = ec._provider_overrides()
     assert "model_providers.oai.name=openai" in overrides
     assert not any(o.startswith("web_search=") for o in overrides)
+
+
+def test_local_harness_uses_the_local_cli_and_its_own_provider(tmp_path, monkeypatch):
+    local = tmp_path / "codex"
+    local.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(ec, "LOCAL_HARNESS", True)
+    monkeypatch.setattr(ec, "ACCOUNT_HOME", None)
+    monkeypatch.setattr(ec, "WEB_SEARCH", "live")
+    monkeypatch.setenv("EVOLVE_CODEX_LOCAL_BIN", str(local))
+    monkeypatch.setenv("EVOLVE_CODEX_EXTRA_CONFIG", "")
+    overrides = ec._provider_overrides()
+    assert overrides == ["web_search=live"]
+    cmd = ec._codex_cmd(tmp_path, "some-model")
+    assert cmd[0] == str(local)
+    assert not any(c.startswith("model_provider") for c in cmd)
+    assert cmd[-3:] == ["-m", "some-model", "-"]
+
+
+def test_local_harness_without_a_cli_fails_loudly(monkeypatch):
+    monkeypatch.setattr(ec, "LOCAL_HARNESS", True)
+    monkeypatch.delenv("EVOLVE_CODEX_LOCAL_BIN", raising=False)
+    monkeypatch.setattr(ec.shutil, "which", lambda name: None)
+    try:
+        ec._codex_bin()
+    except FileNotFoundError:
+        return
+    raise AssertionError("expected FileNotFoundError")
