@@ -162,6 +162,11 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
             # SWE_DISABLE_SHUFFLE=1 -> take training rows in file order (0,1,2,...)
             # for deterministic per-rollout inspection / open-instruct cross-check.
             shuffle=(os.environ.get("SWE_DISABLE_SHUFFLE", "0") != "1"),
+            # SWE_RESHUFFLE_EACH_EPOCH=0 -> shuffle once, then keep that order every
+            # epoch (fixed one-epoch gap between a task's exposures).
+            reshuffle_each_epoch=(
+                os.environ.get("SWE_RESHUFFLE_EACH_EPOCH", "1") != "0"
+            ),
             holdout_n=holdout_n,
             split="train",
             include_ids_path=_INCLUDE_IDS,

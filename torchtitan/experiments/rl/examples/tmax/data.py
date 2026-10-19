@@ -197,6 +197,12 @@ class TMaxDataset(Configurable):
         shuffle: bool = True
         """Shuffle row order (reshuffling on each wrap). Set False for validation."""
 
+        reshuffle_each_epoch: bool = True
+        """With ``shuffle``, draw a new order at every wrap. False keeps the first
+        epoch's seeded order for the whole run, so every task comes back exactly
+        one epoch later; an evolve rewrite issued after one exposure then has a
+        full epoch to land before the next."""
+
         holdout_n: int = 0
         """Reserve the LAST ``holdout_n`` rows (file order) as a held-out validation slice,
         disjoint from training. 0 = no split (whole file). Both the train and validation
@@ -263,6 +269,7 @@ class TMaxDataset(Configurable):
 
         self._rng = random.Random(config.seed)
         self._shuffle = config.shuffle
+        self._reshuffle_each_epoch = config.reshuffle_each_epoch
         self._order = list(range(len(self._samples)))
         if self._shuffle:
             self._rng.shuffle(self._order)
@@ -378,7 +385,7 @@ class TMaxDataset(Configurable):
         if self._hot_reload:
             self._maybe_reload()
         if self._pos >= len(self._order):
-            if self._shuffle:
+            if self._shuffle and self._reshuffle_each_epoch:
                 self._rng.shuffle(self._order)
             self._pos = 0
             self._epoch += 1
