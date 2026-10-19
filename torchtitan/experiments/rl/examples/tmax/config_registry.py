@@ -956,6 +956,13 @@ def rl_grpo_qwen3_5_9b_tmax(
         ),
         cudagraph=VLLMCudagraphConfig(enable=_cudagraph_on, mode="FULL_DECODE_ONLY"),
         enable_prefix_caching=_prefix_cache,
+        # Engine steps between admission decisions. Larger values admit new turns
+        # in fewer, larger waves, so the DP ranks prefill in the SAME engine step
+        # instead of each rank's prefill stalling the other ranks' decode (MoE EP
+        # steps are lockstep). Scheduling only; sampling is unchanged.
+        max_engine_steps_between_decisions=int(
+            os.environ.get("SWE_GEN_STEPS_PER_DECISION", "16")
+        ),
         salt_prefix_cache_on_weight_sync=_salt_kv,
         reset_prefix_cache_on_weight_sync=not _salt_kv,
         reset_running_requests_on_weight_sync=not _salt_kv,
