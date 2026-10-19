@@ -48,6 +48,10 @@ from torchtitan.experiments.rl.native_ep_partial_pull import (
     local_expert_range,
     NativeEPPartialPull,
 )
+from torchtitan.experiments.rl.native_tp_partial_pull import (
+    NativeTPPartialPull,
+    tp_rules_from_vllm_model,
+)
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
@@ -1474,6 +1478,23 @@ class VLLMGenerator(Actor, Configurable):
                     "SWE_NATIVE_EP_PARTIAL_PULL=1 but no contiguous local expert "
                     "range was found; pulling the full state dict"
                 )
+        # SWE_NATIVE_TP_PARTIAL_PULL=1: a vllm_native TP rank pulls only its TP
+        # slice of the column-/row-/vocab-parallel non-expert weights (from the
+        # second pull on; the first, full pull records the shapes).
+        self._tp_partial_pull: NativeTPPartialPull | None = None
+        if (
+            native
+            and os.environ.get("SWE_NATIVE_TP_PARTIAL_PULL", "0") == "1"
+            and config.parallelism.tensor_parallel_degree > 1
+        ):
+            tp_rules = tp_rules_from_vllm_model(self._get_model())
+            if tp_rules is not None:
+                self._tp_partial_pull = NativeTPPartialPull(tp_rules)
+            elif self._rank == 0:
+                logger.warning(
+                    "SWE_NATIVE_TP_PARTIAL_PULL=1 but the native model has no "
+                    "safe TP slicing; pulling full non-expert weights"
+                )
         if config.enable_dp_weight_broadcast:
             unsupported_reason = dp_weight_broadcast_unsupported_reason(
                 data_parallel_degree=config.parallelism.data_parallel_degree,
@@ -2049,18 +2070,27 @@ class VLLMGenerator(Actor, Configurable):
         in which case it stages on CPU (no extra GPU memory held during generation).
         """
         _t0 = time.perf_counter()
+        tp_fetch = False
         if self._backend == "vllm_native":
             # The native model is not a torchtitan model, so weights cannot be filled
             # in place by FQN: pull the full state dict (no template). The result is a
             # fresh dict, so it is already safe to fetch while generation runs.
-            if self._ep_partial_pull is not None and self._ep_partial_pull.ready:
-                staged = await self._ep_partial_pull.fetch("model_state_dict")
+            ep = self._ep_partial_pull
+            ep = ep if ep is not None and ep.ready else None
+            tp = self._tp_partial_pull
+            tp_fetch = tp is not None and tp.ready
+            if tp_fetch:
+                staged = await tp.fetch("model_state_dict", ep=ep)
+            elif ep is not None:
+                staged = await ep.fetch("model_state_dict")
             else:
                 staged = await ts.get_state_dict(
                     "model_state_dict", direct_rdma=False
                 )
                 if self._ep_partial_pull is not None:
                     self._ep_partial_pull.record(staged)
+            if tp is not None and not tp_fetch:
+                tp.record(staged)
         else:
             # Async RL uses a StorageVolume snapshot so generators never read the
             # trainer's live GPU tensors while an optimizer step may be mutating them.
@@ -2086,7 +2116,13 @@ class VLLMGenerator(Actor, Configurable):
                 direct_rdma=False,
             )
         get_secs = time.perf_counter() - _t0
-        gib = _state_dict_local_gib(staged) if self._rank == 0 else 0.0
+        if self._rank != 0:
+            gib = 0.0
+        elif self._backend == "vllm_native" and tp_fetch:
+            # staged holds full-size tensors; count only the bytes fetched.
+            gib = self._tp_partial_pull.last_fetch_bytes / 2**30
+        else:
+            gib = _state_dict_local_gib(staged)
         return staged, get_secs, gib
 
     def _apply_model_state_dict(

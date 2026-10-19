@@ -135,32 +135,46 @@ class NativeEPPartialPull:
                 f"{self.num_experts} for {len(self._expert_meta)} expert tensors"
             )
 
+    def prepare(self, flat_keys: list[str]) -> None:
+        """Fill the expert shapes from ``dims`` before the first partial fetch."""
+        if not self._expert_meta and self._dims is not None:
+            self._meta_from_dims(flat_keys)
+
+    def expert_request(self, store_key: str, flat_key: str):
+        """``(request, local buffer)`` for the local expert slice of a stacked
+        expert key, or None for any other key."""
+        from torchstore.transport.types import Request, TensorSlice
+
+        meta = self._expert_meta.get(flat_key)
+        if meta is None:
+            return None
+        global_shape, dtype = meta
+        local_shape = (self.stop - self.start, *global_shape[1:])
+        local = torch.empty(local_shape, dtype=dtype)
+        spec = TensorSlice(
+            offsets=(self.start, *(0 for _ in global_shape[1:])),
+            coordinates=None,
+            global_shape=global_shape,
+            local_shape=local_shape,
+            mesh_shape=None,
+        )
+        return Request.from_any(store_key, local, spec), local
+
     def build_requests(self, key: str, flat_keys: list[str]):
         """TorchStore requests: whole tensors for dense keys, the local expert
         slice (into a preallocated CPU tensor) for stacked expert keys."""
-        from torchstore.transport.types import Request, TensorSlice
+        from torchstore.transport.types import Request
 
         delim = "/"
         requests, inplace = [], {}
-        n = self.stop - self.start
         for fk in flat_keys:
             store_key = f"{key}{delim}{fk}"
-            meta = self._expert_meta.get(fk)
-            if meta is None:
+            expert = self.expert_request(store_key, fk)
+            if expert is None:
                 requests.append(Request.from_any(store_key, None))
                 continue
-            global_shape, dtype = meta
-            local_shape = (n, *global_shape[1:])
-            local = torch.empty(local_shape, dtype=dtype)
-            spec = TensorSlice(
-                offsets=(self.start, *(0 for _ in global_shape[1:])),
-                coordinates=None,
-                global_shape=global_shape,
-                local_shape=local_shape,
-                mesh_shape=None,
-            )
-            requests.append(Request.from_any(store_key, local, spec))
-            inplace[store_key] = local
+            requests.append(expert[0])
+            inplace[store_key] = expert[1]
         return requests, inplace
 
     async def fetch(self, key: str = "model_state_dict") -> dict[str, Any]:
@@ -172,8 +186,7 @@ class NativeEPPartialPull:
         client = await ts.client()
         mapping = await client.get(f"{key}{DELIM}{MAPPING}")
         flat_keys = list(mapping.keys())
-        if not self._expert_meta and self._dims is not None:
-            self._meta_from_dims(flat_keys)
+        self.prepare(flat_keys)
         requests, inplace = self.build_requests(key, flat_keys)
         results = await client._fetch(requests)
         flat = {}
