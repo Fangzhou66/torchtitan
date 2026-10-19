@@ -1222,11 +1222,15 @@ async def _serve(pkg: Path, sock: str, resources: dict | None = None) -> int:
             cpu=box["cpu"],
             memory=box["mem_gb"],
             disk_gb=box["disk_gb"],
+            # Booted as the rollouter and the final gate boot it (TB4 GPU/compose).
+            **dr.harbor_env.boot_kwargs(md),
         ) as sandbox:
             sb = dr._Root(sandbox)
             if md.get("entrypoint"):
                 await dr._start_entrypoint(sb, md["entrypoint"], workdir=workdir)
             await dr.seed_workspace(sb, md["tmax"])
+            await dr.harbor_env.run_healthcheck(sb, md.get("healthcheck"))
+            agent_sb = await dr.as_agent(sandbox, sb, md)
             # INTEGRITY BASELINE for `grade`: the state as booted, before any
             # request is served -- what a training episode's agent starts
             # from. None for a package without protected entries. The lists
@@ -1266,7 +1270,7 @@ async def _serve(pkg: Path, sock: str, resources: dict | None = None) -> int:
                 )
                 t0 = time.time()
                 execution = await dr.run_reference(
-                    sb,
+                    agent_sb,
                     "bash /solution/solve.sh",
                     solve_timeout,
                     **(

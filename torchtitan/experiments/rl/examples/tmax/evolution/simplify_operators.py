@@ -98,9 +98,13 @@ cause, then act on that cause:
   decisions to the student.
 - A missing capability at a decision the task requires: reduce what that
   decision demands.
-Transient sandbox or provider failures, unscored attempts and missing trace
-evidence are not measurements: write BLOCKED: invalid_signal: <reason> to
-run/verdict.txt and stop without edits. Base every claim about the
+An attempt the harness marks infra_failed (a sandbox or provider failure), or
+one with no trace, is not a measurement: leave it out. An attempt whose
+grading failed on the state it left behind -- a disk it filled, a package lock
+its own command still held -- was scored and failed like any other; read it as
+a failure of that attempt, often a mechanics bottleneck. Diagnose from the
+scored attempts, and write BLOCKED: invalid_signal: <reason> to run/verdict.txt
+and stop without edits only when no scored attempt with its trace remains. Base every claim about the
 environment, the verifier or the student on what you observed in the traces
 or the sandbox, not on what a file name or a success message suggests.
 

@@ -135,6 +135,9 @@ def test_prompt_states_the_goal_the_costs_and_the_general_rules():
     # Guidance is checked against what the reference actually computes.
     assert "Apply your guidance literally" in text
     assert "BLOCKED: invalid_signal:" in text
+    flat = " ".join(text.split())
+    assert "only when no scored attempt with its trace remains" in flat
+    assert "was scored and failed like any other" in flat
     assert 'written as "k of n"' in text
 
 

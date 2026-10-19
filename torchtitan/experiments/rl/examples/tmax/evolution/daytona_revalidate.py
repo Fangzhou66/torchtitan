@@ -243,6 +243,16 @@ async def probe(pkg: Path, shortcut: str | None, *args, **kwargs) -> dict:
     }
 
 
+async def as_agent(sandbox, sb, md: dict):
+    """The sandbox the reference runs in: where the agent would -- as the
+    image's own user when a TB4 row names one (uploads, measurement and grading
+    stay root on ``sb``). The author's ./sandbox oracle and this probe both use
+    it, so the author iterates against the identity the final gate replays."""
+    if md.get("agent_user"):
+        return _Root(await harbor_env.enter_as_agent_user(sandbox, md["agent_user"]))
+    return sb
+
+
 async def _probe_once(
     pkg: Path,
     shortcut: str | None,
@@ -330,13 +340,7 @@ async def _probe_once(
             await _start_entrypoint(sb, md["entrypoint"], workdir=workdir)
         await seed_workspace(sb, tmax)
         await harbor_env.run_healthcheck(sb, md.get("healthcheck"))
-        # The reference runs where the agent would: as the image's own user when
-        # a TB4 row names one (uploads, measurement and grading stay root).
-        agent_sb = (
-            _Root(await harbor_env.enter_as_agent_user(sandbox, md["agent_user"]))
-            if md.get("agent_user")
-            else sb
-        )
+        agent_sb = await as_agent(sandbox, sb, md)
         # Which of the paths the caller asks about the untouched workspace
         # already has. A path the verifier requires that is here before anything
         # runs is a precondition the agent inherits; one that is not, and that

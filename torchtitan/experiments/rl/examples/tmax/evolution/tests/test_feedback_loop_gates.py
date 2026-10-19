@@ -979,3 +979,20 @@ def test_a_filtered_session_is_retried_fresh_then_gives_up(
             AlwaysFiltered(), rec, "tw_x", rw, {}, deadline
         )
     assert len(calls) == 3
+
+
+def test_final_user_reads_the_last_stage():
+    assert fb._final_user("FROM a\nUSER bob\nFROM b\nRUN x\n") == ""
+    assert fb._final_user("FROM a\nUSER root\nRUN x\nUSER agent\n") == "agent"
+
+
+def test_revalidate_rejects_a_rewrite_that_changes_the_students_user(tmp_path, monkeypatch):
+    """A rewrite that ends the image on another USER changes who the student is
+    while the reference and grader keep passing; it is refused before any probe."""
+    work, task = _pkg(tmp_path, SEED["instruction"], SEED["test_state_py"])
+    orig = dict(task, dockerfile="FROM ubuntu:24.04\nWORKDIR /app\n")
+    task = dict(task, dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nUSER nobody\n")
+    monkeypatch.setattr(fb, "daytona_probe", lambda *a, **k: pytest.fail("probed"))
+    verdict = fb.revalidate(work, task, orig, changed=["environment/Dockerfile"])
+    assert not verdict["ok"] and verdict["stage"] == "identity"
+    assert "unset to nobody" in verdict["why"]
