@@ -292,8 +292,15 @@ def _fake_revalidator(events: list) -> types.ModuleType:
             _kw["diagnostics"].update(exit_code=0, output_tail="verifier passed")
         return 1.0
 
+    async def as_agent(_sandbox, sb, _md):
+        return sb  # no row here names an agent_user
+
+    from torchtitan.experiments.rl.examples.tmax import harbor_env
+
     dr.boot_agent_sandbox = boot_agent_sandbox
     dr._Root = Root
+    dr.harbor_env = harbor_env  # boot_kwargs {} and no healthcheck for these rows
+    dr.as_agent = as_agent
     dr._start_entrypoint = _start_entrypoint
     dr.seed_workspace = seed_workspace
     dr.measure = measure
