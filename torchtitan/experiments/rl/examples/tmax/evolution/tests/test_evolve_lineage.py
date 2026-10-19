@@ -2176,29 +2176,44 @@ def test_an_accepted_rewrites_prediction_survives_the_fold_beside_what_came_next
     assert "Training on r1 after it: 0/12 solved (the signal being handled now" in summary
 
 
-def test_the_full_record_lists_every_runs_attempts_and_every_revision(tmp_path):
-    """record.md names, by absolute path, each run holding attempts at the task
-    (all revisions) and the task's revisions, lineage and rewrites; runs without
-    attempts at it are left out."""
+def test_the_full_record_indexes_every_attempt_and_draws_each_revisions_curve(tmp_path):
+    """record.md shows each revision's solve counts group by group, in group
+    order across runs; attempts.jsonl lists every attempt (training and
+    validation) with its path; a second rewrite opens only records added since."""
     root = layout.Root(tmp_path / "root")
     task = root.evolution.task("tw_a")
-    _package(task.rev(0), SEED)
-    _package(task.rev(1), SEED)
-    for name, n in (("tmax-9b--20260901-000000Z", 3), ("tmax-9b--20260902-000000Z", 0)):
-        run = root.run(name)
-        run.rollouts.mkdir(parents=True)
-        if n:
-            (run.rollouts / "tw_a").mkdir()
-            for i in range(n):
-                (run.rollouts / "tw_a" / f"g{i}-r0.jsonl").write_text("{}\n")
-    now = layout.RewriteDir(task.rewrites / "20260903-000000Z--harder")
 
-    assert od._write_record(root, task, now) == 1
+    def rec(run, group, idx, rev, reward):
+        path = root.run(run).rollout_record("tw_a", group, idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        head = {"rev": rev, "group": group, "rollout": idx, "reward": reward,
+                "finish_reason": "submit", "infra_failed": False}
+        path.write_text(json.dumps(head) + "\n{\"turn\": 1}\n")
+
+    a, b = "tmax-9b--20260901-000000Z", "tmax-9b--20260902-000000Z"
+    for g in (2, 10):
+        for i in range(2):
+            rec(a, g, i, 0, 0.0)
+    rec(b, 3, 0, 1, 1.0); rec(b, 3, 1, 1, 0.0)
+    rec(b, -5, 0, 1, 0.0)
+    root.run("tmax-9b--20260903-000000Z").rollouts.mkdir(parents=True)  # no attempts here
+
+    now = layout.RewriteDir(task.rewrites / "20260903-000000Z--harder")
+    assert od._write_record(root, task, now) == 7
     record = (now.traces / "record.md").read_text()
-    assert f"{root.run('tmax-9b--20260901-000000Z').rollouts / 'tw_a'} (3 attempts)" in record
-    assert "20260902" not in record
-    assert "(r0, r1)" in record and str(task.lineage) in record
+    assert "- r0 training: 0/2 0/2" in record
+    assert "- r1 training: 1/2" in record and "- r1 validation: 0/1" in record
     assert "not the revision" in record and "copy none of it into the task" in record
+    rows = layout.read_jsonl(now.traces / "attempts.jsonl")
+    assert {r["path"] for r in rows} >= {f"runs/{b}/validation_rollouts/tw_a/g-5-r0.jsonl"}
+    assert (root.path / rows[0]["path"]).is_file()
+
+    # Already indexed records are not opened again: make one unreadable.
+    root.run(a).rollout_record("tw_a", 2, 0).write_text("not json")
+    rec(b, 4, 0, 1, 1.0)
+    later = layout.RewriteDir(task.rewrites / "20260904-000000Z--harder")
+    assert od._write_record(root, task, later) == 8
+    assert "- r1 training: 1/2 1/1" in (later.traces / "record.md").read_text()
 
 
 def test_a_task_without_earlier_rewrites_gets_no_history(tmp_path):

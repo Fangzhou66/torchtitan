@@ -495,6 +495,10 @@ class Run:
         return self.path / "rollouts"
 
     @property
+    def validation_rollouts(self) -> Path:
+        return self.path / "validation_rollouts"
+
+    @property
     def signals(self) -> Path:
         return self.path / "signals"
 
@@ -503,7 +507,7 @@ class Run:
         return self.path / "advisories"
 
     def rollout_record(self, task: str, group: int, idx: int) -> Path:
-        root = self.path / "validation_rollouts" if group < 0 else self.rollouts
+        root = self.validation_rollouts if group < 0 else self.rollouts
         return root / safe(task) / f"g{group}-r{idx}.jsonl"
 
     def pane(self, task: str, group: int, idx: int) -> Path:
@@ -583,6 +587,13 @@ class TaskDir:
     @property
     def lineage(self) -> Path:
         return self.path / "lineage.jsonl"
+
+    @property
+    def attempts(self) -> Path:
+        """One line per recorded attempt at this task in any run of the root:
+        the record's header fields and its path. The loop extends it before
+        each rewrite, reading only records it has not indexed yet."""
+        return self.path / "attempts.jsonl"
 
     def rev(self, n: int) -> Path:
         return self.path / f"r{n}"

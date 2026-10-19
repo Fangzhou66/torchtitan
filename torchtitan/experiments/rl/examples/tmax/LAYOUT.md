@@ -70,6 +70,7 @@ $TRL_BASE/
 │   ├── outcomes/<run>.jsonl       completed outcomes; sampled by that run at each training step
 │   └── tasks/<task>/
 │       ├── lineage.jsonl         this task's rewrite and fold events
+│       ├── attempts.jsonl        every recorded attempt at this task, all runs: header fields + path
 │       ├── r0/ r1/ …             accepted revisions, package only; r0 is the seed, copied
 │       │                     from data/sources/<corpus>/tasks/<task> by the loop on the
 │       │                     task's first signal

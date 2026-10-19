@@ -441,44 +441,88 @@ def _stage_revision(run_dir: Path, signal: dict, out: Path, workspace) -> int:
     return len(lines)
 
 
-def _write_record(root: layout.Root, task: layout.TaskDir, rewrite: layout.RewriteDir) -> int:
-    """traces/record.md: where this task's full record lives in the experiment
-    root, for the author to read directly when traces/ is not enough -- every
-    run's attempts at it (all revisions, all groups), every revision's package
-    and the lineage. Paths only: nothing is copied, and the author reads what
-    its question needs. Under traces/, so the blind verifier is never told
-    where the hidden solutions sit. Returns the number of runs listed."""
-    runs = []
+ATTEMPT_FIELDS = ("rev", "group", "rollout", "reward", "finish_reason", "infra_failed")
+
+
+def _index_attempts(root: layout.Root, task: layout.TaskDir) -> list[dict]:
+    """task.attempts brought up to date and returned: one line per attempt
+    record at this task in any run of the root, training and validation. Only
+    records not indexed yet are opened, and only their header line: on a FUSE
+    root every file read is a round trip, and a task gathers thousands."""
+    index = layout.read_jsonl(task.attempts)
+    seen = {e["path"] for e in index}
+    fresh = []
     for run in root.run_dirs():
-        attempts = run.rollouts / layout.safe(task.task_id)
-        if attempts.is_dir():
-            runs.append((run, sum(1 for _ in attempts.glob("g*-r*.jsonl"))))
-    revs = task.revs()
+        for kind in (run.rollouts, run.validation_rollouts):
+            for path in sorted((kind / layout.safe(task.task_id)).glob("g*-r*.jsonl")):
+                rel = str(path.relative_to(root.path))
+                if rel in seen:
+                    continue
+                try:
+                    with path.open() as stream:
+                        head = json.loads(stream.readline())
+                except (OSError, ValueError):
+                    continue  # still being written; indexed on a later rewrite
+                fresh.append({"run": run.path.name, "path": rel,
+                              **{k: head.get(k) for k in ATTEMPT_FIELDS}})
+    if fresh:
+        index += fresh
+        task.path.mkdir(parents=True, exist_ok=True)
+        tmp = task.attempts.with_name(task.attempts.name + ".incoming")
+        tmp.write_text("".join(json.dumps(e) + "\n" for e in index))
+        os.replace(tmp, task.attempts)
+    return index
+
+
+def _write_record(root: layout.Root, task: layout.TaskDir, rewrite: layout.RewriteDir) -> int:
+    """traces/record.md and traces/attempts.jsonl: this task's full record, for
+    the author to read when the selection in traces/ leaves a question open.
+    record.md gives each revision's solve counts group by group, oldest first,
+    and where the attempts, packages and lineage sit in the root; attempts.jsonl
+    lists every attempt with its path, so the author opens only the ones it
+    needs. Under traces/, so the blind verifier is never told where the hidden
+    solutions sit. Returns the number of attempts indexed."""
+    index = _index_attempts(root, task)
+    groups: dict[tuple, list[dict]] = {}
+    for e in index:
+        if e.get("infra_failed") or e.get("group") is None:
+            continue
+        groups.setdefault((e.get("rev"), e["run"], e["group"]), []).append(e)
+    curves: dict = {}
+    for (rev, run, group), attempts in sorted(groups.items(), key=lambda g: g[0][1:]):
+        solved = sum(1 for a in attempts if (a.get("reward") or 0) >= 1.0)
+        kind = "validation" if group < 0 else "training"
+        curves.setdefault((rev, kind), []).append(f"{solved}/{len(attempts)}")
     lines = [
         f"# Full record of {task.task_id}",
         "",
-        "Read-only. Read whatever answers your question; write nothing here, "
-        "and copy none of it into the task.",
+        "Read-only. Read whatever answers your question; write nothing in the "
+        "root, and copy none of it into the task.",
         "",
-        "## Every attempt the student made at this task",
-        "One file per attempt, `g<group>-r<attempt>.jsonl` (r is the attempt's "
-        "index in its group, not the revision); line 1 is the header with `rev` "
-        "(which revision it ran), `group`, `reward`, `finish_reason`, then one "
-        "line per turn, as in traces/attempt-NN.jsonl.",
+        "## Solve counts per revision, group by group, oldest first",
     ]
-    lines += [f"- {run.path.name}: {run.rollouts / layout.safe(task.task_id)} ({n} attempts)"
-              for run, n in runs] or ["- none recorded"]
+    lines += [f"- r{rev} {kind}: {' '.join(c)}"
+              for (rev, kind), c in sorted(curves.items(), key=lambda x: (x[0][0] is None, x[0]))]
+    lines += ["- none recorded"] if not curves else []
     lines += [
         "",
+        "## Every attempt",
+        "traces/attempts.jsonl: one line per attempt -- run, group, rollout, rev, "
+        f"reward, finish_reason, infra_failed, and path, relative to {root.path}. "
+        "The record at that path is the full attempt: line 1 its header, then "
+        "one line per turn, as in traces/attempt-NN.jsonl. In the file name "
+        "g<group>-r<n>, n is the attempt's index in its group, not the revision.",
+        "",
         "## Every revision of the task",
-        f"- Packages: {task.path}/r<N>/ ({', '.join(f'r{n}' for n in revs) or 'none'})",
+        f"- Packages: {task.path}/r<N>/",
         f"- Rewrites with their notes, diffs and outcome: {task.path}/rewrites/",
         f"- Lineage, one line per revision: {task.lineage}",
         "",
     ]
     rewrite.traces.mkdir(parents=True, exist_ok=True)
     (rewrite.traces / "record.md").write_text("\n".join(lines))
-    return len(runs)
+    (rewrite.traces / "attempts.jsonl").write_text("".join(json.dumps(e) + "\n" for e in index))
+    return len(index)
 
 
 def _since_original(task: layout.TaskDir, current: dict | None, out: Path) -> str:
