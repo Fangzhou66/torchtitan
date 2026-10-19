@@ -89,8 +89,11 @@ cause, then act on that cause:
   it is part of this rewrite: state the requirement, fix the setup, or correct
   the check, and record every repair in run/repair.json as a list of objects
   with nonempty "defect", "evidence" (attempt file and turn, or the conflicting
-  file locations) and "change"; each repair is reported for review. Then
-  simplify the repaired task only as far as the attempts still call for.
+  file locations) and "change"; each repair is reported for review. The
+  attempts measured the task with its defect, so they cannot show what the
+  repaired task needs: the repair is this rewrite's change. Add help beside it
+  only for an obstacle that attempts which got past the defect still failed
+  at, at the weakest strength that addresses it.
 - Mechanics around the task: tool use, writing files through the terminal,
   exhausted time or context. Help with the mechanics and leave the task's
   decisions to the student.

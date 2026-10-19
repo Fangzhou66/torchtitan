@@ -308,6 +308,34 @@ def test_harder_defaults_to_real_guidance_with_repair_in_the_rewrite(
     assert ec._STUDENT_HARDER_GUIDANCE not in prompt
 
 
+def test_the_verifier_author_is_told_the_defects_the_author_repaired(tmp_path, monkeypatch):
+    """The author's test edits are discarded, so a repaired check would come
+    back from a verifier rewritten from the instruction alone; the verifier's
+    author gets each reported defect and its evidence, never the author's change."""
+    rw = _rewrite(tmp_path, monkeypatch)
+    sessions, checks = [], []
+    _wire(monkeypatch, sessions, checks)
+    wired = ec._run_codex
+
+    def author_reports_a_repair(run, cwd, prompt, resume=None):
+        out = wired(run, cwd, prompt, resume)
+        if (cwd / "solution").exists():
+            (cwd / "run" / "repair.json").write_text(json.dumps([{
+                "defect": "the HTTPS check rejects a served body when curl exits 56",
+                "evidence": "attempt-04.jsonl turn 5",
+                "change": "PRIVATE author draft wording"}]))
+        return out
+
+    monkeypatch.setattr(ec, "_run_codex", author_reports_a_repair)
+    ec.evolve_agentic(rw, dict(SEED), "harder")
+    verifier = next(x for x in sessions if x["role"] == "verifier")
+    assert "REPORTED DEFECTS" in verifier["prompt"]
+    reported = json.loads((Path(verifier["cwd"]) / "run/reported-defects.json").read_text())
+    assert reported == [{"defect": "the HTTPS check rejects a served body when curl exits 56",
+                         "evidence": "attempt-04.jsonl turn 5"}]
+    assert "PRIVATE" not in verifier["prompt"]
+
+
 def test_disabled_web_search_does_not_tell_the_author_to_search(tmp_path, monkeypatch):
     rw = _rewrite(tmp_path, monkeypatch)
     sessions, checks = [], []
