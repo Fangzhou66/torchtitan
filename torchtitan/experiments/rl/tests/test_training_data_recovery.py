@@ -55,7 +55,9 @@ def _controller(path, dataset, *, version=3):
         dump_dir=str(path), track_pending_inputs=True
     )
     controller._training_data_lock = asyncio.Lock()
-    controller._next_training_group_id = 0
+    controller._next_training_group_id = (
+        controller.training_lineage.next_unused_group_id
+    )
     controller._replay_training_inputs = deque()
     controller._trainer_policy_version = version
     controller._generator_policy_version = version
@@ -102,6 +104,49 @@ def test_pending_prompts_replay_before_the_restored_cursor(tmp_path):
         assert [work.sample.instance_id for work in new_buffer.work] == ["c", "d"]
         assert new_buffer.work[0].sample.lineage == buffer.work[2].sample.lineage
         assert restarted_dataset.state_dict()["stream_position"] == 4
+
+    asyncio.run(run())
+
+
+def test_fresh_run_issues_group_ids_from_zero(tmp_path):
+    async def run():
+        dataset = _dataset(tmp_path / "data.jsonl", list("abc"))
+        controller = _controller(tmp_path / "run", dataset)
+        assert controller.training_lineage.next_unused_group_id == 0
+        buffer = _Buffer(3)
+        await controller._data_input_loop(buffer)
+        assert [work.group_id for work in buffer.work] == [0, 1, 2]
+
+    asyncio.run(run())
+
+
+def test_resume_issues_new_group_ids_above_every_earlier_session(tmp_path):
+    async def run():
+        dataset = _dataset(tmp_path / "old.jsonl", list("abcdef"))
+        original = _controller(tmp_path / "run", dataset)
+        buffer = _Buffer(2)
+        await original._data_input_loop(buffer)
+        original._record_training_event("trained", lineage=buffer.work[0].lineage)
+        payload = await original._snapshot_training_data_state()
+        # Groups 2 and 3 are issued after the checkpoint, then the run crashes.
+        buffer.capacity = 4
+        await original._data_input_loop(buffer)
+        assert [work.group_id for work in buffer.work] == [0, 1, 2, 3]
+
+        restarted_dataset = _dataset(tmp_path / "new.jsonl", list("abcdef"))
+        restarted = _controller(tmp_path / "run", restarted_dataset)
+        assert restarted.training_lineage.next_unused_group_id == 4
+        restarted._restore_training_data_state(payload)
+        new_buffer = _Buffer(3)
+        await restarted._data_input_loop(new_buffer)
+        # Pending group 1 replays under its own id; new groups skip 2 and 3.
+        assert [work.group_id for work in new_buffer.work] == [1, 4, 5]
+        assert [work.sample.instance_id for work in new_buffer.work] == list("bcd")
+
+        # Without checkpointed controller data the counter still starts above.
+        plain_dataset = _dataset(tmp_path / "plain.jsonl", list("ab"))
+        plain = _controller(tmp_path / "run", plain_dataset)
+        assert plain._next_training_group_id == 6
 
     asyncio.run(run())
 

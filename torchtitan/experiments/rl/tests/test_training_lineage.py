@@ -112,3 +112,14 @@ def test_controller_heartbeat_closes_on_success_or_interruption(tmp_path, crash)
         )
 
     asyncio.run(run())
+
+
+def test_next_unused_group_id_ignores_validation_and_other_counters(tmp_path):
+    assert TrainingLineageRecorder(dump_dir=str(tmp_path)).next_unused_group_id == 0
+    recorder = TrainingLineageRecorder(dump_dir=str(tmp_path))
+    recorder.record_event("claimed", lineage={"group_id": 7, "task_id": "t"})
+    recorder.record_event("claimed", lineage={"group_id": -40, "task_id": "v"})
+    recorder.record_event("training_data_restored", next_group_id=99)
+    with recorder.events_path.open("a") as f:
+        f.write('{"event":"claimed","group_id":12')  # crash-truncated tail
+    assert TrainingLineageRecorder(dump_dir=str(tmp_path)).next_unused_group_id == 13

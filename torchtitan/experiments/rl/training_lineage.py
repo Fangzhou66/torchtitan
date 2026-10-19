@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -24,6 +25,8 @@ from torchtitan.experiments.rl.types import SampleLineage
 
 
 _SCHEMA_VERSION = 1
+# Training group ids in canonical_json events; validation ids are negative.
+_TRAINING_GROUP_ID = re.compile(rb'"group_id":(\d+)')
 
 
 def canonical_json(value: object) -> str:
@@ -55,6 +58,24 @@ def sample_payload(sample: object) -> object:
     return payload
 
 
+def max_recorded_group_id(events_path: Path) -> int:
+    """Highest non-negative ``group_id`` in an events file, or -1 if none."""
+    best = -1
+    if not events_path.exists():
+        return best
+    tail = b""
+    with events_path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            data = tail + chunk
+            cut = data.rfind(b"\n") + 1
+            tail = data[cut:]
+            for match in _TRAINING_GROUP_ID.finditer(data, 0, cut):
+                best = max(best, int(match.group(1)))
+    for match in _TRAINING_GROUP_ID.finditer(tail):
+        best = max(best, int(match.group(1)))
+    return best
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -79,6 +100,9 @@ class TrainingLineageRecorder:
         self.track_pending_inputs = track_pending_inputs
         self.pending_inputs: dict[int, object] = {}
         self._known_sample_revisions = self._read_known_sample_revisions()
+        # First training group id no earlier session of this run has used, so
+        # a resumed run never reissues ids recorded after its checkpoint.
+        self.next_unused_group_id = max_recorded_group_id(self.events_path) + 1
         # Background writer (enable_background_writes); None appends synchronously.
         self._write_queue: queue.Queue | None = None
         self._writer: threading.Thread | None = None

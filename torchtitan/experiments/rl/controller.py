@@ -855,7 +855,12 @@ class Controller(Configurable):
             self.training_lineage.enable_background_writes()
             atexit.register(self.training_lineage.close)
         self._training_data_lock = asyncio.Lock()
-        self._next_training_group_id = 0
+        self._next_training_group_id = self.training_lineage.next_unused_group_id
+        if self._next_training_group_id:
+            logger.info(
+                f"Earlier sessions used training group ids up to "
+                f"{self._next_training_group_id - 1}; new groups start above them"
+            )
         self._replay_training_inputs: deque[tuple[int, object]] = deque()
         self._rollout_attempt_id = ""
         if config.isolate_rollout_artifacts:
@@ -2338,7 +2343,11 @@ class Controller(Configurable):
                 "controller training data does not match the loaded checkpoint"
             )
         self._rollouter.load_training_data_state_dict(state["dataset"])
-        self._next_training_group_id = state["next_group_id"]
+        # Replayed pending inputs keep their ids; new groups skip every id an
+        # earlier session issued, including those after this checkpoint.
+        self._next_training_group_id = max(
+            state["next_group_id"], self.training_lineage.next_unused_group_id
+        )
         self.training_lineage.pending_inputs = dict(state["pending_inputs"])
         self._replay_training_inputs = deque(state["pending_inputs"])
         self._record_training_event(
