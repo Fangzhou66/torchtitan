@@ -168,6 +168,18 @@ class _TimeBudgetExhausted(RuntimeError):
     """The rollout's wall-clock budget ran out between Terminus-2 episodes."""
 
 
+class _FormatViolation(RuntimeError):
+    """A strict environment rule ended the episode (see AgentTask.strict_format).
+
+    Raised from ``_AdapterLLM.call`` rather than from the parser: Terminus-2 calls
+    the parser inside ``except Exception`` on its truncation path, which would
+    swallow it. The violation is recorded on the LLM and every later call raises
+    before generating, so the violating turn is the trajectory's last. Harbor's
+    ``_query_llm`` retries on any exception; the raise is sticky, so the retries
+    end the same way without a model call, and ``run()`` only has try/finally.
+    """
+
+
 class _AdapterLLM:
     """Terminus-2's LLM seam, backed by ``AnthropicAdapter.complete`` in-process.
 
@@ -185,6 +197,7 @@ class _AdapterLLM:
         turn_max_tokens: int,
         deadline: float | None = None,
         context_warn_frac: float = 0.0,
+        strict_truncation: bool = False,
     ) -> None:
         self._adapter = adapter
         self._session_id = session_id
@@ -209,6 +222,22 @@ class _AdapterLLM:
         # parses it once more for warnings, which _CountingParser then labels.
         self.truncated_turns = 0
         self.last_truncated_text: str | None = None
+        # Strict rules (AgentTask.strict_format / strict_truncation). ``calls`` is
+        # the 1-based index of the latest model reply; a violation records its
+        # kind ("format" / "truncation"), category and turn, and the next call
+        # raises _FormatViolation instead of generating.
+        self._strict_truncation = strict_truncation
+        self.calls = 0
+        self.violation: str | None = None
+        self.violation_category: str | None = None
+        self.violation_turn = 0
+
+    def flag_violation(self, kind: str, category: str) -> None:
+        """Record that the latest reply broke a strict rule; the first one wins."""
+        if self.violation is None:
+            self.violation = kind
+            self.violation_category = category
+            self.violation_turn = self.calls
 
     def get_model_context_limit(self) -> int:
         return self._max_context
@@ -283,6 +312,11 @@ class _AdapterLLM:
             OutputLengthExceededError,
         )
 
+        if self.violation is not None:
+            raise _FormatViolation(
+                f"{self.violation} rule broken on turn {self.violation_turn} "
+                f"({self.violation_category}) for {self._session_id}"
+            )
         if self._deadline is not None and time.monotonic() >= self._deadline:
             raise _TimeBudgetExhausted(
                 f"time budget spent before an episode for {self._session_id}"
@@ -302,6 +336,7 @@ class _AdapterLLM:
             raise _AdapterExhausted(
                 f"adapter returned no completion for {self._session_id}"
             )
+        self.calls += 1
         text = "".join(
             block.get("text", "")
             for block in (reply.get("content") or [])
@@ -345,6 +380,14 @@ class _AdapterLLM:
             if not at_context_wall:
                 self.truncated_turns += 1
                 self.last_truncated_text = text
+                if self._strict_truncation:
+                    # Strict truncation rule: the capped turn (already captured
+                    # by the adapter) ends the episode, with no salvage or re-ask.
+                    self.flag_violation("truncation", "truncated")
+                    raise _FormatViolation(
+                        f"turn {self.calls} hit the generation cap after "
+                        f"{out_tok} tokens for {self._session_id}"
+                    )
                 raise OutputLengthExceededError(
                     f"turn hit the generation cap after {out_tok} tokens "
                     f"for {self._session_id}",
@@ -381,11 +424,18 @@ class _CountingParser:
 
     Each counted turn also gets one ``FORMAT_ERROR_CATEGORIES`` label, and the
     streak / repeat counters go into ``breakdown()``.
+
+    With ``strict_format`` a turn the parser rejects (a non-empty ``error``, the
+    case Terminus-2 answers with "Previous response had parsing errors") flags a
+    violation on ``llm``, which ends the episode before the next model call.
+    Warning-only turns (empty commands, silent no-op) do not, and neither does
+    re-parsing a capped turn's text, which the truncation rule owns.
     """
 
-    def __init__(self, inner: Any, llm: Any = None) -> None:
+    def __init__(self, inner: Any, llm: Any = None, strict_format: bool = False) -> None:
         self._inner = inner
         self._llm = llm
+        self._strict_format = strict_format
         self.format_errors = 0
         self.completion_signals = 0
         self.categories = dict.fromkeys(FORMAT_ERROR_CATEGORIES, 0)
@@ -414,11 +464,13 @@ class _CountingParser:
         self.replies += 1
         self.repeat_turns += repeat
         self._prev = text
+        category = "other"
         if not getattr(result, "commands", None) and not getattr(
             result, "is_task_complete", False
         ):
+            category = self._classify(content, text, result, repeat)
             self.format_errors += 1
-            self.categories[self._classify(content, text, result, repeat)] += 1
+            self.categories[category] += 1
             self._streak += 1
             self.max_streak = max(self.max_streak, self._streak)
             if not self._acted:
@@ -426,6 +478,13 @@ class _CountingParser:
         else:
             self._streak = 0
             self._acted = True
+        if (
+            self._strict_format
+            and self._llm is not None
+            and getattr(result, "error", None)
+            and content != self._llm.last_truncated_text
+        ):
+            self._llm.flag_violation("format", category)
         return result
 
     def _classify(self, content: Any, text: str, result: Any, repeat: bool) -> str:
@@ -864,6 +923,8 @@ async def terminus_agent(
     format_errors = 0
     format_breakdown: dict[str, int] = {}
     finish_reason = "unknown"
+    violation_category: str | None = None
+    violation_turn = 0
     agent = None
     parser: _CountingParser | None = None
     llm: _AdapterLLM | None = None
@@ -904,6 +965,7 @@ async def terminus_agent(
                 turn_max_tokens=_TURN_MAX_TOKENS,
                 deadline=deadline,
                 context_warn_frac=_CONTEXT_WARN_FRAC,
+                strict_truncation=task.strict_truncation,
             )
             agent._llm = llm
             env.context_notice = llm.context_notice
@@ -918,7 +980,9 @@ async def terminus_agent(
             else:
                 if isinstance(inner_parser, TerminusXMLPlainParser):
                     inner_parser = SafeTerminusXMLParser()
-                parser = _CountingParser(inner_parser, llm=llm)
+                parser = _CountingParser(
+                    inner_parser, llm=llm, strict_format=task.strict_format
+                )
                 agent._parser = parser
             _count_subagent_calls(agent, llm)
             context = AgentContext()
@@ -962,6 +1026,12 @@ async def terminus_agent(
             else:
                 finish_reason = "stopped_early"
             submitted = finish_reason == "submit"
+        except _FormatViolation:
+            # A rejected turn raises from the next episode's model call, which
+            # never produced a turn; a capped turn raises within its own episode.
+            turns = _episodes(agent)
+            if llm is not None and llm.violation == "format":
+                turns = max(0, turns - 1)
         except _TimeBudgetExhausted:
             turns = _episodes(agent)
             finish_reason = "hit_time_budget"
@@ -998,6 +1068,15 @@ async def terminus_agent(
             # rollout unscored. An agent/runtime error is not a wrong answer.
             raise
         finally:
+            # Also covers a violation on the last episode, where Terminus-2
+            # returns normally without another model call to raise from.
+            if llm is not None and llm.violation is not None:
+                finish_reason = (
+                    "truncated" if llm.violation == "truncation" else "format_error"
+                )
+                submitted = False
+                violation_category = llm.violation_category
+                violation_turn = llm.violation_turn
             if parser is not None:
                 format_errors = parser.format_errors
                 format_breakdown = parser.breakdown(
@@ -1020,6 +1099,8 @@ async def terminus_agent(
         format_errors=format_errors,
         format_breakdown=format_breakdown,
         finish_reason=finish_reason,
+        violation_category=violation_category,
+        violation_turn=violation_turn,
         exec_trace=env.exec_trace,
         # The pane lives in the sandbox, which is still up when this returns;
         # the rollouter reads it if this run collects transcripts.

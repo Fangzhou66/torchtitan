@@ -150,7 +150,18 @@ _FINISH_REASONS = (
     "stopped_early",
     "terminal_exited",
     "error",
+    # The agent filled its own sandbox disk (see _run_agent_rollout); scored 0.
+    "disk_exhausted",
+    # A strict environment rule ended the episode on the offending turn, ungraded
+    # (TMaxRollouter.Config.strict_format / strict_truncation).
+    "format_error",
+    "truncated",
 )
+
+# Finish reasons that mean a strict rule, not the task, ended the episode. Such a
+# rollout trains with reward 0 but says nothing about how hard the task is, so it
+# is kept out of the evolution signal and is never shadow-graded.
+_RULE_TERMINATED_REASONS = frozenset({"format_error", "truncated"})
 
 # See TMaxRollouter.Config.reward_mode.
 _REWARD_MODES = frozenset({"sparse", "dense"})
@@ -431,6 +442,41 @@ def _shadow_grade_metrics(rollouts: list[Rollout]) -> list[m.Metric]:
         m.Metric("rollout/shadow_unsubmitted_pass_frac", m.Mean.from_list(shadow)),
         m.Metric("rollout/shadow_reward_mean", m.Mean.from_list(graded)),
     ]
+
+
+def _rule_termination_metrics(rollouts: list[Rollout]) -> list[m.Metric]:
+    """How often the strict rules ended a group's episodes, and on which turn.
+
+    ``*_terminated_frac`` and ``rule_terminated_opening_frac`` are over every
+    sibling; the turn mean is over the terminated ones only and is left out when
+    there are none.
+    """
+    n = len(rollouts)
+    reasons = [r.diagnostics.get("finish_reason") for r in rollouts]
+    turns = [
+        r.diagnostics.get("violation_turn", 0)
+        for r, reason in zip(rollouts, reasons, strict=True)
+        if reason in _RULE_TERMINATED_REASONS
+    ]
+    out = [
+        m.Metric(
+            "rollout/format_terminated_frac",
+            m.Mean(sum(reason == "format_error" for reason in reasons) / n),
+        ),
+        m.Metric(
+            "rollout/truncation_terminated_frac",
+            m.Mean(sum(reason == "truncated" for reason in reasons) / n),
+        ),
+        m.Metric(
+            "rollout/rule_terminated_opening_frac",
+            m.Mean(sum(turn == 1 for turn in turns) / n),
+        ),
+    ]
+    if turns:
+        out.append(
+            m.Metric("rollout/rule_terminated_turn_mean", m.Mean.from_list(turns))
+        )
+    return out
 
 
 def _timing_metrics(timings: list[Mapping[str, float]]) -> list[m.Metric]:
@@ -1131,6 +1177,27 @@ class TMaxRollouter(Rollouter):
         included (0 = off). No solved TB-2.1 trial graded past ~860 s, while hung
         graders ran to 1800 s and held the pass open."""
 
+        strict_format: bool = False
+        """Strict format rule for training rollouts: a turn the Terminus-2 parser
+        rejects (no ``<response>``, plain text, no ``<commands>``) ends the episode
+        at that turn with no grading, so it scores 0. The turn stays the last of
+        the trajectory and trains with the rollout's advantage; no re-ask is
+        generated. Warning-only turns (empty commands) do not trigger it. Such
+        rollouts are left out of the evolution signal. Only the terminus harness
+        honors it."""
+
+        strict_truncation: bool = False
+        """Strict truncation rule for training rollouts: a turn that hits the
+        per-turn generation cap ends the episode the same way, instead of
+        Terminus-2 salvaging or re-asking. Running out of context is unchanged."""
+
+        eval_strict_format: bool = False
+        """``strict_format`` for validation groups. Off by default so validation
+        scores stay comparable with upstream Terminus-2 numbers."""
+
+        eval_strict_truncation: bool = False
+        """``strict_truncation`` for validation groups; off by default."""
+
         length_penalty: bool = False
         """In-group length penalty on solved training rollouts (off by default).
 
@@ -1215,6 +1282,20 @@ class TMaxRollouter(Rollouter):
         self._eval_max_turns = config.eval_max_turns
         self._eval_agent_budget_cap_sec = config.eval_agent_budget_cap_sec
         self._eval_verifier_budget_cap_sec = config.eval_verifier_budget_cap_sec
+        self._strict_format = config.strict_format
+        self._strict_truncation = config.strict_truncation
+        self._eval_strict_format = config.eval_strict_format
+        self._eval_strict_truncation = config.eval_strict_truncation
+        if self._agent_name != "terminus" and (
+            self._strict_format
+            or self._strict_truncation
+            or self._eval_strict_format
+            or self._eval_strict_truncation
+        ):
+            logger.warning(
+                f"[tmax] strict format/truncation rules are set but TMAX_AGENT="
+                f"{self._agent_name} does not implement them; they have no effect"
+            )
         self._reward_mode = config.reward_mode
         self._evolution_harder_ratio = config.evolution_harder_ratio
         self._evolution_easier_ratio = config.evolution_easier_ratio
@@ -1343,6 +1424,7 @@ class TMaxRollouter(Rollouter):
                 m.Mean(1.0 if any(infra_failed_flags) else 0.0),
             ),
             *finish_metrics,
+            *_rule_termination_metrics(rollouts),
             *sandbox_metrics,
             *timing_metrics,
         ]
@@ -1629,7 +1711,14 @@ class TMaxRollouter(Rollouter):
         try:
             # is_scored (not "is not None"): an infra-failed sibling carries a NaN
             # reward, and statistics.pstdev raises on NaN under Python 3.12.
-            scored = [r for r in rollouts if is_scored(r)]
+            # A rollout a strict rule ended is a verdict on its format, not on the
+            # task: like an infra failure it is neither a solve nor an attempt.
+            scored = [
+                r
+                for r in rollouts
+                if is_scored(r)
+                and r.diagnostics.get("finish_reason") not in _RULE_TERMINATED_REASONS
+            ]
             rewards = [r.reward for r in scored]
             if len(rewards) < 2:
                 return
@@ -1781,6 +1870,12 @@ class TMaxRollouter(Rollouter):
         max_turns = None
         if group_id < 0 and self._eval_max_turns:
             max_turns = _UNCAPPED_TURNS if self._eval_max_turns < 0 else self._eval_max_turns
+        strict_format, strict_truncation = (
+            (self._eval_strict_format, self._eval_strict_truncation)
+            if group_id < 0
+            else (self._strict_format, self._strict_truncation)
+        )
+        violation_turn = 0
         started_at = time.monotonic()
         started_wall = time.time()
         # Sandbox exec wall-clock, filled by _RootSandbox as the agent runs;
@@ -1941,6 +2036,8 @@ class TMaxRollouter(Rollouter):
                             workdir=sample.workdir,
                             max_context_tokens=max_context_tokens,
                             max_turns=max_turns,
+                            strict_format=strict_format,
+                            strict_truncation=strict_truncation,
                         )
                     )
                     timing["agent_secs"] = time.monotonic() - agent_at
@@ -1954,6 +2051,7 @@ class TMaxRollouter(Rollouter):
                     fmt_errors = agent_run.format_errors
                     format_breakdown = dict(agent_run.format_breakdown)
                     finish_reason = agent_run.finish_reason
+                    violation_turn = agent_run.violation_turn
                     # The harness's own turn count, which is what decides
                     # finish_reason (a harness reports hit_max_turns off ITS counter).
                     # Reports otherwise show len(rollout.turns) -- the trainable turns
@@ -2034,8 +2132,12 @@ class TMaxRollouter(Rollouter):
                             reward = sparse_reward if dense is None else dense
                     else:
                         reward = 0.0
-                        if self._shadow_grade_unsubmitted and not sample.tmax.get(
-                            "separate_verifier"
+                        # A strict-rule ending is not a "did it solve it anyway"
+                        # question, so it costs no verifier run.
+                        if (
+                            self._shadow_grade_unsubmitted
+                            and not sample.tmax.get("separate_verifier")
+                            and finish_reason not in _RULE_TERMINATED_REASONS
                         ):
                             # Grade the sandbox as the agent left it, for the
                             # record only; the rollout keeps reward 0. A failed
@@ -2286,6 +2388,7 @@ class TMaxRollouter(Rollouter):
                 diagnostics={
                     "sampling_seed": sampling.seed,
                     "finish_reason": finish_reason,
+                    "violation_turn": violation_turn,
                     "agent_turns": agent_turns,
                     "format_errors": fmt_errors,
                     "format_breakdown": format_breakdown,

@@ -64,6 +64,17 @@ class AgentTask:
     pre_commands: list[str] | str | None = None
     """Setup commands some corpora ship (swe_r2e); None for the rest."""
 
+    strict_format: bool = False
+    """Strict format rule: a turn the harness's parser rejects ends the episode at
+    that turn, ungraded, so it scores 0. The rejected turn stays the last turn of
+    the trajectory and no re-ask is generated. Off keeps the harness's own
+    recovery. Only harnesses that track format errors (terminus) honor it."""
+
+    strict_truncation: bool = False
+    """Strict truncation rule: a turn that hits the per-turn generation cap ends
+    the episode the same way, instead of the harness salvaging or re-asking.
+    Hitting the context limit is unaffected."""
+
 
 # Labels for a counted format-error turn in ``AgentRun.format_breakdown``; a
 # harness that fills them in makes them sum to ``format_errors``.
@@ -105,7 +116,16 @@ class AgentRun:
 
     finish_reason: str = "unknown"
     """How the loop ended: submit / hit_max_turns / hit_time_budget /
-    stopped_early / error, or "unknown" when the harness does not track it."""
+    stopped_early / error, format_error / truncated when a strict rule ended it
+    (see ``AgentTask.strict_format``), or "unknown" when the harness does not
+    track it."""
+
+    violation_category: str | None = None
+    """The ``FORMAT_ERROR_CATEGORIES`` label of the turn that a strict rule ended
+    the episode on, or None when no rule ended it."""
+
+    violation_turn: int = 0
+    """1-based model turn on which a strict rule ended the episode; 0 if none."""
 
     exec_trace: list[dict] = field(default_factory=list)
     """Every sandbox command the harness ran, in order, as

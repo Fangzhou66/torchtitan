@@ -41,6 +41,8 @@ def _rollouter(*, shadow: bool) -> TMaxRollouter:
     r._max_context_tokens = 4096
     r._eval_max_context_tokens = 4096
     r._eval_max_turns = 0
+    r._strict_format = r._strict_truncation = False
+    r._eval_strict_format = r._eval_strict_truncation = False
     r._reward_mode = "sparse"
     r._read_ctrf = False
     r._shadow_grade_unsubmitted = shadow
