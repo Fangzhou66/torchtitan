@@ -510,8 +510,15 @@ async def restore_artifacts(
     *,
     into: str | None = None,
     empty: list[str] | None = None,
+    open_parents: list[str] | None = None,
 ) -> None:
     """Unpack ``collect_artifacts``' tar at the same paths in ``sb``.
+
+    ``open_parents``: the parent directories of the tar's file artifacts. Harbor
+    uploads a file artifact after ``ensure_dirs([parent], chmod=True)``, so the
+    parent exists and is 777 in the verifier; they get the same here. A verifier
+    that runs the agent's file as an unprivileged user can need to write beside
+    it. ``/`` itself is never opened.
 
     Harbor empties a directory artifact's target before uploading it
     (``empty_dirs([target], chmod=True)``): ``empty`` names the directory
@@ -528,6 +535,9 @@ async def restore_artifacts(
         targets.append(into)
         root = shlex.quote(into)
     prep = "".join(f"{_empty_dir_command(t)} && " for t in targets)
+    for parent in sorted({p for p in (open_parents or []) if p.strip("/")}):
+        q = shlex.quote(parent)
+        prep += f"mkdir -p {q} && chmod 777 {q} && "
     await sb.exec(
         f"{prep}tar -C {root} -xzf {_ARTIFACTS_TGZ} && rm -f {_ARTIFACTS_TGZ}",
         user="root",
@@ -556,14 +566,31 @@ async def _collect_excluding(sb: Sandbox, source: str, exclude: list[str]) -> by
 _MAIN_SERVICE = "main"
 
 
-def _dir_artifacts(data: bytes, sources: list[str]) -> list[str]:
-    """The declared ``sources`` that are directories in a tar rooted at ``/``."""
+def _tar_members(data: bytes) -> list[tarfile.TarInfo]:
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
-            dirs = {m.name.strip("/") for m in tar.getmembers() if m.isdir()}
+            return tar.getmembers()
     except (tarfile.TarError, OSError, EOFError):
         return []
+
+
+def _dir_artifacts(data: bytes, sources: list[str]) -> list[str]:
+    """The declared ``sources`` that are directories in a tar rooted at ``/``."""
+    dirs = {m.name.strip("/") for m in _tar_members(data) if m.isdir()}
     return [s for s in sources if s.strip("/") and s.strip("/") in dirs]
+
+
+def _file_artifact_parents(data: bytes, sources: list[str]) -> list[str]:
+    """The parent directories of the declared ``sources`` that are files (not
+    directories) in a tar rooted at ``/``: what Harbor's upload opens (777)."""
+    files = {m.name.strip("/") for m in _tar_members(data) if not m.isdir()}
+    return sorted(
+        {
+            posixpath.dirname("/" + s.strip("/"))
+            for s in sources
+            if s.strip("/") and s.strip("/") in files
+        }
+    )
 
 
 def separate_collect_budget_sec(sv: dict) -> int:
@@ -770,8 +797,12 @@ async def grade_separate(
                 await restore_artifacts(verifier_sb, data, into=into)
                 continue
             empty = _dir_artifacts(data, sources)
+            parents = _file_artifact_parents(data, sources)
             await restore_artifacts(
-                verifier_sb, data, **({"empty": empty} if empty else {})
+                verifier_sb,
+                data,
+                **({"empty": empty} if empty else {}),
+                **({"open_parents": parents} if parents else {}),
             )
         reward = await grade_tmax(
             verifier_sb,

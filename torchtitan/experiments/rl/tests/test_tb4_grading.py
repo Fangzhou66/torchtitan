@@ -404,6 +404,55 @@ def test_emptying_keeps_the_directory_a_shell_is_standing_in(tmp_path):
     assert not os.path.exists(tmp_path / "elsewhere")
 
 
+def test_a_file_artifacts_parent_is_opened_before_restore_as_harbor_does():
+    """Harbor uploads a file artifact after ensure_dirs([parent], chmod=True):
+    the parent is 777, so a verifier that runs the agent's file as an
+    unprivileged user can write beside it. Never "/"; directories are emptied."""
+    data = _tgz({"app/solution.py": b"x", "app/output": None, "app/output/m.pt": b"y",
+                 "top.txt": b"z"})
+    sources = ["/app/solution.py", "/app/output", "/top.txt", "/missing.txt"]
+    assert grading._file_artifact_parents(data, sources) == ["/", "/app"]
+    assert grading._file_artifact_parents(b"not a tar", sources) == []
+
+    class _Sb:
+        def __init__(self):
+            self.cmds = []
+
+        async def write_file(self, path, content, *, user="root"):
+            pass
+
+        async def exec(self, cmd, **kw):
+            self.cmds.append(cmd)
+            return 0, "", ""
+
+    sb = _Sb()
+    asyncio.run(grading.restore_artifacts(
+        sb, data, empty=["/app/output"], open_parents=["/", "/app", "/app"]))
+    cmd = sb.cmds[0]
+    assert cmd.startswith(grading._empty_dir_command("/app/output") + " && ")
+    assert "mkdir -p /app && chmod 777 /app && tar -C / -xzf " in cmd
+    assert cmd.count("chmod 777 /app &&") == 1 and "chmod 777 / " not in cmd
+
+
+def test_grade_separate_opens_file_artifact_parents(monkeypatch):
+    log: list = []
+    boot, _booted = _install(monkeypatch, log)
+    data = _tgz({"app/solution.py": b"x"})
+
+    async def collect(sb, paths):
+        return data
+
+    async def restore(sb, data, **kw):
+        log.append(("restore", kw))
+
+    monkeypatch.setattr(grading, "collect_artifacts", collect)
+    monkeypatch.setattr(grading, "restore_artifacts", restore)
+    sv = {"image": "v", "artifacts": ["/app/solution.py"]}
+    asyncio.run(grading.grade_separate(
+        _ComposeAgent(log), {"separate_verifier": sv}, workdir="/app", boot=boot))
+    assert ("restore", {"open_parents": ["/app"]}) in log
+
+
 def test_grade_separate_empties_the_directory_artifacts_it_restores(monkeypatch):
     log: list = []
     boot, _booted = _install(monkeypatch, log)
