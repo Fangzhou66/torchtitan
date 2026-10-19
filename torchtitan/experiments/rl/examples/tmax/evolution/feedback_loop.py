@@ -557,6 +557,18 @@ class EarlyProbes:
         return pair
 
 
+def _final_user(dockerfile: str | None) -> str:
+    """The USER a Dockerfile's last stage ends on ("" when it sets none)."""
+    user = ""
+    for line in (dockerfile or "").splitlines():
+        words = line.strip().split()
+        if words and words[0].upper() == "FROM":
+            user = ""
+        elif len(words) >= 2 and words[0].upper() == "USER":
+            user = words[1]
+    return user
+
+
 def revalidate(
     work: Path,
     task: dict,
@@ -621,6 +633,19 @@ def revalidate(
     # verifier demand a file the task never names passed the oracle (the
     # reference solution knows the name) and then failed every rollout.
     # That was the instruction-only fast path's audit, never applied here.
+    # The student's identity is the seed's: a rewrite that ends the image on
+    # another USER changes who the student is while the reference and the
+    # grader keep passing as before, so the task breaks only in training.
+    if orig is not None and _final_user(task.get("dockerfile")) != _final_user(
+        orig.get("dockerfile")
+    ):
+        return {
+            "ok": False,
+            "stage": "identity",
+            "why": "the image's final USER changed from "
+            f"{_final_user(orig.get('dockerfile')) or 'unset'} to "
+            f"{_final_user(task.get('dockerfile')) or 'unset'}",
+        }
     dark = new_dark_paths(work, task, orig) if orig is not None else []
     # Static, so it costs nothing to ask before the probe; reported with
     # whichever failure comes first, so one repair round sees everything.

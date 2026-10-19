@@ -359,9 +359,12 @@ knows the check used to be stronger.
 make a failed fetch fail loudly: non-zero exit, the error on stderr, no silent
 fallback. No credentials, nothing that only works through a proxy.
 
-**If the container cannot build or a tool is missing**, say so rather than coding
-around it: write `BLOCKED: <reason>` to `run/verdict.txt` and stop. A task that
-only passes because the solution avoided the environment is not a task.
+**If the container cannot build or a tool is missing**, fix the environment --
+the Dockerfile, the setup -- rather than coding around it in the solution: a
+task that only passes because the solution avoided the environment is not a
+task. Write `BLOCKED: <reason>` to `run/verdict.txt` and stop only when the
+platform itself fails (the sandbox does not start, the network is down) and
+nothing in the package can fix it.
 
 ## Finishing
 

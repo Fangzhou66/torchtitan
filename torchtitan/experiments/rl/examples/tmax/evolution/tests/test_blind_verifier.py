@@ -794,3 +794,11 @@ def test_no_control_is_built_below_float_precision():
         assert "parser-precision controls" not in text
     probes = ec.VERIFIER_SPEC.with_name("independent_verifier_probes.md").read_text()
     assert "the wrong value exceeds the error allowed" in probes
+
+
+def test_an_environmental_failure_is_fixed_in_the_environment_not_blocked():
+    """The oracle-repair job fixes a missing tool or a leftover lock in the Dockerfile
+    or setup; BLOCKED is only for a platform failure the package cannot fix."""
+    job = " ".join(ec._ORACLE_AGENTS_MD.split())
+    assert "fix the environment it comes from" in job
+    assert "only when the platform itself fails" in job

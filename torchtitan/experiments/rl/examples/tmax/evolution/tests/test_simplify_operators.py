@@ -135,6 +135,9 @@ def test_prompt_states_the_goal_the_costs_and_the_general_rules():
     # Guidance is checked against what the reference actually computes.
     assert "Apply your guidance literally" in text
     assert "BLOCKED: invalid_signal:" in text
+    flat = " ".join(text.split())
+    assert "only when no scored attempt with its trace remains" in flat
+    assert "was scored and failed like any other" in flat
     assert 'written as "k of n"' in text
 
 
@@ -143,3 +146,9 @@ def test_a_repair_is_the_rewrites_only_change():
     p = " ".join(so.prompt("vague").split())
     assert "the repair is this rewrite's only change" in p
     assert "the repaired task is measured before any help is added" in p
+
+
+def test_an_all_failed_task_gets_a_hint_not_a_give_up():
+    p = " ".join(so.prompt("vague").split())
+    assert "gives a hint, not up" in p
+    assert "only when the task cannot be made valid here" in p
