@@ -2201,7 +2201,7 @@ def test_the_full_record_indexes_every_attempt_and_draws_each_revisions_curve(tm
     now = layout.RewriteDir(task.rewrites / "20260903-000000Z--harder")
     assert od._write_record(root, task, now) == 7
     record = (now.traces / "record.md").read_text()
-    assert "- r0 training: 0/2 0/2" in record
+    assert "- r0 training: 0/2 x2" in record
     assert "- r1 training: 1/2" in record and "- r1 validation: 0/1" in record
     assert "not the revision" in record and "copy none of it into the task" in record
     rows = layout.read_jsonl(now.traces / "attempts.jsonl")

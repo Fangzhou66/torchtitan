@@ -474,6 +474,17 @@ def _index_attempts(root: layout.Root, task: layout.TaskDir) -> list[dict]:
     return index
 
 
+def _runs_of(counts: list[str]) -> str:
+    """"0/16 x3 1/16 0/16": consecutive equal group results written once."""
+    out: list[list] = []
+    for c in counts:
+        if out and out[-1][0] == c:
+            out[-1][1] += 1
+        else:
+            out.append([c, 1])
+    return " ".join(c if n == 1 else f"{c} x{n}" for c, n in out)
+
+
 def _write_record(root: layout.Root, task: layout.TaskDir, rewrite: layout.RewriteDir) -> int:
     """traces/record.md and traces/attempts.jsonl: this task's full record, for
     the author to read when the selection in traces/ leaves a question open.
@@ -501,7 +512,7 @@ def _write_record(root: layout.Root, task: layout.TaskDir, rewrite: layout.Rewri
         "",
         "## Solve counts per revision, group by group, oldest first",
     ]
-    lines += [f"- r{rev} {kind}: {' '.join(c)}"
+    lines += [f"- r{rev} {kind}: {_runs_of(c)}"
               for (rev, kind), c in sorted(curves.items(), key=lambda x: (x[0][0] is None, x[0]))]
     lines += ["- none recorded"] if not curves else []
     lines += [
