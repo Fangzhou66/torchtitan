@@ -35,11 +35,11 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, MISSING, replace
 from pathlib import Path
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.examples.tmax import layout
+from torchtitan.experiments.rl.examples.tmax import harbor_env, layout
 from torchtitan.experiments.rl.training_lineage import canonical_json, content_revision
 from torchtitan.experiments.rl.types import SampleLineage
 
@@ -114,6 +114,41 @@ class TMaxSample:
     lineage: SampleLineage | None = field(default=None, compare=False)
     """Per-yield identity; excluded from equality because it is not task content."""
 
+    boot_kwargs: dict = field(default_factory=dict)
+    """Extra ``boot_agent_sandbox`` keywords from a Terminal-Bench 4 row that
+    declares them (a GPU in its region, a docker-compose project); see
+    ``harbor_env.boot_kwargs``. Empty for every other row, which therefore boots
+    exactly as before."""
+
+    healthcheck: dict | None = None
+    """Harbor ``[environment].healthcheck``, run before the agent. None = none."""
+
+    agent_user: str = ""
+    """The non-root user a TB4 image declares; the agent runs as it while the
+    harness keeps root. "" = the agent runs as root, as on every other row."""
+
+    def __setstate__(self, state) -> None:
+        """Unpickle, filling the fields a pickle older than them does not carry.
+
+        A frozen slots dataclass pickles as the list of its field values in
+        field order. A sample pickled before ``boot_kwargs`` / ``healthcheck`` /
+        ``agent_user`` existed (a controller checkpoint's pending groups,
+        ``SWE_CKPT_CONTROLLER_DATA=1``) has a shorter list, and the dataclass's
+        own ``__setstate__`` would leave those slots unset: reading one raises
+        AttributeError, and so does ``asdict`` in the lineage recorder. They get
+        their defaults instead, which is what such a row parses to today."""
+        values = list(state)
+        for i, f in enumerate(fields(self)):
+            if i < len(values):
+                value = values[i]
+            elif f.default is not MISSING:
+                value = f.default
+            elif f.default_factory is not MISSING:
+                value = f.default_factory()
+            else:
+                raise TypeError(f"TMaxSample pickle lacks required field {f.name!r}")
+            object.__setattr__(self, f.name, value)
+
 
 def _parse_sample_row(row: dict) -> TMaxSample:
     """One jsonl row -> TMaxSample; shared by __init__ and hot reload so a
@@ -161,6 +196,9 @@ def _parse_sample_row(row: dict) -> TMaxSample:
         or _coerce_prompt(row.get("prompt")),
         tmax=tmax,
         rev=int(md.get("rev") or 0),
+        boot_kwargs=harbor_env.boot_kwargs(md),
+        healthcheck=md.get("healthcheck") or None,
+        agent_user=md.get("agent_user") or "",
     )
 
 

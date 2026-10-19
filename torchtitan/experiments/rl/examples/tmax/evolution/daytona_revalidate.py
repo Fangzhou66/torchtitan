@@ -88,8 +88,9 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- configuration, not log
         "copied out of the repository, set PYTHONPATH to a checkout instead. "
         f"({exc})"
     ) from exc
-from torchtitan.experiments.rl.examples.tmax import layout  # noqa: E402
+from torchtitan.experiments.rl.examples.tmax import harbor_env, layout  # noqa: E402
 from torchtitan.experiments.rl.examples.tmax.grading import (  # noqa: E402
+    _eval_timeout_sec,
     grade_separate,
     grade_tmax,
     seed_workspace,
@@ -321,11 +322,21 @@ async def _probe_once(
         cpu=box["cpu"],
         memory=box["mem_gb"],
         disk_gb=box["disk_gb"],
+        # A TB4 row's GPU/region or compose project, as the rollouter boots it.
+        **harbor_env.boot_kwargs(md),
     ) as sandbox:
         sb = _Root(sandbox)
         if md.get("entrypoint"):
             await _start_entrypoint(sb, md["entrypoint"], workdir=workdir)
         await seed_workspace(sb, tmax)
+        await harbor_env.run_healthcheck(sb, md.get("healthcheck"))
+        # The reference runs where the agent would: as the image's own user when
+        # a TB4 row names one (uploads, measurement and grading stay root).
+        agent_sb = (
+            _Root(await harbor_env.enter_as_agent_user(sandbox, md["agent_user"]))
+            if md.get("agent_user")
+            else sb
+        )
         # Which of the paths the caller asks about the untouched workspace
         # already has. A path the verifier requires that is here before anything
         # runs is a precondition the agent inherits; one that is not, and that
@@ -344,8 +355,15 @@ async def _probe_once(
             for f in sorted(sol_dir.rglob("*")):
                 if f.is_file():
                     rel = f.relative_to(sol_dir)
+                    # TB4 solutions ship binaries (images, PDFs, executables):
+                    # their bytes go up as they are, as Harbor's oracle uploads.
                     await sb.write_file(
-                        f"/solution/{rel}", f.read_text(errors="replace")
+                        f"/solution/{rel}",
+                        (
+                            f.read_bytes()
+                            if tmax.get("separate_verifier")
+                            else f.read_text(errors="replace")
+                        ),
                     )
             cmd = "bash /solution/solve.sh"
         else:
@@ -356,7 +374,7 @@ async def _probe_once(
         baseline = await capture_baseline(sb, tmax, workdir=workdir, timeout=120)
         t0 = time.time()
         execution = await run_reference(
-            sb,
+            agent_sb,
             cmd,
             solve_timeout,
             **({"actions": actions, "fast": fast} if actions is not None else {}),
@@ -369,9 +387,24 @@ async def _probe_once(
         if not execution["submitted"]:
             reward = 0.0
         elif tmax.get("separate_verifier"):
-            reward = await grade_separate(
-                sb, tmax, workdir=workdir, boot=boot_agent_sandbox, diagnostics=grading
-            )
+            # The task's declared verifier budget, floored as the rollouter
+            # floors it (_verifier_budget_sec), not the bare default.
+            declared = md.get("verifier_timeout_sec")
+            try:
+                reward = await grade_separate(
+                    sb,
+                    tmax,
+                    workdir=workdir,
+                    boot=boot_agent_sandbox,
+                    diagnostics=grading,
+                    timeout_sec=max(int(declared or 0), _eval_timeout_sec()),
+                )
+            except Exception as error:
+                # What collection and the verifier left travels with the error
+                # (environment_sweep merges `validation` into the result), so a
+                # failed grade can still be told apart: task or harness.
+                error.validation = {"grading": grading}
+                raise
         else:
             reward = await grade_tmax(
                 sb,

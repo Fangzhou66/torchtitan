@@ -795,6 +795,7 @@ these are the variables that touch them.
 | `TT_DAYTONA_CREATE_RETRIES` | `8` | `5` | create retries. |
 | `TT_DAYTONA_MEM_GB` | `2` | `4` | per-sandbox memory when the row declares none. |
 | `TT_DAYTONA_MAX_MEM_GB` | `8` | `8` | clamp on a row's declared request. |
+| `TT_DAYTONA_GPU_MAX_{CPU,MEM_GB,DISK_GB}` | unset | `16` / `192` / `512` | the same clamps for a sandbox with a GPU (TB4 rows that declare an H100, in their row's region); every other sandbox keeps the 4 vCPU / 8 GiB / 10 GiB ones. |
 | `TT_DAYTONA_DISK_GB` | `2` | `6` | per-sandbox disk. |
 | `TT_DAYTONA_HEARTBEAT_SEC` | `180` | `min(180, auto_stop*20)` | keeps a sandbox alive while the rollout waits on generation. |
 | `TT_DAYTONA_AUTO_DELETE_MIN` | `15` | `0` | cloud-side delete delay. |

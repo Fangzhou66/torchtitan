@@ -87,12 +87,17 @@ from typing import TYPE_CHECKING
 from renderers import Message, Renderer
 
 from torchtitan.experiments.rl.environment import TokenEnv
-from torchtitan.experiments.rl.examples.tmax import layout, rollout_record
+from torchtitan.experiments.rl.examples.tmax import (
+    harbor_env,
+    layout,
+    rollout_record,
+)
 from torchtitan.experiments.rl.examples.tmax.data import TMaxDataset, TMaxSample
 from torchtitan.experiments.rl.examples.tmax.env import TMaxEnv
 from torchtitan.experiments.rl.examples.tmax.grading import (
     ctrf_pass_fraction,
     grade_separate,
+    separate_collect_budget_sec,
     grade_tmax,
     read_ctrf_report,
     seed_workspace,
@@ -1822,6 +1827,9 @@ class TMaxRollouter(Rollouter):
                         "rollout": str(rollout_idx),
                         **({"run": run.name} if run is not None else {}),
                     },
+                    # A TB4 row's GPU/region or compose project; empty otherwise
+                    # (and absent on a sample unpickled from an older checkpoint).
+                    **getattr(sample, "boot_kwargs", {}),
                 ) as sandbox:
                     # Sandbox is up: shrink the guard back to the agent's own
                     # envelope. Boot-queue time must not eat the agent's budget --
@@ -1863,6 +1871,16 @@ class TMaxRollouter(Rollouter):
                     # seed-bearing tasks are unsolvable (inputs absent during rollout).
                     # Grading fixtures (tests/*) are uploaded later by grade_tmax.
                     await seed_workspace(root_sb, sample.tmax)
+                    healthcheck = getattr(sample, "healthcheck", None)
+                    if healthcheck:
+                        # Harbor waits for [environment].healthcheck before the
+                        # agent starts (TB4 kv-live-surgery). Its wait is setup,
+                        # not the agent's time: restart the guard after it.
+                        await harbor_env.run_healthcheck(root_sb, healthcheck)
+                        rollout_timeout.reschedule(
+                            asyncio.get_running_loop().time()
+                            + self._guard_for(budget_sec, verifier_sec)
+                        )
                     # INTEGRITY BASELINE (reaudit): digest the row's protected paths NOW -- after setup,
                     # before the agent's first action -- and keep the digests harness-side for grade_tmax
                     # to re-measure. A row without protected paths gets None and grades exactly as before.
@@ -1883,12 +1901,23 @@ class TMaxRollouter(Rollouter):
                             )
                     except Exception:  # noqa: BLE001 -- never fail a rollout on this
                         pass
+                    # A TB4 image that declares its own user: the agent runs as
+                    # that user, the harness (root_sb) stays root, as in Harbor.
+                    agent_user = getattr(sample, "agent_user", "")
+                    agent_sb = (
+                        _RootSandbox(
+                            await harbor_env.enter_as_agent_user(sandbox, agent_user),
+                            exec_timing,
+                        )
+                        if agent_user
+                        else root_sb
+                    )
                     failure_stage = "agent"
                     agent_at = time.monotonic()
                     exec_before_agent = exec_timing["exec_secs"]
                     agent_run = await get_agent(self._agent_name)(
                         AgentTask(
-                            sandbox=root_sb,
+                            sandbox=agent_sb,
                             instruction=sample.problem_statement,
                             session_id=rollout_id,
                             adapter=adapter,
@@ -1944,9 +1973,13 @@ class TMaxRollouter(Rollouter):
                             # The verifier sandbox boots now, on the agent's
                             # clock: give it the same boot allowance the agent's
                             # sandbox had.
+                            # Collecting the artifacts (collect hooks, stopping
+                            # main, per-artifact copies) and restoring them come
+                            # on top, which the guard's fixed slack does not cover.
                             rollout_timeout.reschedule(
                                 rollout_timeout.when()
                                 + self._SANDBOX_BOOT_ALLOWANCE_SEC
+                                + separate_collect_budget_sec(separate)
                             )
                             reward, ctrf = await self._grade_separate(
                                 sandbox,

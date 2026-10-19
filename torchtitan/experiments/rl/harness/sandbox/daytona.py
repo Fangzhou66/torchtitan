@@ -575,6 +575,10 @@ _eager_rebuild_daytona_models()
 # many-way boot fanout over a high-latency link times out the exec requests.
 _SHARED_CLIENT = None
 _SHARED_CLIENT_LOCK = None
+# One more shared client per region that a sandbox names itself (``target``),
+# keyed by (api_url, target). Only TB4's GPU rows name one: their quota lives in
+# a single region. Every other sandbox uses ``_SHARED_CLIENT`` as before.
+_TARGET_CLIENTS: dict[tuple[str | None, str], Any] = {}
 
 # Cap concurrent sandbox CREATES (held only during create/boot, not the rollout).
 # At high rollout concurrency every group tries to boot its siblings at once; the
@@ -608,7 +612,12 @@ def _deterministic_build_failure(error: Exception) -> bool:
     )
 
 
-async def _get_shared_client(*, api_key: str | None, api_url, target):
+async def _get_shared_client(
+    *, api_key: str | None, api_url, target, own_target: str | None = None
+):
+    """The process-wide client, or, with ``own_target``, the shared client for
+    that region. A sandbox that names no region gets the process-wide client
+    exactly as before, whatever ``DAYTONA_TARGET`` says."""
     global _SHARED_CLIENT, _SHARED_CLIENT_LOCK
     import asyncio
 
@@ -621,6 +630,12 @@ async def _get_shared_client(*, api_key: str | None, api_url, target):
     if _SHARED_CLIENT_LOCK is None:
         _SHARED_CLIENT_LOCK = asyncio.Lock()
     async with _SHARED_CLIENT_LOCK:
+        if own_target is not None:
+            key = (api_url, own_target)
+            if key not in _TARGET_CLIENTS:
+                cfg = DaytonaConfig(api_key=api_key, api_url=api_url, target=own_target)
+                _TARGET_CLIENTS[key] = AsyncDaytona(cfg)
+            return _TARGET_CLIENTS[key]
         if _SHARED_CLIENT is None:
             cfg = DaytonaConfig(api_key=api_key, api_url=api_url, target=target)
             _SHARED_CLIENT = AsyncDaytona(cfg)
@@ -653,6 +668,10 @@ class DaytonaSandbox:
                                                (default 10).
       ``TT_DAYTONA_MAX_CPU``               -- per-sandbox vCPU cap, the same way
                                                (default 4).
+      ``TT_DAYTONA_GPU_MAX_{CPU,MEM_GB,DISK_GB}`` -- the same three caps for a
+                                               sandbox with a GPU (defaults 16,
+                                               192 and 512, measured 2026-10-17
+                                               in region earth with an H100).
       ``TT_DAYTONA_CREATE_TIMEOUT``        -- snapshot-build/boot wait (default 900s).
       ``TT_DAYTONA_EXEC_TIMEOUT_MIN``       -- SDK request timeout floor; does not
                                                extend the command runtime limit.
@@ -689,11 +708,22 @@ class DaytonaSandbox:
         issue_tracker: SandboxIssueTracker | None = None,
         failure_diagnostics_dir: Path | None = None,
         labels: dict[str, str] | None = None,
+        gpu: int | None = None,
+        gpu_type: list[str] | None = None,
+        target: str | None = None,
+        network_block_all: bool = False,
         **_ignored,
     ) -> None:
         # Per-task overrides for vCPU / memory (GiB) / disk (GiB). None means fall
         # back to the TT_DAYTONA_{CPU,MEM_GB,DISK_GB} env defaults at create time.
-        for name, val in (("cpu", cpu), ("memory", memory), ("disk_gb", disk_gb)):
+        # gpu / gpu_type / target / network_block_all are TB4's (a row that
+        # declares them); at their defaults the create request is unchanged.
+        for name, val in (
+            ("cpu", cpu),
+            ("memory", memory),
+            ("disk_gb", disk_gb),
+            ("gpu", gpu),
+        ):
             if val is not None and (
                 isinstance(val, bool) or not isinstance(val, int) or val <= 0
             ):
@@ -704,6 +734,8 @@ class DaytonaSandbox:
             raise ValueError("daytona sandbox needs either an image or a dockerfile")
         if build_context and not dockerfile:
             raise ValueError("build_context is only meaningful with a dockerfile")
+        if gpu_type and not gpu:
+            raise ValueError("gpu_type is only meaningful with gpu")
         # Per-sandbox labels (task, group, rollout, run) so a sandbox in the
         # cloud console -- above all a BUILD_FAILED corpse, which the SDK's
         # list() returns without its Dockerfile -- can be traced back to what
@@ -723,6 +755,10 @@ class DaytonaSandbox:
         self.cpu = cpu
         self.mem = memory
         self.disk_gb = disk_gb
+        self.gpu = gpu
+        self.gpu_type = list(gpu_type) if gpu_type else None
+        self.target = target
+        self.network_block_all = bool(network_block_all)
         self.allocated_disk_gb: int | None = None
         self.issue_tracker = issue_tracker or SandboxIssueTracker()
         self._failure_diagnostics_dir = failure_diagnostics_dir
@@ -953,6 +989,16 @@ class DaytonaSandbox:
             api_key=_getenv(*self.api_key_env),
             api_url=_getenv(*self.api_url_env) or None,
             target=_getenv(*self.target_env) or None,
+            **({"own_target": self.target} if self.target else {}),
+        )
+        # A GPU sandbox has its own per-sandbox limits (measured in region earth
+        # with an H100: 16 vCPU / 192 GiB / 512 GiB); it is clamped to those the
+        # same way. Every other sandbox reads exactly the caps it read before.
+        cap_env = "TT_DAYTONA_GPU_MAX_" if self.gpu else "TT_DAYTONA_MAX_"
+        cap_default = (
+            {"CPU": "16", "MEM_GB": "192", "DISK_GB": "512"}
+            if self.gpu
+            else {"CPU": "4", "MEM_GB": "8", "DISK_GB": "10"}
         )
         cpu = (
             self.cpu
@@ -973,7 +1019,7 @@ class DaytonaSandbox:
         # `oom_suspect` flag already reports; a refused create measures nothing.
         # CPU likewise: Daytona refuses more than 4 vCPUs per sandbox at create,
         # and 8 of the 66 TB4 tasks declare 8 or 16.
-        cpu_cap = int(_getenv("TT_DAYTONA_MAX_CPU", default="4"))
+        cpu_cap = int(_getenv(cap_env + "CPU", default=cap_default["CPU"]))
         if cpu > cpu_cap:
             logger.warning(
                 "sandbox cpu request %d exceeds the per-sandbox cap (%d); "
@@ -982,7 +1028,7 @@ class DaytonaSandbox:
                 cpu_cap,
             )
             cpu = cpu_cap
-        mem_cap = int(_getenv("TT_DAYTONA_MAX_MEM_GB", default="8"))
+        mem_cap = int(_getenv(cap_env + "MEM_GB", default=cap_default["MEM_GB"]))
         if mem > mem_cap:
             logger.warning(
                 "sandbox memory request %d GiB exceeds the per-sandbox cap "
@@ -1000,7 +1046,7 @@ class DaytonaSandbox:
         # over 10 GiB ("Disk request 20GB exceeds maximum allowed per sandbox"),
         # and 18 of the 66 TB4 tasks declare 15-1000 GiB. At the cap a task that
         # really needs more fills its disk, which the disk issue kinds report.
-        disk_cap = int(_getenv("TT_DAYTONA_MAX_DISK_GB", default="10"))
+        disk_cap = int(_getenv(cap_env + "DISK_GB", default=cap_default["DISK_GB"]))
         if disk > disk_cap:
             logger.warning(
                 "sandbox disk request %d GiB exceeds the per-sandbox cap "
@@ -1059,13 +1105,24 @@ class DaytonaSandbox:
         create_kwargs = {}
         if ttl_min > 0:
             create_kwargs["ttl_minutes"] = ttl_min
-        if _getenv("TT_DAYTONA_EPHEMERAL", default="0") == "1":
+        # Daytona refuses a GPU sandbox that is not ephemeral (Harbor enforces
+        # the same), so a GPU row is ephemeral whatever TT_DAYTONA_EPHEMERAL says.
+        if self.gpu or _getenv("TT_DAYTONA_EPHEMERAL", default="0") == "1":
             create_kwargs["ephemeral"] = True
         else:
             create_kwargs["auto_delete_interval"] = auto_delete
+        if self.network_block_all:
+            create_kwargs["network_block_all"] = True
+        gpu_kwargs = {}
+        if self.gpu:
+            from daytona_api_client_async import GpuType  # type: ignore
+
+            gpu_kwargs["gpu"] = self.gpu
+            if self.gpu_type:
+                gpu_kwargs["gpu_type"] = [GpuType(name) for name in self.gpu_type]
         params = CreateSandboxFromImageParams(
             image=self._declarative_image() if self.dockerfile else self.image,
-            resources=Resources(cpu=cpu, memory=mem, disk=disk),
+            resources=Resources(cpu=cpu, memory=mem, disk=disk, **gpu_kwargs),
             labels={**self.labels, **HARNESS_LABELS},
             auto_stop_interval=auto_stop,
             **create_kwargs,
@@ -1541,7 +1598,9 @@ class DaytonaSandbox:
         )
         if user and user != "root":
             await self.exec(
-                f"chown {shlex.quote(user)}:{shlex.quote(user)} {shlex.quote(sandbox_path)}",
+                # "user:" is the user and its login group; "user:user" names a
+                # group that need not exist (nobody's is nogroup) and fails.
+                f"chown {shlex.quote(user)}: {shlex.quote(sandbox_path)}",
                 user="root",
                 check=False,
             )

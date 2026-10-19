@@ -303,6 +303,16 @@ def patch_rebench_test_sh(test_sh: str) -> str:
     return out
 
 
+def _harness_root(dockerfile: str, runtime_block: str) -> str:
+    """``USER root`` before the agent-runtime (tmux) step of a TB4 image that
+    ends on its own user: the install needs root and so does the harness, while
+    the row's ``agent_user`` drops the agent alone. prepare_tb2_1_data's
+    ``_TMUX_INSTALL`` does the same for benchmark rows."""
+    if dockerfile.endswith(runtime_block):
+        return dockerfile[: -len(runtime_block)] + "\nUSER root" + runtime_block
+    return dockerfile.rstrip("\n") + "\nUSER root\n"
+
+
 def to_row(
     task_dir: str,
     *,
@@ -358,9 +368,8 @@ def to_row(
         tb21 = _tmax_modules(
             "layout", "prepare_tmax_data", "prepare_rts_data", "prepare_tb2_1_data"
         )
-        sv, why = tb21.separate_verifier(
-            tomllib.loads(toml_path.read_text()), task_dir, build=True
-        )
+        cfg = tomllib.loads(toml_path.read_text())
+        sv, why = tb21.separate_verifier(cfg, task_dir, build=True)
         if why:
             raise ValueError(f"{ident}: {why}")
         if sv is not None:
@@ -368,6 +377,20 @@ def to_row(
             # which hold the tests a rewrite may have changed.
             tmax["fixtures"] = {}
             tmax["separate_verifier"] = sv
+            # ...and the agent half of what the task declares, as a benchmark
+            # row gets it (compose, healthcheck, agent_user, an agent GPU).
+            try:
+                harbor = tb21._harbor_fields(
+                    cfg, task_dir, tb21._DEFAULT_GPU_TARGET
+                )
+            except ValueError as e:
+                raise ValueError(f"{ident}: {e}") from None
+            md = row["metadata"]
+            md.update(harbor)
+            if harbor.get("agent_user") and md.get("dockerfile"):
+                md["dockerfile"] = _harness_root(
+                    md["dockerfile"], _rts_module()._AGENT_RUNTIME_BLOCK
+                )
     binding = Path(task_dir) / ".prebuilt-source.json"
     if binding.exists():
         captured = json.loads(binding.read_text())

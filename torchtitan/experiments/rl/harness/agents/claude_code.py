@@ -95,6 +95,8 @@ async def boot_agent_sandbox(
     issue_tracker: SandboxIssueTracker | None = None,
     failure_diagnostics_dir: Path | None = None,
     labels: dict[str, str] | None = None,
+    sandbox_options: dict | None = None,
+    compose: dict | None = None,
 ) -> AsyncIterator[Sandbox]:
     """Boot a fresh sandbox, optionally installing the Claude Code toolchain.
 
@@ -112,6 +114,12 @@ async def boot_agent_sandbox(
     ``build_context`` carries that Dockerfile's COPY sources as {relpath: base64}.
     ``labels`` are stamped on the cloud sandbox beside the harness's owner label,
     so a failed create can be traced back to its task from the console.
+
+    ``sandbox_options`` (gpu, gpu_type, target, network_block_all) and
+    ``compose`` (a docker-compose task, booted as ``DaytonaComposeSandbox`` with
+    ``image``/``dockerfile`` as its main service) come from a Terminal-Bench 4
+    row that declares them; a caller that passes neither boots exactly what it
+    booted before they existed.
     """
     global _BOOT_SEM
     if _BOOT_SEM is None:
@@ -121,17 +129,37 @@ async def boot_agent_sandbox(
     sb = None
     last_err: Exception | None = None
     for attempt in range(SWE_BOOT_RETRIES):
-        cand = make_sandbox(
-            image,
-            dockerfile=dockerfile,
-            build_context=build_context,
-            cpu=cpu,
-            memory=memory,
-            disk_gb=disk_gb,
-            issue_tracker=tracker,
-            failure_diagnostics_dir=failure_diagnostics_dir,
-            labels=labels,
-        )
+        if compose is not None:
+            from torchtitan.experiments.rl.harness.sandbox.compose import (
+                DaytonaComposeSandbox,
+            )
+
+            cand = DaytonaComposeSandbox(
+                **compose,
+                main_image=image,
+                main_dockerfile=dockerfile,
+                main_build_context=build_context,
+                cpu=cpu,
+                memory=memory,
+                disk_gb=disk_gb,
+                issue_tracker=tracker,
+                failure_diagnostics_dir=failure_diagnostics_dir,
+                labels=labels,
+                target=(sandbox_options or {}).get("target"),
+            )
+        else:
+            cand = make_sandbox(
+                image,
+                dockerfile=dockerfile,
+                build_context=build_context,
+                cpu=cpu,
+                memory=memory,
+                disk_gb=disk_gb,
+                issue_tracker=tracker,
+                failure_diagnostics_dir=failure_diagnostics_dir,
+                labels=labels,
+                **(sandbox_options or {}),
+            )
         num_issues_before = tracker.num_events
         try:
             async with _BOOT_SEM:
