@@ -136,3 +136,11 @@ def test_prompt_states_the_goal_the_costs_and_the_general_rules():
     assert "Apply your guidance literally" in text
     assert "BLOCKED: invalid_signal:" in text
     assert 'written as "k of n"' in text
+
+
+def test_a_repair_is_the_rewrites_change_and_help_beside_it_needs_evidence_past_it():
+    """Attempts measured the defective task, so a repair is measured alone;
+    help beside it only for an obstacle seen after the defect."""
+    p = " ".join(so.prompt("vague").split())
+    assert "the repair is this rewrite's change" in p
+    assert "attempts which got past the defect still failed at" in p

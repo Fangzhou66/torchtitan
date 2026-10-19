@@ -2775,6 +2775,7 @@ def _blind_verifier(
             if task.get("_role_files"):
                 prompt += _ROLE_PATCH_NOTE
             prompt += _instruction_change_note(seed_pkg, pkg)
+            prompt += _reported_defects(pkg, vpkg)
             prompt += _budget(timeout)
             # A simplification may only add guidance (a hint, a starter file) and
             # keep every requirement; the previous verifier then still checks the
@@ -3113,6 +3114,34 @@ def _notify_handoff(
         handoff(pre)
     except Exception as error:  # noqa: BLE001 -- an optimisation, never a verdict
         log.warning("handoff notification failed: %s", str(error)[:200])
+
+
+def _reported_defects(pkg: Path, vpkg: Path) -> str:
+    """Hand the verifier's author the defects the rewrite's author reported in
+    the inherited task, so a repair to a check is not lost: the author's own test
+    edits are discarded, and a verifier rewritten from the instruction alone
+    keeps the inherited check that caused the defect. Only the defect and its
+    evidence from the student's attempts travel -- nothing of the solution or of
+    the author's draft checker. A malformed declaration is left to the author's
+    side, where it fails the rewrite."""
+    try:
+        repairs = _read_repairs(pkg)
+    except (OSError, ValueError):
+        return ""
+    if not repairs:
+        return ""
+    (vpkg / "run" / "reported-defects.json").write_text(json.dumps(
+        [{"defect": r["defect"], "evidence": r["evidence"]} for r in repairs], indent=1) + "\n")
+    return (
+        "\n\nREPORTED DEFECTS. `run/reported-defects.json` lists defects the "
+        "task's author found in the inherited task, each with evidence from the "
+        "student's attempts. Where one says an inherited check rejects an answer "
+        "the instruction permits, judge that against the instruction yourself: if "
+        "the instruction permits the answer, correct the check so it accepts it "
+        "while still checking the required content -- the bound was never the "
+        "task's, so this is not widening; if it does not, keep the check. Either "
+        "way, record your decision on each in `run/verifier-changes.md`.\n"
+    )
 
 
 def _read_repairs(pkg: Path) -> list[dict]:
