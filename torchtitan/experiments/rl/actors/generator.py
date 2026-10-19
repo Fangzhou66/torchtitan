@@ -268,8 +268,10 @@ def _install_fp32_native_lm_head() -> None:
 
 def _refresh_fp32_lm_head_cache(model: torch.nn.Module) -> None:
     """Copy freshly loaded lm_head weights into the fp32 caches, in place so any
-    tensor already captured by a CUDA graph sees the new values."""
-    with torch.no_grad():
+    tensor already captured by a CUDA graph sees the new values. The cache is
+    first built inside vLLM's forward, under inference mode, so it is an
+    inference tensor and may only be updated in place under inference mode."""
+    with torch.inference_mode():
         for module in model.modules():
             w32 = getattr(module, "_tt_w32", None)
             if w32 is not None:
