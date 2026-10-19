@@ -1468,18 +1468,17 @@ def test_backlog_starts_the_newest_signal_first(tmp_path, monkeypatch) -> None:
     assert [h["signal"]["task"] for h in seen] == ["tw_b", "tw_a"]
 
 
-def _later_group(root, task, group, rewards, *, rev=0, age=120):
+def _later_group(root, task, group, rewards, *, rev=0, age=120, finish_reasons=None):
     """A finished group of `task` with these rewards and no signal, written
     `age` seconds ago."""
     run = root.run(RUN)
     for i, reward in enumerate(rewards):
         p = run.rollout_record(task, group, i)
-        rollout_record.write_record(
-            p,
-            {"task": task, "rev": rev, "run": RUN, "group": group,
-             "rollout": i, "reward": reward, "turns": 1},
-            [],
-        )
+        head = {"task": task, "rev": rev, "run": RUN, "group": group,
+                "rollout": i, "reward": reward, "turns": 1}
+        if finish_reasons is not None:
+            head["finish_reason"] = finish_reasons[i]
+        rollout_record.write_record(p, head, [])
         os.utime(p, (time.time() - age, time.time() - age))
 
 
@@ -1502,6 +1501,24 @@ def test_a_signal_is_resolved_by_a_later_mixed_group_of_its_revision(
     assert "g9 at rev 0 solved 1/2" in lines[resolved]["reason"]
     assert lines[waiting]["outcome"] == "handled"
     assert od.rebuild_status(root)["resolved"] == 1
+
+
+def test_a_group_the_trainer_could_not_judge_does_not_resolve_a_signal(
+    tmp_path, monkeypatch
+) -> None:
+    root = _root(tmp_path, monkeypatch)
+    _second_seed(root)
+    _signal(root, task="tw_a", group=7)
+    _signal(root, task="tw_b", group=8)
+    # One of two ended by the format rule: a single scored attempt.
+    _later_group(root, "tw_a", 9, [1.0, 0.0], finish_reasons=["completed", "format_error"])
+    # Two scored attempts, under a trainer floor of three.
+    _later_group(root, "tw_b", 10, [1.0, 0.0])
+    monkeypatch.setattr(od, "TRAINER_MIN_SCORED", 3)
+    seen = _stub(monkeypatch, status="kept", harder_mode="student", require_solution_growth=False)
+    result = od.run_round(root, workers=1)
+    assert result["resolved"] == 0 and result["handled"] == 2
+    assert sorted(h["signal"]["task"] for h in seen) == ["tw_a", "tw_b"]
 
 
 def test_rejected_rewrite_does_not_skip_a_new_signal(

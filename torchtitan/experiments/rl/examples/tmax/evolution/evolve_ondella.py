@@ -115,6 +115,11 @@ EASIER_MIN_SCORED_ATTEMPTS = int(
 )
 if EASIER_MIN_SCORED_ATTEMPTS < 2:
     raise ValueError("EVOLVE_EASIER_MIN_SCORED_ATTEMPTS must be at least 2")
+# The trainer's floor for a group to signal (SWE_EVOLUTION_MIN_SCORED), and the
+# endings it does not count as scored; _resolved_by must judge a group the same
+# way, or a group the trainer stayed silent on cancels a live request.
+TRAINER_MIN_SCORED = max(2, int(os.environ.get("SWE_EVOLUTION_MIN_SCORED", "2")))
+RULE_TERMINATED_REASONS = frozenset({"format_error", "truncated"})
 # What a seed copy leaves behind: backups of the pre-canary-strip instruction
 # are not part of the task and would show the agent text the pool deliberately
 # removed; the other two are records of an older loop's, not the package's.
@@ -1830,7 +1835,7 @@ def _groups(run: layout.Run, task: str, listing: dict) -> dict[int, list[Path]]:
 # once per loop rather than on every refill and status refresh.
 _RECORD_MTIMES: dict[Path, float] = {}
 _RECORD_HEADERS: dict[Path, dict] = {}
-_HEADER_KEYS = ("rev", "infra_failed", "reward")
+_HEADER_KEYS = ("rev", "infra_failed", "reward", "finish_reason")
 
 
 def _record_mtime(path: Path, now: float) -> float:
@@ -1890,9 +1895,10 @@ def _resolved_by(root: layout.Root, s: Signal, listing: dict) -> str | None:
                 h["reward"]
                 for h in headers
                 if not h.get("infra_failed")
+                and h.get("finish_reason") not in RULE_TERMINATED_REASONS
                 and math.isfinite(float(h.get("reward", math.nan)))
             ]
-            if len(scored) >= 2:
+            if len(scored) >= TRAINER_MIN_SCORED:
                 solved = sum(reward > 0 for reward in scored)
                 return (
                     f"{run.name} g{group} at rev {rev} solved {solved}/{len(scored)} "
