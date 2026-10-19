@@ -359,16 +359,33 @@ def _write_history(
             diff_text = _package_diff(base, result)
             (out / f"{name}.diff").write_text(diff_text)
             entry["diff"] = f"{name}.diff"
-        notes = [
-            f"## {rel}\n\n{(earlier.package / rel).read_text(errors='replace')}\n"
-            for rel in ("run/hardening.md", "run/simplify.json", "run/failure.txt")
-            if (earlier.package / rel).is_file()
-        ]
+        # An accepted rewrite's package is stripped and renamed by the fold;
+        # its notes were kept beside it (_keep_author_notes).
+        notes = []
+        for rel in AUTHOR_NOTES:
+            for path in (earlier.package / rel, earlier.notes / Path(rel).name):
+                if path.is_file():
+                    notes.append(f"## {rel}\n\n{path.read_text(errors='replace')}\n")
+                    break
         if notes:
             (out / f"{name}.notes.md").write_text("\n".join(notes))
             entry["notes"] = f"{name}.notes.md"
         lines.append(entry)
         texts[name] = diff_text
+    # What training measured on each accepted rewrite's result: the next
+    # rewrite's input measurement, or for the newest revision the signal being
+    # handled now (its attempts are this rewrite's traces/). This is what an
+    # author's prediction is checked against.
+    for entry in lines:
+        if entry.get("status") != "accepted" or entry.get("result_rev") is None:
+            continue
+        later = [e for e in lines if e.get("input_rev") == entry["result_rev"]]
+        if later and later[0].get("measured_on_input"):
+            entry["measured_next"] = later[0]["measured_on_input"]
+        elif current and current.get("rev") == entry["result_rev"]:
+            entry["measured_next"] = {
+                k: current.get(k) for k in ("run", "group", "rev", "solved", "total")
+            } | {"current_signal": True}
     if lines:
         (out / "index.jsonl").write_text("".join(json.dumps(e) + "\n" for e in lines))
     if lines:
@@ -422,6 +439,101 @@ def _stage_revision(run_dir: Path, signal: dict, out: Path, workspace) -> int:
         for idx, _, path in records:
             workspace.copy_input(path, out / "mixed" / f"g{group}-r{idx}.jsonl")
     return len(lines)
+
+
+ATTEMPT_FIELDS = ("rev", "group", "rollout", "reward", "finish_reason", "infra_failed")
+
+
+def _index_attempts(root: layout.Root, task: layout.TaskDir) -> list[dict]:
+    """task.attempts brought up to date and returned: one line per attempt
+    record at this task in any run of the root, training and validation. Only
+    records not indexed yet are opened, and only their header line: on a FUSE
+    root every file read is a round trip, and a task gathers thousands."""
+    index = layout.read_jsonl(task.attempts)
+    seen = {e["path"] for e in index}
+    fresh = []
+    for run in root.run_dirs():
+        for kind in (run.rollouts, run.validation_rollouts):
+            for path in sorted((kind / layout.safe(task.task_id)).glob("g*-r*.jsonl")):
+                rel = str(path.relative_to(root.path))
+                if rel in seen:
+                    continue
+                try:
+                    with path.open() as stream:
+                        head = json.loads(stream.readline())
+                except (OSError, ValueError):
+                    continue  # still being written; indexed on a later rewrite
+                fresh.append({"run": run.path.name, "path": rel,
+                              **{k: head.get(k) for k in ATTEMPT_FIELDS}})
+    if fresh:
+        index += fresh
+        task.path.mkdir(parents=True, exist_ok=True)
+        tmp = task.attempts.with_name(task.attempts.name + ".incoming")
+        tmp.write_text("".join(json.dumps(e) + "\n" for e in index))
+        os.replace(tmp, task.attempts)
+    return index
+
+
+def _runs_of(counts: list[str]) -> str:
+    """"0/16 x3 1/16 0/16": consecutive equal group results written once."""
+    out: list[list] = []
+    for c in counts:
+        if out and out[-1][0] == c:
+            out[-1][1] += 1
+        else:
+            out.append([c, 1])
+    return " ".join(c if n == 1 else f"{c} x{n}" for c, n in out)
+
+
+def _write_record(root: layout.Root, task: layout.TaskDir, rewrite: layout.RewriteDir) -> int:
+    """traces/record.md and traces/attempts.jsonl: this task's full record, for
+    the author to read when the selection in traces/ leaves a question open.
+    record.md gives each revision's solve counts group by group, oldest first,
+    and where the attempts, packages and lineage sit in the root; attempts.jsonl
+    lists every attempt with its path, so the author opens only the ones it
+    needs. Under traces/, so the blind verifier is never told where the hidden
+    solutions sit. Returns the number of attempts indexed."""
+    index = _index_attempts(root, task)
+    groups: dict[tuple, list[dict]] = {}
+    for e in index:
+        if e.get("infra_failed") or e.get("group") is None:
+            continue
+        groups.setdefault((e.get("rev"), e["run"], e["group"]), []).append(e)
+    curves: dict = {}
+    for (rev, run, group), attempts in sorted(groups.items(), key=lambda g: g[0][1:]):
+        solved = sum(1 for a in attempts if (a.get("reward") or 0) >= 1.0)
+        kind = "validation" if group < 0 else "training"
+        curves.setdefault((rev, kind), []).append(f"{solved}/{len(attempts)}")
+    lines = [
+        f"# Full record of {task.task_id}",
+        "",
+        "Read-only. Read whatever answers your question; write nothing in the "
+        "root, and copy none of it into the task.",
+        "",
+        "## Solve counts per revision, group by group, oldest first",
+    ]
+    lines += [f"- r{rev} {kind}: {_runs_of(c)}"
+              for (rev, kind), c in sorted(curves.items(), key=lambda x: (x[0][0] is None, x[0]))]
+    lines += ["- none recorded"] if not curves else []
+    lines += [
+        "",
+        "## Every attempt",
+        "traces/attempts.jsonl: one line per attempt -- run, group, rollout, rev, "
+        f"reward, finish_reason, infra_failed, and path, relative to {root.path}. "
+        "The record at that path is the full attempt: line 1 its header, then "
+        "one line per turn, as in traces/attempt-NN.jsonl. In the file name "
+        "g<group>-r<n>, n is the attempt's index in its group, not the revision.",
+        "",
+        "## Every revision of the task",
+        f"- Packages: {task.path}/r<N>/",
+        f"- Rewrites with their notes, diffs and outcome: {task.path}/rewrites/",
+        f"- Lineage, one line per revision: {task.lineage}",
+        "",
+    ]
+    rewrite.traces.mkdir(parents=True, exist_ok=True)
+    (rewrite.traces / "record.md").write_text("\n".join(lines))
+    (rewrite.traces / "attempts.jsonl").write_text("".join(json.dumps(e) + "\n" for e in index))
+    return len(index)
 
 
 def _since_original(task: layout.TaskDir, current: dict | None, out: Path) -> str:
@@ -510,6 +622,14 @@ def _history_summary(task_id: str, attempts: list[dict], texts: dict[str, str]) 
             f"\n## {e['rewrite']}: {e.get('job')} r{e.get('input_rev')}{produced}, "
             f"{e.get('status')}{' at ' + e['stage'] if e.get('stage') else ''}\n"
             f"- Training on r{e.get('input_rev')} before it: {measured(e)}\n"
+            + (
+                f"- Training on r{e['result_rev']} after it: "
+                f"{e['measured_next'].get('solved')}/{e['measured_next'].get('total')} solved"
+                + (" (the signal being handled now; its attempts are traces/)"
+                   if e["measured_next"].get("current_signal") else "")
+                + "; compare with the prediction in its notes\n"
+                if e.get("measured_next") else ""
+            )
             + (f"- Reason: {e['reason']}\n" if e.get("reason") else "")
             + (f"- Changed: {_diff_stat(texts.get(e['rewrite'], ''))}\n- Diff: {e['diff']}\n"
                if e.get("diff") else "- Changed: no package left to compare\n")
@@ -958,6 +1078,7 @@ def handle(
         n_history = _write_history(
             root, task, rewrite, strict_storage=workspace.is_local, current=d
         )
+        _write_record(root, task, rewrite)
         if n_history:
             log.info("%s history: %d earlier rewrites in traces/history", tid, n_history)
         parent_snapshot = None
@@ -1174,6 +1295,24 @@ def handle(
     return {"signal": sig, "rewrite": rewrite, "meta": meta, "status": status}
 
 
+# What a later rewrite of the task reads from an earlier one's run/: its
+# intent, its predicted solve count and the defects it repaired.
+AUTHOR_NOTES = ("run/hardening.md", "run/simplify.json", "run/repair.json", "run/failure.txt")
+
+
+def _keep_author_notes(package: Path) -> None:
+    """Copy the author's notes beside the package before a fold strips run/.
+
+    Without this an accepted rewrite's intent and prediction vanish, and the
+    next rewrite cannot compare that prediction with what was measured next.
+    """
+    notes = layout.RewriteDir(package.parent).notes
+    for rel in AUTHOR_NOTES:
+        if (package / rel).is_file():
+            notes.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(package / rel, notes / Path(rel).name)
+
+
 def strip_harness(pkg: Path) -> None:
     """Take out what the harness put in, before a package becomes a revision."""
     for name in ec.HARNESS:
@@ -1297,6 +1436,7 @@ def _prepare_fold_row(
     package: Path, input_line: str, meta: dict, policy_canary: dict
 ) -> dict:
     """Strip one package and build its row. Touches only that package."""
+    _keep_author_notes(package)
     strip_harness(package)
     # The directory is `package` now and `r<N>` once renamed, so the row's
     # identity is passed rather than read off the name; so is the hook, which

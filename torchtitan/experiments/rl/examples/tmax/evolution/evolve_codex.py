@@ -1752,7 +1752,10 @@ artifact it comes from (`package==version`, a repository at a commit, a URL
 with its sha256) in the Dockerfile, and confirm in `./sandbox exec` that the
 behavior the source describes happens here: the error, the wrong output, the
 crash. A library, tool, version or bug that does not exist upstream is not
-allowed, and neither is a vendored imitation of one.
+allowed, and neither is a vendored imitation of one. The environment holds the
+problem, never its fix: no patch, fixed release, backported file or note that
+names the fix goes into the image or the task's files; the fix lives only in
+the reference solution.
 
 Write `run/hardening.md` before editing the task: the sources by URL with the
 sentence of each that you rely on, the pinned artifacts, the reproduction
@@ -1763,9 +1766,16 @@ those attempts show.
 These are not hardening, whatever their effect on the solve rate: decoy files,
 a second candidate or stale copy to choose between, a log that contradicts a
 config, an extra edge-case clause for the input, stricter output formatting, a
-longer instruction. Keep the existing instruction's wording: removing what it
+longer instruction. Keep the original task's wording: removing what it
 already says is a withdrawal of help, not the real difficulty, and it mixes
-the two in the student's measured solve rate. State any new requirement the
+the two in the student's measured solve rate. Help that an earlier
+simplification of this task added (`traces/history/since-original.diff`) is
+not the original task's. If any of it hands the student the result the task
+asks for -- a value the checks expect, the exact output, the decisive step --
+withdrawing it whole is this rewrite's change, however much the attempts lean
+on it, and nothing new is added on top: a task that gives its answer away does
+not get harder by adding to it. Say in `run/hardening.md` what you withdrew.
+State any new requirement the
 way a user would, in a sentence or two -- the goal and the deliverable. Do not
 list the pitfalls; the agent meets them as error messages, logs and behavior
 in the environment, the way the real software presents them.
@@ -1795,7 +1805,10 @@ includes a parent path, compare that original task's files with the current
 package to identify the exact help or restriction that changed. Keep the
 reference copy and lineage record unchanged; both are checked after the session. Move toward
 mixed success by undoing the previous simplification as far as the attempts
-show they no longer need it. That simplification is the first candidate, not
+show they no longer need it. Help that hands the student the result the task
+asks for -- a value the checks expect, the exact output, the decisive step --
+is withdrawn whole even though the attempts rely on it: no simplification was
+allowed to give it. That simplification is the first candidate, not
 the limit: help that earlier simplifications added (`traces/history/since-original.diff`)
 and that these attempts no longer use -- never opened, never cited, or
 reproduced from their own knowledge before they read it -- is withdrawn in
@@ -3202,7 +3215,8 @@ def evolve_agentic(
                     "Search with your web tool to find candidate sources. Your shell "
                     "also has network access",
                 )
-                if HARDER_GUIDANCE == "real" and WEB_SEARCH
+                # "disabled" is a codex web_search value too: no tool, so no instruction to use it.
+                if HARDER_GUIDANCE == "real" and WEB_SEARCH not in ("", "disabled")
                 else _REAL_HARDER_GUIDANCE
                 if HARDER_GUIDANCE == "real"
                 else _STUDENT_HARDER_GUIDANCE,
@@ -3240,6 +3254,19 @@ def evolve_agentic(
             "them before editing: they show which changes already moved this task "
             "and how far, and which attempts failed and why. Do not copy any of it "
             "into the task.\n"
+        )
+
+    if job in ("harder", "easier") and (rewrite.traces / "record.md").is_file():
+        prompt += (
+            "\n\nTHE FULL RECORD\n"
+            "traces/record.md gives every revision's solve counts group by group "
+            "and says where this task's whole record sits in the experiment; "
+            "traces/attempts.jsonl lists every attempt the student made at it, in "
+            "every run and on every revision, with the path of its full record. "
+            "The rest of traces/ is a selection; when a question it leaves open "
+            "matters -- whether earlier help was used, where attempts on an older "
+            "revision failed -- open the records that answer it. They are "
+            "read-only, and none of it goes into the task.\n"
         )
 
     if job in ("harder", "easier") and task.get("_student_feedback"):

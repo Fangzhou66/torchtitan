@@ -175,14 +175,29 @@ def test_calibration_may_withdraw_unused_older_help_and_predicts_a_number():
     assert '("5 of 8")' in g
 
 
-def test_easier_keeps_the_core_decision_and_predicts_a_number():
-    """A simplification may not make the task's core decision for the student,
-    ranks help by the decisions it makes, and predicts a solved count."""
+def test_calibration_withdraws_a_handed_out_answer_even_when_attempts_rely_on_it():
+    """Sizing the withdrawal by what the attempts still use would keep a leaked
+    answer forever, since every attempt uses it."""
+    g = " ".join(ec._CALIBRATION_GUIDANCE.split())
+    assert "is withdrawn whole even though the attempts rely on it" in g
+
+
+def test_easier_scales_help_by_evidence_and_predicts_a_number():
+    """A simplification keeps as much of the task's decisions as the student
+    can learn from, chooses help on a strength ladder from the evidence, and
+    predicts a solved count."""
     p = so.prompt("vague")
-    assert "The retained skill includes the task's core decision" in p
-    assert "stronger than\na sentence naming a principle" in p
-    assert '("3 of 8")' in p
+    assert "Help comes in increasing strength" in p
+    assert "supplying part of the core decision is better than another rewrite" in p
+    assert 'written as "k of n"' in p
     assert "Prefer a strict subset of the help." not in so.CALIBRATION_GUIDANCE
+    # What the student could obtain itself is taught, not done for it.
+    assert "not by obtaining it for the student" in " ".join(p.split())
+
+
+def test_real_harder_keeps_the_upstream_fix_out_of_the_environment():
+    g = " ".join(ec._REAL_HARDER_GUIDANCE.split())
+    assert "The environment holds the problem, never its fix" in g
 
 
 def test_traces_spec_points_at_the_revision_contrast(tmp_path):
@@ -937,6 +952,7 @@ def test_simplify_codex_rewrites_in_place_and_keeps_the_session(
                     "change": "supply one fixture",
                     "restore": "remove the fixture",
                     "prediction": "A readable fixture permits transformation; another input search would refute this.",
+                    "expected": "4 of 12",
                     "evidence": [
                         {
                             "attempt": "attempt-01.jsonl",
@@ -1411,7 +1427,9 @@ def test_blind_verifier_is_told_how_the_instruction_changed(tmp_path):
 
 
 def test_easier_rewrites_every_sentence_of_a_narrowed_requirement():
-    assert "edit every sentence of\ninstruction.md that states or implies it" in so.prompt("vague")
+    assert "edit every sentence of instruction.md that states or implies it" in " ".join(
+        so.prompt("vague").split()
+    )
 
 
 def test_hardening_bisects_after_an_underpredicted_withdrawal():

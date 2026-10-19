@@ -298,10 +298,25 @@ def test_harder_defaults_to_real_guidance_with_repair_in_the_rewrite(
     prompt = sessions[0]["prompt"]
     assert "These tasks train an agent for real terminal work" in prompt
     assert "Search with your web tool" in prompt
-    assert "Keep the existing instruction's wording" in prompt
+    assert "Keep the original task's wording" in prompt
+    # Help a simplification added is not the original's: a handed-out answer is
+    # withdrawn, not kept while new difficulty is stacked on it.
+    assert "traces/history/since-original.diff" in prompt
+    assert "withdrawing it whole is this rewrite's change" in " ".join(prompt.split())
     assert "These are not hardening" in prompt
     assert "Record every repair in `run/repair.json`" in prompt
     assert ec._STUDENT_HARDER_GUIDANCE not in prompt
+
+
+def test_disabled_web_search_does_not_tell_the_author_to_search(tmp_path, monkeypatch):
+    rw = _rewrite(tmp_path, monkeypatch)
+    sessions, checks = [], []
+    _wire(monkeypatch, sessions, checks)
+    monkeypatch.setattr(ec, "WEB_SEARCH", "disabled")
+    ec.evolve_agentic(rw, dict(SEED), "harder")
+    prompt = sessions[0]["prompt"]
+    assert "These tasks train an agent for real terminal work" in prompt
+    assert "Search with your web tool" not in prompt
 
 
 @pytest.mark.parametrize("job", ["harder", "easier"])
@@ -339,6 +354,26 @@ def test_task_history_reaches_the_author_only(tmp_path, monkeypatch, job):
     assert "traces/history/summary.md" in sessions[0]["prompt"]
     for later in sessions[1:]:
         assert "traces/history" not in later["prompt"]
+        assert not (Path(later["cwd"]) / "traces").exists()
+
+
+@pytest.mark.parametrize("job", ["harder", "easier"])
+def test_full_record_reaches_the_author_only(tmp_path, monkeypatch, job):
+    """traces/record.md points the author at the task's whole record in the
+    root; only the author's prompt names it, and later sessions get no traces/."""
+    rw = _rewrite(tmp_path, monkeypatch)
+    sessions, checks = [], []
+    _wire(monkeypatch, sessions, checks)
+    if job == "easier":
+        monkeypatch.setattr(
+            ec.so, "read_decision", lambda *_: {"operator": "add_scaffold"}
+        )
+    rw.traces.mkdir(parents=True, exist_ok=True)
+    (rw.traces / "record.md").write_text("# Full record of tw_a\n")
+    ec.evolve_agentic(rw, dict(SEED), job)
+    assert "THE FULL RECORD" in sessions[0]["prompt"]
+    for later in sessions[1:]:
+        assert "record.md" not in later["prompt"]
         assert not (Path(later["cwd"]) / "traces").exists()
 
 
@@ -659,7 +694,7 @@ def _declaring_author(monkeypatch, bad: dict, change_task_on_repair=False):
             evidence = bad if not resume else good
             (cwd / "run/simplify.json").write_text(json.dumps(dict(
                 retained_skill="compare", bottleneck="b", change="c", restore="r",
-                prediction="p", evidence=[evidence])))
+                prediction="p", expected="3 of 12", evidence=[evidence])))
             if resume and change_task_on_repair:
                 (cwd / "instruction.md").write_text("something else\n")
         return p

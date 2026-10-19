@@ -70,6 +70,7 @@ $TRL_BASE/
 │   ├── outcomes/<run>.jsonl       completed outcomes; sampled by that run at each training step
 │   └── tasks/<task>/
 │       ├── lineage.jsonl         this task's rewrite and fold events
+│       ├── attempts.jsonl        every recorded attempt at this task, all runs: header fields + path
 │       ├── r0/ r1/ …             accepted revisions, package only; r0 is the seed, copied
 │       │                     from data/sources/<corpus>/tasks/<task> by the loop on the
 │       │                     task's first signal
@@ -78,6 +79,7 @@ $TRL_BASE/
 │           ├── pretest.json      the input row's pin hook (pre_test_sh + environment stamp); only when the row has one
 │           ├── package/          the working copy; renamed to r<N+1>/ when accepted
 │           │   └── traces/attempt-NN.jsonl   hardlinks to the run's rollout records
+│           ├── notes/            the author's run/ notes (hardening.md, simplify.json, repair.json), kept when a fold strips run/
 │           └── sessions/<stamp>--<kind>/     one codex invocation (agent, repair, verifier, oracle)
 │               ├── session.json  prompt.md  stdout.txt  stderr.txt
 │               └── codex/        the CLI's own session jsonl

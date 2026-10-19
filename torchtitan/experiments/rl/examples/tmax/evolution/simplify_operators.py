@@ -16,6 +16,7 @@ the retained goals -- are stated once, below.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 CALIBRATION_GUIDANCE = """Compare two intervention strengths by the observed decisions
@@ -61,165 +62,117 @@ oracle and untouched-state checks establish only candidate validity.
 def prompt(hint: str) -> str:
     if hint not in ("none", "vague", "specific"):
         raise ValueError(f"unknown simplify hint level: {hint}")
-    return (
-        f"""Hint level: {hint}. none permits structural changes only; vague permits a
+    return f"""Hint level: {hint}. It limits what the instruction and any text you supply
+say about how to solve: none permits structural changes only; vague permits a
 direction or subgoal, not concrete solution steps; specific permits one
-trace-supported step, never the complete solution or private verifier details.
+trace-supported step. Structural help -- a starter, a completed stage, a
+prepared input -- is allowed at every level. No level permits the final answer,
+an exact patch, the output the retained skill should compute, or private
+verifier details.
 
-Read every supplied attempt's outcome and locate its first unresolved obstacle,
-including attempts that never reach the proposed intervention. In bottleneck,
-state how many attempts encounter each obstacle and cite their trace locations;
-do not infer a shared bottleneck from only the furthest-progressing attempts.
-Before attributing a failure to ignoring or overwriting an existing file,
-establish that the student had it: cite a recorded observation before the
-student created it, or its installation through the container build or task
-setup, in the evidence observation. A file under environment/ is not by itself
-proof that it was copied into the container. When delivery is unverified,
-mark it unknown and do not base the intervention on its presence.
-Identify a recurring obstacle, then state the skill this variant retains.
-When the change removes or narrows a requirement, edit every sentence of
-instruction.md that states or implies it, so no unchanged sentence still asks
-for the old scope; a separate author writes the verifier from that text. Aim for some successful
-and some unsuccessful student attempts, rather than preserving every difficult
-part of a task that the student cannot yet solve. A timeout or 0/k alone
-does not identify that obstacle. Compare the failed check with the submitted
-artifact and the visible requirement before choosing the change. A reasonable
-interpretation rejected by an unstated exact-string or formatting requirement
-is a specification defect, even when a hint could make the test pass.
-Use verifier diagnostics when present. A student's success claim or local
-self-test proves only the property it exercised; repeated execution on one
-unchanged input does not establish invariance under changed input order.
-Compilation or an existing executable does not establish correct runtime
-output. Use the recorded reward when claiming that an attempt passed.
-An oracle-informed constant can pass many valid fixed-output tasks; this
-alone is not evidence of wrong grading or a reason to discard the task.
-Transient sandbox/provider failures, unscored attempts and missing required
-trace evidence are not difficulty measurements: write
-BLOCKED: invalid_signal: <reason> to run/verdict.txt and stop without edits.
-Inconsistent specifications, broken task setup and wrong grading are defects;
-repairing them is part of this rewrite. State in the instruction a requirement
-the verifier checks but the instruction never gives, fix a broken setup, or
-reconcile contradictory requirements, then make the simplification the
-attempts call for on the repaired task. Record every repair in run/repair.json:
-a list of objects with nonempty "defect", "evidence" (attempt file and turn, or
-the conflicting file locations) and "change"; each repair is reported for
-review.
-If the work is already correct but the agent fails to submit, do not remove
-unrelated task requirements. With insufficient evidence, write GIVE UP with
-the reason and keep the task unchanged.
+## Goal
 
-The retained skill includes the task's core decision: the choice that makes
-the original task what it is, judged from the original instruction
-(traces/history/since-original.diff separates it from help added since).
-Keeping only routine work around that decision while the variant makes the
-decision for the student does not simplify this task; it replaces it, and
-every later hardening has to win the decision back one rewrite at a time.
-Tell apart attempts that fail at the core decision from attempts that fail on
-mechanics around it (writing or quoting a file through the terminal, a tool's
-invocation, an exhausted context); help with mechanics leaves the decision to
-the student. Judge help by the decisions it makes for the student, not by its
-size: a short working instance of the very construction the task asks for, or
-a skeleton that fixes its layout, makes the core decision and is stronger than
-a sentence naming a principle. Prefer, in this order: feedback at the mistaken
-decision, a principle or direction for it, a prerequisite that leaves it open;
-supply a working instance of the core construction only when traces show the
-student has no foothold any weaker help could reach, and say so in change.
+Every attempt of the current student failed this task. Change it so the next
+group of the same size lands in the learnable band: some attempts succeed and
+some fail. A task that stays at 0/k gives no training signal and wastes every
+rollout spent on it; a task that overshoots to k/k costs one later hardening.
+Staying unlearnable is the costlier error, so when the evidence is uncertain,
+prefer the change more likely to produce successes.
 
-Choose the change from the attempts. If traces/history shows an earlier
-rewrite that made this task harder, what it changed is the first candidate:
-restore part of what it removed or added, within the task's requirements.
-Otherwise supply what the attempts show is missing at their first unresolved
-obstacle. Whatever the change, never give the final answer, an exact patch or
-a full command recipe; do not precompute the output of the retained skill;
-keep correctness and shortcut checks for every retained goal; do not modify
-the shared harness. Make one change along one difficulty dimension; supporting
-edits needed to make it coherent belong to the same change, for example,
-extracting a stage can require supplying its input. Before editing, write
-run/simplify.json containing: retained_skill, bottleneck, change, restore and
-prediction, plus evidence (a nonempty list of objects with attempt, turn,
-observation).
+## Diagnose from the attempts
 
-attempt is the file's name exactly as traces/ lists it, with its .jsonl
-suffix and no directory (attempt-03.jsonl). turn is an integer: a turn that
-file records, or 0 for its first line, the attempt's summary with any
-verifier diagnostics. observation explains what that line shows. Each other
-field is a nonempty string. Describe the concrete size of the change in change.
-The caller checks the declaration and evidence locations, not the truth of
-your diagnosis; ground the diagnosis in what actually happened.
+Read every attempt in traces/ and find where each one first goes wrong; count
+how many attempts stop at each point and cite them. Classify the dominant
+cause, then act on that cause:
+- A task defect: the instruction and the verifier disagree, the environment
+  lacks what the task needs, or grading rejects a reasonable result. Repairing
+  it is part of this rewrite: state the requirement, fix the setup, or correct
+  the check, and record every repair in run/repair.json as a list of objects
+  with nonempty "defect", "evidence" (attempt file and turn, or the conflicting
+  file locations) and "change"; each repair is reported for review. Then
+  simplify the repaired task only as far as the attempts still call for.
+- Mechanics around the task: tool use, writing files through the terminal,
+  exhausted time or context. Help with the mechanics and leave the task's
+  decisions to the student.
+- A missing capability at a decision the task requires: reduce what that
+  decision demands.
+Transient sandbox or provider failures, unscored attempts and missing trace
+evidence are not measurements: write BLOCKED: invalid_signal: <reason> to
+run/verdict.txt and stop without edits. Base every claim about the
+environment, the verifier or the student on what you observed in the traces
+or the sandbox, not on what a file name or a success message suggests.
 
-Guidance you add, in the instruction or in a file you supply, must name the
-operation the reference solution actually performs, in terms a student can
-apply as written. A domain description of the same fact can lead to a
-different computation: "the times are local" invites a time-zone conversion
-the reference never performs, where "subtract 5 hours" does not. At the vague
-level, point to that operation without spelling out every step, but leave no
-reading of a supplied file under which a careful student computes something
-else. Before finishing, apply your guidance literally to the task's own data
-in the sandbox and confirm it reproduces the reference's intermediate result;
-describe that check in change.
+## Learn from earlier rewrites
 
-List the choices the reference solution makes that the instruction does not
-fix: a fitting window, a threshold, a seed, an ordering, a starting guess. For
-each, run the reference in the sandbox with another choice a competent solver
-could reasonably make, and grade it. A verifier that rejects a reasonable
-choice depends on something the student cannot discover from the task, which
-is a specification defect, not student difficulty. Request repair with the
-alternative choice, its grade and the conflicting public requirement as
-evidence. Do not combine this repair with the simplification you propose.
+traces/history/summary.md lists this task's earlier rewrites with what training
+measured before and after each, and their authors' notes, including their
+predictions. When an earlier simplification predicted successes and the
+student still failed every attempt, find out from the current traces why
+before choosing anything: if the attempts now get past the obstacle that
+rewrite targeted and fail later, target the new obstacle; if they still fail
+at the same point, its help did not reach them or was too weak, so give
+stronger help there; if they fail at a defect, repair it. Write this
+comparison in previous. A change that already failed, repeated, is not a new
+attempt. If an earlier rewrite made this task harder, what it changed is the
+first candidate to restore in part.
 
-In prediction, name the observed failing action or decision and explain how
-the proposed change enables a different next action. Give the solved count
-you expect from the next group of the same size as a number ("3 of 8"); a range
-spanning everything from none to all predicts nothing. traces/history shows
-earlier predictions beside what was measured next; where they were
-systematically off, correct the size of this change for it. State an observable
-result that would disprove this explanation in a new rollout. A shorter task,
-fewer assertions, or a reminder to be careful is not a causal explanation.
-Name which attempts the change could help and what unresolved work remains
-on their path to submission. Removing setup does not establish that they can
-perform the retained diagnosis; reducing output count does not remove an
-earlier discovery failure. Account for those remaining obstacles when choosing
-the intervention, rather than treating saved time as sufficient evidence.
-For a hint, identify what direction the student lacked; repeating a direction
-it already followed adds no help. For structural changes, identify the
-prerequisite, interference, or search barrier being removed. Distinguish
-evidence that is absent from evidence the student cannot yet discover: the
-latter can justify supplying one starting artifact while retaining the
-inference from it. If no attempt has a foothold in the failing skill, consider
-a smaller input domain or a prerequisite subskill instead of another generic
-hint. Explain what work remains for the student and which visible variation
-would make a copied constant or no-op fail. If attempts already solve the
-retained component, extraction alone is likely to overshoot to all-solved;
-prefer removing only part of the barrier. Choose a different change or GIVE UP
-if the same failed method would remain unchanged on the retained goal.
+## Choose the strength of help
 
-{CALIBRATION_GUIDANCE}
+Choose the change from the attempts. Help comes in increasing strength: a
+direction for the failing decision; the goal decomposed into checked
+subgoals; part of the work supplied (a starter, a completed stage, a prepared
+input) so the student does the rest; a worked instance of the hard step on an
+input other than the graded one. Use the weakest help the evidence says will
+produce successes. A failed prediction at one strength needs a reason, from
+the traces, to stay at that strength. Keep the task's goal and as much of its
+decision-making as the student can still learn from; when no attempt has a
+foothold, supplying part of the core decision is better than another rewrite
+that changes nothing. What the student could have obtained in the original
+environment itself -- a package or tool it can install, a file it can fetch,
+a setting it can change -- is part of the work: help with it by saying what to
+obtain and how, not by obtaining it for the student. Supply it directly only
+when the original environment did not let the student get it, and record that
+as a repair.
 
-Make only that change. Update instruction, environment, reference solution
-and verifier together where needed. Checks may be removed only for the
-explicitly removed goal or constraint; remaining goals retain semantic and
-shortcut checks. Do not loosen checks to accept an incorrect remaining goal.
-Preserve existing guidance and acceptance tolerances for the retained skill.
-Supplying prerequisite state must preserve the original task's allowed
-inputs and equivalent outputs. Do not add identity, provenance, or content
-preservation requirements merely to force use of a supplied fixture. If the
-fixture can be bypassed under the existing contract, choose another
-intervention instead of making the retained goal stricter.
-Extracting a stage must not silently add precision requirements or make its
-test inputs harder. If an existing check is defective, request repair instead
-of combining that repair with simplification.
-The untouched environment must fail and the reference solution must pass.
-Run ./sandbox check before finishing. Those two outcomes establish only that
-the reference passes the current tests and the untouched state does not.
-Check the retained requirements against the verifier's actual input coverage;
-random cases alone may miss required branches or boundary behavior. Use the
-attempts' implementations to test a suspected mismatch on a legal input, and
-record the input, observed output and grading result in the observation of
-the evidence item for the attempt whose implementation you ran. An incorrect retained behavior accepted by the verifier
-requires repair, even if the reference also passes. Subsequent student
-rollouts measure difficulty; their scores do not resolve a grading defect.
+## Invariants
+
+- Never hand over the final answer, the exact output, or a command recipe that
+  completes the task; the student must still do the remaining work.
+- Keep the verifier's correctness and shortcut checks for every requirement
+  that remains. Remove checks only for a requirement you removed, and edit
+  every sentence of instruction.md that states or implies it; a separate
+  author writes the verifier from the instruction.
+- Guidance names the operation the reference solution actually performs. Apply
+  your guidance literally to the task's own data in the sandbox and confirm it
+  reproduces the reference's intermediate result.
+- Update instruction, environment, reference solution and verifier together.
+  The untouched environment must fail and the reference solution must pass:
+  run ./sandbox check before finishing.
+
+## Declare
+
+Before editing, write run/simplify.json with retained_skill, bottleneck,
+change, restore, prediction, expected and evidence, plus previous when the
+history shows an earlier accepted simplification. expected is the solved
+count you predict for the next group of the same size, written as "k of n".
+prediction names the failing action the change addresses, why the change
+enables a different next action, and an observable result that would refute
+it. evidence is a nonempty list of objects with attempt, turn and observation:
+attempt is the file's name exactly as traces/ lists it, with its .jsonl suffix
+and no directory (attempt-03.jsonl); turn is an integer: a turn that file
+records, or 0 for its first line, the attempt's summary with any verifier
+diagnostics. When you run an attempt's implementation in the sandbox to test a
+suspected mismatch, record the input, observed output and grading result in
+the observation of the evidence item for the attempt whose implementation you
+ran. Each other field is a nonempty string. The caller checks the
+declaration's form and evidence locations, not the truth of your diagnosis.
+
+If the evidence supports no change, write GIVE UP with the reason and keep the
+task unchanged.
 """
-    )
+
+
+EXPECTED = re.compile(r"^\s*\d+\s+of\s+\d+\s*$")
 
 
 def read_decision(pkg: Path, hint: str) -> dict:
@@ -230,9 +183,12 @@ def read_decision(pkg: Path, hint: str) -> dict:
         "change",
         "restore",
         "prediction",
+        "expected",
     ):
         if not isinstance(decision.get(field), str) or not decision[field].strip():
             raise ValueError(f"simplify decision requires {field}")
+    if not EXPECTED.match(decision["expected"]):
+        raise ValueError('simplify decision expected must read "k of n"')
     evidence = decision.get("evidence")
     if not isinstance(evidence, list) or not evidence:
         raise ValueError("simplify decision requires trace evidence")

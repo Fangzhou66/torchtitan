@@ -28,6 +28,7 @@ def decision(pkg, **updates):
         change="explain input type",
         restore="restore error",
         prediction="The agent can correct the input type; repeating the same invalid call would refute this.",
+        expected="3 of 12",
         evidence=[
             dict(
                 attempt="attempt-01.jsonl",
@@ -63,7 +64,7 @@ def test_turn_zero_needs_a_summary_line(tmp_path):
 
 
 def test_prompt_names_the_file_as_listed_and_the_summary_line():
-    text = so.prompt("vague")
+    text = " ".join(so.prompt("vague").split())
     assert "attempt-03.jsonl" in text and "or 0 for its first line" in text
     # A sandbox test of an attempt's implementation is recorded on that attempt.
     assert "evidence item for the attempt whose implementation you ran" in text
@@ -96,6 +97,9 @@ def test_unicode_output_does_not_split_json_records(tmp_path, separator):
         ("retained_skill", ""),
         ("prediction", ""),
         ("prediction", None),
+        ("expected", ""),
+        ("expected", "3/12"),
+        ("expected", "about half"),
         ("evidence", []),
         ("evidence", [dict(attempt="../secret", turn=2, observation="x")]),
         ("evidence", [dict(attempt="attempt-01.jsonl", turn=99, observation="x")]),
@@ -118,12 +122,17 @@ def test_prompt_has_no_menu_and_keeps_the_hint_levels():
         so.prompt("loud")
 
 
-def test_prompt_asks_for_faithful_guidance_and_unstated_choices():
-    text = so.prompt("vague")
+def test_prompt_states_the_goal_the_costs_and_the_general_rules():
+    text = " ".join(so.prompt("vague").split())
+    # The target, and which error costs more.
+    assert "lands in the learnable band" in text
+    assert "Staying unlearnable is the costlier error" in text
+    # A failed prediction is explained from the traces before the next change.
+    assert "Write this comparison in previous" in text
+    # Repair is part of the rewrite; nothing asks for a separate repair.
+    assert "Repairing it is part of this rewrite" in text
+    assert "Do not combine this repair" not in text
     # Guidance is checked against what the reference actually computes.
-    assert "apply your guidance literally" in text
-    # A hidden grading choice is a specification repair, not simplification.
-    assert "choices the reference solution makes that the instruction does not" in text
-    assert "is a specification defect, not student difficulty" in text
-    assert "Do not combine this repair with the simplification" in text
+    assert "Apply your guidance literally" in text
     assert "BLOCKED: invalid_signal:" in text
+    assert 'written as "k of n"' in text

@@ -2147,6 +2147,75 @@ def test_history_shows_the_net_change_since_the_original_task(tmp_path):
     assert "help, not part of the original task" in summary
 
 
+def test_an_accepted_rewrites_prediction_survives_the_fold_beside_what_came_next(tmp_path):
+    """The fold strips run/, so an accepted rewrite's notes are kept beside
+    its package; the history pairs them with what training measured on the
+    revision it produced -- the next rewrite's input, or the signal now."""
+    root = layout.Root(tmp_path / "root")
+    task = root.evolution.task("tw_a")
+    _package(task.rev(0), SEED)
+    _package(task.rev(1), {**SEED, "instruction.md": SEED["instruction.md"] + "Hint.\n"})
+    first = layout.RewriteDir(task.rewrites / "20260901-000000Z--easier")
+    _package(first.package, {**SEED, "run/simplify.json": '{"expected": "4 of 12"}'})
+    od._keep_author_notes(first.package)  # what _prepare_fold_row does first
+    od.strip_harness(first.package)
+    assert not (first.package / "run").exists()
+    assert "4 of 12" in (first.notes / "simplify.json").read_text()
+    layout.write_json_atomic(first.meta, {
+        "job": "easier", "input_rev": 0, "result_rev": 1, "status": "accepted"})
+    now = layout.RewriteDir(task.rewrites / "20260902-000000Z--easier")
+    now.traces.mkdir(parents=True)
+    current = {"run": RUN, "group": 9, "rev": 1, "solved": 0, "total": 12}
+
+    assert od._write_history(root, task, now, current=current) == 1
+    history = now.traces / "history"
+    entry = json.loads((history / "index.jsonl").read_text().splitlines()[0])
+    assert "4 of 12" in (history / entry["notes"]).read_text()
+    assert entry["measured_next"]["solved"] == 0 and entry["measured_next"]["current_signal"]
+    summary = (history / "summary.md").read_text()
+    assert "Training on r1 after it: 0/12 solved (the signal being handled now" in summary
+
+
+def test_the_full_record_indexes_every_attempt_and_draws_each_revisions_curve(tmp_path):
+    """record.md shows each revision's solve counts group by group, in group
+    order across runs; attempts.jsonl lists every attempt (training and
+    validation) with its path; a second rewrite opens only records added since."""
+    root = layout.Root(tmp_path / "root")
+    task = root.evolution.task("tw_a")
+
+    def rec(run, group, idx, rev, reward):
+        path = root.run(run).rollout_record("tw_a", group, idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        head = {"rev": rev, "group": group, "rollout": idx, "reward": reward,
+                "finish_reason": "submit", "infra_failed": False}
+        path.write_text(json.dumps(head) + "\n{\"turn\": 1}\n")
+
+    a, b = "tmax-9b--20260901-000000Z", "tmax-9b--20260902-000000Z"
+    for g in (2, 10):
+        for i in range(2):
+            rec(a, g, i, 0, 0.0)
+    rec(b, 3, 0, 1, 1.0); rec(b, 3, 1, 1, 0.0)
+    rec(b, -5, 0, 1, 0.0)
+    root.run("tmax-9b--20260903-000000Z").rollouts.mkdir(parents=True)  # no attempts here
+
+    now = layout.RewriteDir(task.rewrites / "20260903-000000Z--harder")
+    assert od._write_record(root, task, now) == 7
+    record = (now.traces / "record.md").read_text()
+    assert "- r0 training: 0/2 x2" in record
+    assert "- r1 training: 1/2" in record and "- r1 validation: 0/1" in record
+    assert "not the revision" in record and "copy none of it into the task" in record
+    rows = layout.read_jsonl(now.traces / "attempts.jsonl")
+    assert {r["path"] for r in rows} >= {f"runs/{b}/validation_rollouts/tw_a/g-5-r0.jsonl"}
+    assert (root.path / rows[0]["path"]).is_file()
+
+    # Already indexed records are not opened again: make one unreadable.
+    root.run(a).rollout_record("tw_a", 2, 0).write_text("not json")
+    rec(b, 4, 0, 1, 1.0)
+    later = layout.RewriteDir(task.rewrites / "20260904-000000Z--harder")
+    assert od._write_record(root, task, later) == 8
+    assert "- r1 training: 1/2 1/1" in (later.traces / "record.md").read_text()
+
+
 def test_a_task_without_earlier_rewrites_gets_no_history(tmp_path):
     root = layout.Root(tmp_path / "root")
     task = root.evolution.task("tw_a")
