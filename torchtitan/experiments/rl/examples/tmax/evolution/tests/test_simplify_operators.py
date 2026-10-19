@@ -126,7 +126,7 @@ def test_prompt_states_the_goal_the_costs_and_the_general_rules():
     text = " ".join(so.prompt("vague").split())
     # The target, and which error costs more.
     assert "lands in the learnable band" in text
-    assert "Staying unlearnable is the costlier error" in text
+    assert "Neither miss is the safe one" in " ".join(text.split())
     # A failed prediction is explained from the traces before the next change.
     assert "Write this comparison in previous" in text
     # Repair is part of the rewrite; nothing asks for a separate repair.
@@ -138,9 +138,8 @@ def test_prompt_states_the_goal_the_costs_and_the_general_rules():
     assert 'written as "k of n"' in text
 
 
-def test_a_repair_is_the_rewrites_change_and_help_beside_it_needs_evidence_past_it():
-    """Attempts measured the defective task, so a repair is measured alone;
-    help beside it only for an obstacle seen after the defect."""
+def test_a_repair_is_the_rewrites_only_change():
+    """Attempts measured the defective task, so a repair is measured alone."""
     p = " ".join(so.prompt("vague").split())
-    assert "the repair is this rewrite's change" in p
-    assert "attempts which got past the defect still failed at" in p
+    assert "the repair is this rewrite's only change" in p
+    assert "the repaired task is measured before any help is added" in p
