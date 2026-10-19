@@ -83,8 +83,18 @@ class NativeEPPartialPull:
         stop: int,
         num_experts: int,
         dims: tuple[int, int, torch.dtype] | None = None,
+        reuse_buffers: bool = False,
+        pin_buffers: bool = False,
     ) -> None:
         self.start, self.stop, self.num_experts = start, stop, num_experts
+        # reuse_buffers: fetch every pull into the same local-expert tensors, so
+        # the transfer does not page-fault fresh memory each time; pin_buffers
+        # also page-locks them (cudaHostRegister) for a faster copy to the GPU.
+        # Safe because a fetch is always applied before the next one starts.
+        self._reuse = reuse_buffers or pin_buffers
+        self._pin = pin_buffers
+        self._local: dict[str, torch.Tensor] = {}
+        self._registered: set[int] = set()
         # With ``dims`` the expert shapes are known up front, so even the first
         # fetch is partial: a full first pull holds the whole checkpoint once per
         # EP rank in host memory (8 x 245 GB on 122B-A10B, which OOMs the host).
@@ -150,7 +160,7 @@ class NativeEPPartialPull:
             return None
         global_shape, dtype = meta
         local_shape = (self.stop - self.start, *global_shape[1:])
-        local = torch.empty(local_shape, dtype=dtype)
+        local = self._local_buffer(flat_key, local_shape, dtype)
         spec = TensorSlice(
             offsets=(self.start, *(0 for _ in global_shape[1:])),
             coordinates=None,
@@ -159,6 +169,35 @@ class NativeEPPartialPull:
             mesh_shape=None,
         )
         return Request.from_any(store_key, local, spec), local
+
+    def _local_buffer(
+        self, flat_key: str, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> torch.Tensor:
+        if not self._reuse:
+            return torch.empty(shape, dtype=dtype)
+        buf = self._local.get(flat_key)
+        if buf is not None and tuple(buf.shape) == shape and buf.dtype == dtype:
+            return buf
+        if buf is not None and buf.data_ptr() in self._registered:
+            self._registered.discard(buf.data_ptr())
+            torch.cuda.cudart().cudaHostUnregister(buf.data_ptr())
+        buf = torch.empty(shape, dtype=dtype)
+        if self._pin and buf.numel():
+            # Exact-size registration: the pinned caching allocator would round
+            # each buffer up to a power of two (+33% host memory on 122B).
+            err = torch.cuda.cudart().cudaHostRegister(
+                buf.data_ptr(), buf.numel() * buf.element_size(), 0
+            )
+            if int(err) != 0:
+                logger.warning(
+                    f"[ep-partial-pull] cudaHostRegister failed ({err}); "
+                    "keeping pageable expert buffers"
+                )
+                self._pin = False
+            else:
+                self._registered.add(buf.data_ptr())
+        self._local[flat_key] = buf
+        return buf
 
     def build_requests(self, key: str, flat_keys: list[str]):
         """TorchStore requests: whole tensors for dense keys, the local expert

@@ -48,6 +48,7 @@ from torchtitan.experiments.rl.native_ep_partial_pull import (
     local_expert_range,
     NativeEPPartialPull,
 )
+from torchtitan.experiments.rl.native_fast_apply import NativeFastApply
 from torchtitan.experiments.rl.native_tp_partial_pull import (
     NativeTPPartialPull,
     tp_rules_from_vllm_model,
@@ -1498,8 +1499,13 @@ class VLLMGenerator(Actor, Configurable):
         ):
             expert_range = local_expert_range(self._get_model())
             if expert_range is not None:
+                # SWE_NATIVE_PINNED_EXPERT_BUFFERS=1: fetch the local experts into
+                # the same page-locked buffers every pull (faster H2D in apply).
+                pinned = os.environ.get("SWE_NATIVE_PINNED_EXPERT_BUFFERS", "0") == "1"
                 self._ep_partial_pull = NativeEPPartialPull(
-                    *expert_range, dims=expert_dims(self._get_model())
+                    *expert_range,
+                    dims=expert_dims(self._get_model()),
+                    pin_buffers=pinned,
                 )
             elif self._rank == 0:
                 logger.warning(
@@ -1522,6 +1528,24 @@ class VLLMGenerator(Actor, Configurable):
                 logger.warning(
                     "SWE_NATIVE_TP_PARTIAL_PULL=1 but the native model has no "
                     "safe TP slicing; pulling full non-expert weights"
+                )
+        # SWE_NATIVE_FAST_APPLY=1: load stacked experts slab-by-slab through the
+        # FusedMoE loader and fuse GatedDeltaNet q/k/v into reused buffers, instead
+        # of to_hf's gate_up concat + the EP full-size embed (bitwise the same
+        # parameters; see native_fast_apply.py).
+        self._fast_apply: NativeFastApply | None = None
+        if native and os.environ.get("SWE_NATIVE_FAST_APPLY", "0") == "1":
+            # The expert / GatedDeltaNet key layout it relies on is Qwen3.5's.
+            if type(self._sd_adapter).__name__ == "Qwen35StateDictAdapter":
+                self._fast_apply = NativeFastApply(
+                    self._get_model(),
+                    ep=self._ep_partial_pull,
+                    tp=self._tp_partial_pull,
+                )
+            elif self._rank == 0:
+                logger.warning(
+                    "SWE_NATIVE_FAST_APPLY=1 only supports Qwen3.5; using the "
+                    f"default apply for {type(self._sd_adapter).__name__}"
                 )
         if config.enable_dp_weight_broadcast:
             unsupported_reason = dp_weight_broadcast_unsupported_reason(
@@ -2160,7 +2184,17 @@ class VLLMGenerator(Actor, Configurable):
         generation), refresh caches, bump the policy version, resolve the pull future.
         """
         _t1 = time.perf_counter()
-        if self._backend == "vllm_native":
+        if self._backend == "vllm_native" and self._fast_apply is not None:
+            to_hf_s, load_s, experts_s = self._fast_apply.apply(
+                self._sd_adapter, staged, self._get_model().load_weights
+            )
+            _refresh_fp32_lm_head_cache(self._get_model())
+            _t3 = time.perf_counter()
+            apply_detail = (
+                f"to_hf={to_hf_s:.2f}s load_weights={load_s:.2f}s "
+                f"experts={experts_s:.2f}s fast"
+            )
+        elif self._backend == "vllm_native":
             # Convert torchtitan layout -> HF, then let vLLM copy + TP-shard.
             hf_state_dict = self._sd_adapter.to_hf(staged)
             if self._ep_partial_pull is not None and self._ep_partial_pull.ready:
