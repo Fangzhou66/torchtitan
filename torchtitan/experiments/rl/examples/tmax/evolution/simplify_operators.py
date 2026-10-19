@@ -127,7 +127,12 @@ produce successes. A failed prediction at one strength needs a reason, from
 the traces, to stay at that strength. Keep the task's goal and as much of its
 decision-making as the student can still learn from; when no attempt has a
 foothold, supplying part of the core decision is better than another rewrite
-that changes nothing.
+that changes nothing. What the student could have obtained in the original
+environment itself -- a package or tool it can install, a file it can fetch,
+a setting it can change -- is part of the work: help with it by saying what to
+obtain and how, not by obtaining it for the student. Supply it directly only
+when the original environment did not let the student get it, and record that
+as a repair.
 
 ## Invariants
 

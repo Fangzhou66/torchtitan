@@ -1752,7 +1752,10 @@ artifact it comes from (`package==version`, a repository at a commit, a URL
 with its sha256) in the Dockerfile, and confirm in `./sandbox exec` that the
 behavior the source describes happens here: the error, the wrong output, the
 crash. A library, tool, version or bug that does not exist upstream is not
-allowed, and neither is a vendored imitation of one.
+allowed, and neither is a vendored imitation of one. The environment holds the
+problem, never its fix: no patch, fixed release, backported file or note that
+names the fix goes into the image or the task's files; the fix lives only in
+the reference solution.
 
 Write `run/hardening.md` before editing the task: the sources by URL with the
 sentence of each that you rely on, the pinned artifacts, the reproduction
@@ -3212,7 +3215,8 @@ def evolve_agentic(
                     "Search with your web tool to find candidate sources. Your shell "
                     "also has network access",
                 )
-                if HARDER_GUIDANCE == "real" and WEB_SEARCH
+                # "disabled" is a codex web_search value too: no tool, so no instruction to use it.
+                if HARDER_GUIDANCE == "real" and WEB_SEARCH not in ("", "disabled")
                 else _REAL_HARDER_GUIDANCE
                 if HARDER_GUIDANCE == "real"
                 else _STUDENT_HARDER_GUIDANCE,

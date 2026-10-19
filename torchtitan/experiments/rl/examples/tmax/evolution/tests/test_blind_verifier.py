@@ -308,6 +308,17 @@ def test_harder_defaults_to_real_guidance_with_repair_in_the_rewrite(
     assert ec._STUDENT_HARDER_GUIDANCE not in prompt
 
 
+def test_disabled_web_search_does_not_tell_the_author_to_search(tmp_path, monkeypatch):
+    rw = _rewrite(tmp_path, monkeypatch)
+    sessions, checks = [], []
+    _wire(monkeypatch, sessions, checks)
+    monkeypatch.setattr(ec, "WEB_SEARCH", "disabled")
+    ec.evolve_agentic(rw, dict(SEED), "harder")
+    prompt = sessions[0]["prompt"]
+    assert "These tasks train an agent for real terminal work" in prompt
+    assert "Search with your web tool" not in prompt
+
+
 @pytest.mark.parametrize("job", ["harder", "easier"])
 def test_measured_feedback_reaches_proposer_only(tmp_path, monkeypatch, job):
     rw = _rewrite(tmp_path, monkeypatch)

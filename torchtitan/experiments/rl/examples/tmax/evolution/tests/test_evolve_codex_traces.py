@@ -191,6 +191,13 @@ def test_easier_scales_help_by_evidence_and_predicts_a_number():
     assert "supplying part of the core decision is better than another rewrite" in p
     assert 'written as "k of n"' in p
     assert "Prefer a strict subset of the help." not in so.CALIBRATION_GUIDANCE
+    # What the student could obtain itself is taught, not done for it.
+    assert "not by obtaining it for the student" in " ".join(p.split())
+
+
+def test_real_harder_keeps_the_upstream_fix_out_of_the_environment():
+    g = " ".join(ec._REAL_HARDER_GUIDANCE.split())
+    assert "The environment holds the problem, never its fix" in g
 
 
 def test_traces_spec_points_at_the_revision_contrast(tmp_path):
