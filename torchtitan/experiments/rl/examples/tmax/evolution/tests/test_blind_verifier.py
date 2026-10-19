@@ -342,6 +342,26 @@ def test_task_history_reaches_the_author_only(tmp_path, monkeypatch, job):
         assert not (Path(later["cwd"]) / "traces").exists()
 
 
+@pytest.mark.parametrize("job", ["harder", "easier"])
+def test_full_record_reaches_the_author_only(tmp_path, monkeypatch, job):
+    """traces/record.md points the author at the task's whole record in the
+    root; only the author's prompt names it, and later sessions get no traces/."""
+    rw = _rewrite(tmp_path, monkeypatch)
+    sessions, checks = [], []
+    _wire(monkeypatch, sessions, checks)
+    if job == "easier":
+        monkeypatch.setattr(
+            ec.so, "read_decision", lambda *_: {"operator": "add_scaffold"}
+        )
+    rw.traces.mkdir(parents=True, exist_ok=True)
+    (rw.traces / "record.md").write_text("# Full record of tw_a\n")
+    ec.evolve_agentic(rw, dict(SEED), job)
+    assert "THE FULL RECORD" in sessions[0]["prompt"]
+    for later in sessions[1:]:
+        assert "record.md" not in later["prompt"]
+        assert not (Path(later["cwd"]) / "traces").exists()
+
+
 def test_no_history_no_history_paragraph(tmp_path, monkeypatch):
     rw = _rewrite(tmp_path, monkeypatch)
     sessions, checks = [], []

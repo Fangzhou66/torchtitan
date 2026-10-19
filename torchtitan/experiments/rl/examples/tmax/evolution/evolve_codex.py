@@ -3242,6 +3242,18 @@ def evolve_agentic(
             "into the task.\n"
         )
 
+    if job in ("harder", "easier") and (rewrite.traces / "record.md").is_file():
+        prompt += (
+            "\n\nTHE FULL RECORD\n"
+            "traces/record.md says where this task's whole record sits in the "
+            "experiment: every attempt the student made at it, in every run and "
+            "on every revision, and every revision's package. What traces/ holds "
+            "is a selection; when a question it leaves open matters -- whether "
+            "earlier help was used, where attempts on an older revision failed, "
+            "how solve counts moved after a rewrite -- read the record directly. "
+            "It is read-only, and none of it goes into the task.\n"
+        )
+
     if job in ("harder", "easier") and task.get("_student_feedback"):
         feedback = task["_student_feedback"]
         (pkg / "run" / "student_feedback.json").write_text(

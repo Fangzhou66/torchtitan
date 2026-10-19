@@ -2176,6 +2176,31 @@ def test_an_accepted_rewrites_prediction_survives_the_fold_beside_what_came_next
     assert "Training on r1 after it: 0/12 solved (the signal being handled now" in summary
 
 
+def test_the_full_record_lists_every_runs_attempts_and_every_revision(tmp_path):
+    """record.md names, by absolute path, each run holding attempts at the task
+    (all revisions) and the task's revisions, lineage and rewrites; runs without
+    attempts at it are left out."""
+    root = layout.Root(tmp_path / "root")
+    task = root.evolution.task("tw_a")
+    _package(task.rev(0), SEED)
+    _package(task.rev(1), SEED)
+    for name, n in (("tmax-9b--20260901-000000Z", 3), ("tmax-9b--20260902-000000Z", 0)):
+        run = root.run(name)
+        run.rollouts.mkdir(parents=True)
+        if n:
+            (run.rollouts / "tw_a").mkdir()
+            for i in range(n):
+                (run.rollouts / "tw_a" / f"g{i}-r0.jsonl").write_text("{}\n")
+    now = layout.RewriteDir(task.rewrites / "20260903-000000Z--harder")
+
+    assert od._write_record(root, task, now) == 1
+    record = (now.traces / "record.md").read_text()
+    assert f"{root.run('tmax-9b--20260901-000000Z').rollouts / 'tw_a'} (3 attempts)" in record
+    assert "20260902" not in record
+    assert "(r0, r1)" in record and str(task.lineage) in record
+    assert "not the revision" in record and "copy none of it into the task" in record
+
+
 def test_a_task_without_earlier_rewrites_gets_no_history(tmp_path):
     root = layout.Root(tmp_path / "root")
     task = root.evolution.task("tw_a")

@@ -441,6 +441,46 @@ def _stage_revision(run_dir: Path, signal: dict, out: Path, workspace) -> int:
     return len(lines)
 
 
+def _write_record(root: layout.Root, task: layout.TaskDir, rewrite: layout.RewriteDir) -> int:
+    """traces/record.md: where this task's full record lives in the experiment
+    root, for the author to read directly when traces/ is not enough -- every
+    run's attempts at it (all revisions, all groups), every revision's package
+    and the lineage. Paths only: nothing is copied, and the author reads what
+    its question needs. Under traces/, so the blind verifier is never told
+    where the hidden solutions sit. Returns the number of runs listed."""
+    runs = []
+    for run in root.run_dirs():
+        attempts = run.rollouts / layout.safe(task.task_id)
+        if attempts.is_dir():
+            runs.append((run, sum(1 for _ in attempts.glob("g*-r*.jsonl"))))
+    revs = task.revs()
+    lines = [
+        f"# Full record of {task.task_id}",
+        "",
+        "Read-only. Read whatever answers your question; write nothing here, "
+        "and copy none of it into the task.",
+        "",
+        "## Every attempt the student made at this task",
+        "One file per attempt, `g<group>-r<attempt>.jsonl` (r is the attempt's "
+        "index in its group, not the revision); line 1 is the header with `rev` "
+        "(which revision it ran), `group`, `reward`, `finish_reason`, then one "
+        "line per turn, as in traces/attempt-NN.jsonl.",
+    ]
+    lines += [f"- {run.path.name}: {run.rollouts / layout.safe(task.task_id)} ({n} attempts)"
+              for run, n in runs] or ["- none recorded"]
+    lines += [
+        "",
+        "## Every revision of the task",
+        f"- Packages: {task.path}/r<N>/ ({', '.join(f'r{n}' for n in revs) or 'none'})",
+        f"- Rewrites with their notes, diffs and outcome: {task.path}/rewrites/",
+        f"- Lineage, one line per revision: {task.lineage}",
+        "",
+    ]
+    rewrite.traces.mkdir(parents=True, exist_ok=True)
+    (rewrite.traces / "record.md").write_text("\n".join(lines))
+    return len(runs)
+
+
 def _since_original(task: layout.TaskDir, current: dict | None, out: Path) -> str:
     """How the revision being rewritten now differs from the original task, as
     one diff: the net effect of every earlier rewrite, so help a simplification
@@ -983,6 +1023,7 @@ def handle(
         n_history = _write_history(
             root, task, rewrite, strict_storage=workspace.is_local, current=d
         )
+        _write_record(root, task, rewrite)
         if n_history:
             log.info("%s history: %d earlier rewrites in traces/history", tid, n_history)
         parent_snapshot = None
