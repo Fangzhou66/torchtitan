@@ -225,6 +225,15 @@ class ValidationConfig:
     emit a tool call -- but the cap competes with the number of turns that fit in the
     context, so measure both."""
 
+    skip_until_weights_change: bool = False
+    """Skip periodic passes until an optimizer step has had a nonzero gradient.
+
+    With zero-advantage batches the gradient is zero and, with no weight decay,
+    Adam leaves the weights as they were, so a pass would re-measure the same
+    policy. After the first nonzero gradient Adam's moments keep moving the
+    weights every step, so every scheduled pass runs from then on. The
+    pre-training pass is unaffected."""
+
     run_async: bool = False
     """Run the pass as a background task instead of blocking the training step.
 
@@ -268,6 +277,17 @@ _EVAL_GUARD_MAX_FAILURES = 3
 # because the process was alive and heartbeating. A weight pull takes 25-62 s here,
 # so this is ~10x the worst observed and only fires on a hang.
 _WEIGHT_PULL_TIMEOUT_SEC = float(os.environ.get("SWE_WEIGHT_PULL_TIMEOUT_SEC", "600"))
+
+
+def _hold_validation_for_unchanged_weights(
+    validation: "ValidationConfig", *, weights_changed: bool, resumed: bool
+) -> bool:
+    """True when ``skip_until_weights_change`` holds back a scheduled pass: no step
+    of this run has had a nonzero gradient. A resumed run may have moved its
+    weights before the restart, so it always validates."""
+    return (
+        validation.skip_until_weights_change and not weights_changed and not resumed
+    )
 
 
 def _will_validate_after_step(
@@ -811,6 +831,10 @@ class Controller(Configurable):
         self._eval_guard_failures = 0
         # In-flight background validation pass (validation.run_async); None = idle.
         self._validation_task: asyncio.Task | None = None
+        # Set once an optimizer step has had a nonzero gradient (or on resume,
+        # where earlier steps may have moved the weights); read by
+        # ValidationConfig.skip_until_weights_change.
+        self._weights_changed = False
         # Aggregated metrics of each completed pass, keyed by the policy version it
         # scored. A background pass has no return value to the caller, so the
         # pre/post reward summary reads the start-step entry from here.
@@ -2810,6 +2834,18 @@ class Controller(Configurable):
                     )
                 self._trainer_policy_version = optim_result.policy_version
                 logger.info(f"[trainer_loop] step {step}: optim done")
+                if optim_result.metrics.get("train/grad_norm/mean", 0.0) > 0.0:
+                    self._weights_changed = True
+                if will_validate and _hold_validation_for_unchanged_weights(
+                    validation,
+                    weights_changed=self._weights_changed,
+                    resumed=self.start_step > 0,
+                ):
+                    logger.info(
+                        f"[trainer_loop] step {step}: no nonzero gradient yet, "
+                        "skipping validation (skip_until_weights_change)"
+                    )
+                    will_validate = False
 
                 # Weight sync: publish new weights before the next train step (push then pull, both awaited).
                 # TODO(perf): overlap weight sync (today both are awaited synchronously).

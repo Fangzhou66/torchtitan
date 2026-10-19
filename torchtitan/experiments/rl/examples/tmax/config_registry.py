@@ -297,6 +297,9 @@ def _tmax_9b_validation() -> ValidationConfig:
             int(os.environ.get("SWE_NUM_EVAL_GENERATORS", "0")) > 0
             or os.environ.get("SWE_VAL_ASYNC", "0") == "1"
         ),
+        # SWE_VAL_SKIP_UNCHANGED=1: no periodic pass until a step has had a nonzero
+        # gradient (a run of zero-advantage batches leaves the weights unchanged).
+        skip_until_weights_change=os.environ.get("SWE_VAL_SKIP_UNCHANGED", "0") == "1",
         trace=ValidationTraceRecorder.Config(
             enable=os.environ.get("SWE_VAL_TRACES", "1") == "1"
         ),

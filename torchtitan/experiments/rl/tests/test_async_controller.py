@@ -26,6 +26,7 @@ from torchtitan.experiments.rl.controller import (
     _EVAL_GUARD_MAX_FAILURES,
     _should_drop_group_at_batcher,
     _split_rollout_concurrency,
+    _hold_validation_for_unchanged_weights,
     _will_validate_after_step,
     AsyncLoopConfig,
     Controller,
@@ -1619,3 +1620,22 @@ def test_async_bookkeeping_cancels_sync_on_shutdown() -> None:
     queue.put_nowait(None)
     asyncio.run(controller._trainer_loop(queue, num_training_steps=3))
     assert ("sync_done", 1) not in order
+
+
+@pytest.mark.parametrize(
+    "skip, changed, resumed, held",
+    [
+        (False, False, False, False),
+        (True, False, False, True),
+        (True, True, False, False),
+        (True, False, True, False),
+    ],
+)
+def test_hold_validation_for_unchanged_weights(skip, changed, resumed, held) -> None:
+    validation = ValidationConfig(skip_until_weights_change=skip)
+    assert (
+        _hold_validation_for_unchanged_weights(
+            validation, weights_changed=changed, resumed=resumed
+        )
+        is held
+    )
