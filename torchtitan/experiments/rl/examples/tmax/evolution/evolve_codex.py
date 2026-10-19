@@ -1314,8 +1314,12 @@ the workflow after changing an input, the solution has to recompute from the
 inputs as they are at that moment; a hard-coded answer passes the first run and
 fails the re-run.
 
-If the failure is environmental rather than logical — a missing tool, no network
-— do not code around it. Write `BLOCKED: <reason>` to `run/verdict.txt` and stop.
+If the failure is environmental rather than logical — a missing tool, no room
+for the verifier's own dependencies, a lock or process the setup leaves behind —
+do not code around it in `solve.sh`: fix the environment it comes from (the
+Dockerfile, the setup), which is part of this job. Write `BLOCKED: <reason>` to
+`run/verdict.txt` and stop only when the platform itself fails -- the sandbox
+does not start, the network is down -- and nothing in the package can fix it.
 
 ## Work efficiently
 At most {max_calls} tool calls. Save your edits in place; do not print the files.

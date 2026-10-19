@@ -173,8 +173,11 @@ the observation of the evidence item for the attempt whose implementation you
 ran. Each other field is a nonempty string. The caller checks the
 declaration's form and evidence locations, not the truth of your diagnosis.
 
-If the evidence supports no change, write GIVE UP with the reason and keep the
-task unchanged.
+Every attempt failing is itself the evidence that help is needed: a teacher
+whose student keeps failing gives a hint, not up. When the traces are thin,
+start from the weakest help at the first point where the attempts go wrong.
+Write GIVE UP with the reason only when the task cannot be made valid here --
+a defect this environment does not let you repair -- and keep it unchanged.
 """
 
 
