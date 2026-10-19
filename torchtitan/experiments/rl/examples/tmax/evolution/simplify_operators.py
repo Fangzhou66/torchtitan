@@ -75,9 +75,9 @@ verifier details.
 Every attempt of the current student failed this task. Change it so the next
 group of the same size lands in the learnable band: some attempts succeed and
 some fail. A task that stays at 0/k gives no training signal and wastes every
-rollout spent on it; a task that overshoots to k/k costs one later hardening.
-Staying unlearnable is the costlier error, so when the evidence is uncertain,
-prefer the change more likely to produce successes.
+rollout spent on it; a task that overshoots to k/k gives no signal either,
+until a later hardening withdraws the help. Neither miss is the safe one: size
+the change to what the attempts show.
 
 ## Diagnose from the attempts
 
@@ -91,9 +91,8 @@ cause, then act on that cause:
   with nonempty "defect", "evidence" (attempt file and turn, or the conflicting
   file locations) and "change"; each repair is reported for review. The
   attempts measured the task with its defect, so they cannot show what the
-  repaired task needs: the repair is this rewrite's change. Add help beside it
-  only for an obstacle that attempts which got past the defect still failed
-  at, at the weakest strength that addresses it.
+  repaired task needs: the repair is this rewrite's only change, and the
+  repaired task is measured before any help is added.
 - Mechanics around the task: tool use, writing files through the terminal,
   exhausted time or context. Help with the mechanics and leave the task's
   decisions to the student.
