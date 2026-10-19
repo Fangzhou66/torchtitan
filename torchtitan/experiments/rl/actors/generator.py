@@ -229,18 +229,34 @@ def _install_fp32_native_lm_head() -> None:
     # (e.g. the della Aug-7 nightly) predate _apply_head and still take the
     # 4-arg _get_logits, so fall back to patching that -- raising here would
     # kill every vllm_native generator on those builds at first forward.
+    # Upcasting the full vocab x hidden weight on every call costs a 2-4 GB
+    # read+write per lm_head call (~0.9 ms each on H100, one call per decode step
+    # and one more per MTP draft step). Keep a persistent fp32 copy on the module
+    # instead (same math); _refresh_fp32_lm_head_cache updates it in place after
+    # each weight sync. SWE_GEN_FP32_LMHEAD_CACHE=0 restores the per-call upcast.
+    cache = os.environ.get("SWE_GEN_FP32_LMHEAD_CACHE", "1") == "1"
+
+    def _weight_fp32(lm_head):
+        if not cache:
+            return lm_head.weight.float()
+        w32 = getattr(lm_head, "_tt_w32", None)
+        if w32 is None:
+            w32 = lm_head.weight.detach().float()
+            object.__setattr__(lm_head, "_tt_w32", w32)
+        return w32
+
     if hasattr(LogitsProcessor, "_apply_head"):
 
         def _fp32_apply_head(self, lm_head, hidden_states, embedding_bias):
             bias = None if embedding_bias is None else embedding_bias.float()
-            return F.linear(hidden_states.float(), lm_head.weight.float(), bias)
+            return F.linear(hidden_states.float(), _weight_fp32(lm_head), bias)
 
         LogitsProcessor._apply_head = _fp32_apply_head
     else:
 
         def _fp32_get_logits(self, hidden_states, lm_head, embedding_bias):
             bias = None if embedding_bias is None else embedding_bias.float()
-            logits = F.linear(hidden_states.float(), lm_head.weight.float(), bias)
+            logits = F.linear(hidden_states.float(), _weight_fp32(lm_head), bias)
             logits = self._gather_logits(logits)
             if logits is not None:
                 logits = logits[..., : self.org_vocab_size]
@@ -248,6 +264,16 @@ def _install_fp32_native_lm_head() -> None:
 
         LogitsProcessor._get_logits = _fp32_get_logits
     LogitsProcessor._tt_fp32_lm_head = True
+
+
+def _refresh_fp32_lm_head_cache(model: torch.nn.Module) -> None:
+    """Copy freshly loaded lm_head weights into the fp32 caches, in place so any
+    tensor already captured by a CUDA graph sees the new values."""
+    with torch.no_grad():
+        for module in model.modules():
+            w32 = getattr(module, "_tt_w32", None)
+            if w32 is not None:
+                w32.copy_(module.weight)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -2139,6 +2165,7 @@ class VLLMGenerator(Actor, Configurable):
                 hf_state_dict = self._ep_partial_pull.embed_hf(hf_state_dict)
             _t2 = time.perf_counter()
             self._get_model().load_weights(hf_state_dict.items())
+            _refresh_fp32_lm_head_cache(self._get_model())
             _t3 = time.perf_counter()
             apply_detail = f"to_hf={_t2 - _t1:.2f}s load_weights={_t3 - _t2:.2f}s"
         else:
