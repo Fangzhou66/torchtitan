@@ -1416,15 +1416,30 @@ class VLLMGenerator(Actor, Configurable):
                 # The allreduce+rmsnorm fusion (on for TP > 1) needs FlashInfer
                 # all-reduce, which _install_flashinfer_allreduce_import_stub disables.
                 pass_config = PassConfig(fuse_allreduce_rms=False)
-                engine_kwargs["compilation_config"] = (
-                    CompilationConfig(custom_ops=custom_ops, pass_config=pass_config)
-                    if custom_ops
-                    else CompilationConfig(pass_config=pass_config)
+                compile_kwargs: dict[str, Any] = {"pass_config": pass_config}
+                if custom_ops:
+                    compile_kwargs["custom_ops"] = custom_ops
+                # vLLM captures graphs only up to min(2 * max_num_seqs, 512) tokens;
+                # a larger step runs with no graph, and under DP the synced graph mode
+                # is the min across ranks, so one rank's prefill tail drags every
+                # rank's decode to eager. Multi-turn steps (decodes + a prefill tail
+                # under one mamba block) mostly sit just above the default cap.
+                # 2048 covers them: 35B DP4xEP4 multi-turn -14% per-turn time, ~3.6
+                # GiB of graphs; 4096 OOMs at gpu_memory_limit 0.85. Same kernels,
+                # graph replay only. 0 keeps vLLM's default.
+                max_capture = int(
+                    os.environ.get("SWE_GEN_VLLM_MAX_CUDAGRAPH_CAPTURE_SIZE", "0")
+                )
+                if max_capture > 0:
+                    compile_kwargs["max_cudagraph_capture_size"] = max_capture
+                engine_kwargs["compilation_config"] = CompilationConfig(
+                    **compile_kwargs
                 )
                 logger.info(
                     "[generator] SWE_GEN_VLLM_DEFAULT_COMPILE=1: vLLM default "
                     "compile (inductor VLLM_COMPILE + FULL_AND_PIECEWISE), "
-                    f"custom_ops={custom_ops or 'vLLM default'}"
+                    f"custom_ops={custom_ops or 'vLLM default'}, "
+                    f"max_cudagraph_capture_size={max_capture or 'vLLM default'}"
                 )
             else:
                 vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
