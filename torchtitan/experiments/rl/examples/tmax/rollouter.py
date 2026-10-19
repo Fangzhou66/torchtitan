@@ -1121,6 +1121,16 @@ class TMaxRollouter(Rollouter):
         (TMAX_TERMINUS_MAX_TURNS); -1 removes the cap, leaving the agent time budget
         as the only bound."""
 
+        eval_agent_budget_cap_sec: int = 0
+        """Upper bound on a validation rollout's agent budget (0 = off). Caps the
+        per-task budgets that run past the default (TB-2.1 declares up to 12000 s);
+        a pass lasts as long as its slowest rollout."""
+
+        eval_verifier_budget_cap_sec: int = 0
+        """Upper bound on a validation rollout's grader budget, shadow grades
+        included (0 = off). No solved TB-2.1 trial graded past ~860 s, while hung
+        graders ran to 1800 s and held the pass open."""
+
         length_penalty: bool = False
         """In-group length penalty on solved training rollouts (off by default).
 
@@ -1203,6 +1213,8 @@ class TMaxRollouter(Rollouter):
                 f"{config.eval_max_turns}"
             )
         self._eval_max_turns = config.eval_max_turns
+        self._eval_agent_budget_cap_sec = config.eval_agent_budget_cap_sec
+        self._eval_verifier_budget_cap_sec = config.eval_verifier_budget_cap_sec
         self._reward_mode = config.reward_mode
         self._evolution_harder_ratio = config.evolution_harder_ratio
         self._evolution_easier_ratio = config.evolution_easier_ratio
@@ -1757,6 +1769,10 @@ class TMaxRollouter(Rollouter):
         # path the rollout takes out of it. Both are pure reads of `sample`.
         budget_sec = self._agent_budget_sec(sample)
         verifier_sec = self._verifier_budget_sec(sample)
+        if group_id < 0 and self._eval_agent_budget_cap_sec > 0:
+            budget_sec = min(budget_sec, self._eval_agent_budget_cap_sec)
+        if group_id < 0 and self._eval_verifier_budget_cap_sec > 0:
+            verifier_sec = min(verifier_sec, self._eval_verifier_budget_cap_sec)
         # Validation groups carry negative ids.
         max_context_tokens = (
             self._eval_max_context_tokens if group_id < 0 else self._max_context_tokens
