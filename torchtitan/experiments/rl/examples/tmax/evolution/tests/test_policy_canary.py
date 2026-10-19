@@ -293,12 +293,13 @@ def test_spec_repairs_are_outside_simplification_denominator(tmp_path):
 def test_repairs_made_inside_rewrites_are_counted(tmp_path):
     root = layout.Root(tmp_path)
     run = root.run("training")
-    fix = {"defect": "d", "evidence": "e", "change": "c"}
+    fix = {"defect": "d", "evidence": "e", "change": "c", "kind": "hidden_requirement"}
+    hack = {**fix, "kind": "reward_hack"}
     for index, (job, status, repair) in enumerate(
         [
-            ("harder", "accepted", [fix, fix]),
-            ("harder", "rejected", [fix]),
-            ("easier", "accepted", [fix]),
+            ("harder", "accepted", [hack, fix]),
+            ("harder", "rejected", [hack]),
+            ("easier", "accepted", [{**fix, "kind": "broken_setup"}]),
             ("easier", "accepted", None),
         ]
     ):
@@ -317,3 +318,17 @@ def test_repairs_made_inside_rewrites_are_counted(tmp_path):
     assert metrics["evolution/repairs/accepted_rewrites"] == 2
     assert metrics["evolution/repairs/harder"] == 2
     assert metrics["evolution/repairs/easier"] == 1
+    assert metrics["evolution/repairs/kind_reward_hack"] == 2
+    assert metrics["evolution/repairs/kind_hidden_requirement"] == 1
+    assert metrics["evolution/repairs/kind_broken_setup"] == 1
+    assert metrics["evolution/repairs/kind_other"] == 0
+    # Each fix becomes one report row with the rewriter's own text.
+    flow = EvolutionMetrics(run, root)
+    flow.poll(step=7)
+    assert [row[:5] for row in flow.repair_rows] == [
+        [7, "t", "harder", "accepted", "reward_hack"],
+        [7, "t", "harder", "accepted", "hidden_requirement"],
+        [7, "t", "harder", "rejected", "reward_hack"],
+        [7, "t", "easier", "accepted", "broken_setup"],
+    ]
+    assert flow.repair_rows[0][5:] == ["d", "e", "c"]

@@ -490,7 +490,14 @@ def test_round_persists_simplify_choice(tmp_path, monkeypatch):
 def test_round_carries_a_rewrites_repairs_into_its_record(tmp_path, monkeypatch):
     root = _root(tmp_path, monkeypatch)
     _signal(root, direction="easier")
-    repair = [{"defect": "unstated format", "evidence": "attempt-01 turn 3", "change": "stated"}]
+    repair = [
+        {
+            "defect": "unstated format",
+            "evidence": "attempt-01 turn 3",
+            "change": "stated",
+            "kind": "hidden_requirement",
+        }
+    ]
     seen = _stub(monkeypatch, repair=repair)
     od.run_round(root, workers=1)
     meta = json.loads(seen[0]["rewrite"].meta.read_text())

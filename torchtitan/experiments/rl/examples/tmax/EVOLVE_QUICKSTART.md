@@ -189,8 +189,13 @@ rewrite: a session that finds the task defective (a requirement the verifier
 checks but the instruction never states, a shortcut the verifier accepts, a
 broken setup) fixes it in the same rewrite and declares each fix in
 `run/repair.json`. Every declared fix is one line in `evolution/repairs.jsonl`
-(task, direction, defect, evidence, change, outcome) and one line in
+(task, direction, kind, defect, evidence, change, outcome) and one line in
 `loop.log`; read that file to review what the loop changed beyond difficulty.
+Each fix declares its kind (`reward_hack`, `hidden_requirement`,
+`broken_setup` or `other`), counted per run as `evolution/repairs/kind_<kind>`
+in wandb, with every fix and the rewriter's own defect, evidence and change in
+the `evolution/repairs/report` table; a `reward_hack` is logged at WARNING
+with the attempt it cites.
 `evolution/policy_canary/active` and `waiting` show controller admission load.
 
 A free worker takes the next pending signal at once, newest first, one per

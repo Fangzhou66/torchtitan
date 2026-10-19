@@ -731,6 +731,7 @@ def test_a_repair_made_in_the_rewrite_is_recorded_and_reported(
             "defect": "the verifier accepts a hand-written report",
             "evidence": "attempt-03 turn 4",
             "change": "the report is recomputed from a changed input",
+            "kind": "reward_hack",
         }
     ]
     calls = []
@@ -752,6 +753,34 @@ def test_a_repair_made_in_the_rewrite_is_recorded_and_reported(
     [line] = layout.read_jsonl(layout.Root.from_env().evolution.repairs)
     assert line["direction"] == job and line["status"] == "accepted"
     assert line["defect"] == repair[0]["defect"]
+    assert line["kind"] == "reward_hack"
+
+
+def test_a_reward_hack_is_a_warning_and_other_repairs_are_info(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("TRL_BASE", str(tmp_path / "root"))
+    fix = {"defect": "unstated format", "evidence": "attempt-02 turn 7", "change": "stated"}
+    rec = {
+        "task": "tw_a",
+        "job": "harder",
+        "status": "accepted",
+        "repair": [
+            {**fix, "kind": "hidden_requirement"},
+            {
+                "defect": "the verifier accepts a hard-coded answer",
+                "evidence": "attempt-04 turn 9",
+                "change": "the answer is recomputed from a changed input",
+                "kind": "reward_hack",
+            },
+        ],
+    }
+    with caplog.at_level("INFO", logger="feedback"):
+        fb._report_repairs(rec)
+    levels = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert levels[0][0] == "INFO" and "hidden_requirement" in levels[0][1]
+    assert levels[1][0] == "WARNING" and levels[1][1].startswith("reward hack repaired in tw_a")
+    assert "evidence: attempt-04 turn 9" in levels[1][1]
+    lines = layout.read_jsonl(layout.Root.from_env().evolution.repairs)
+    assert [line["kind"] for line in lines] == ["hidden_requirement", "reward_hack"]
 
 
 def test_a_rewrite_without_repairs_reports_nothing(tmp_path, monkeypatch):

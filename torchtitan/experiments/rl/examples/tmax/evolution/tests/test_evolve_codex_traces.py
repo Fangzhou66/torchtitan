@@ -90,6 +90,7 @@ def test_a_rewrite_declares_its_repairs_in_run_repair_json(tmp_path):
         "defect": "the verifier requires signer_email; the instruction names service_account_email",
         "evidence": "attempt-03 turn 12; tests/test_outputs.py:41",
         "change": "the instruction names signer_email",
+        "kind": "hidden_requirement",
     }
     (pkg / "run/repair.json").write_text(json.dumps([repair]))
     assert ec._read_repairs(pkg) == [repair]
@@ -98,6 +99,25 @@ def test_a_rewrite_declares_its_repairs_in_run_repair_json(tmp_path):
     (pkg / "run/repair.json").write_text(json.dumps([{**repair, "evidence": " "}]))
     with pytest.raises(ValueError, match="nonempty evidence"):
         ec._read_repairs(pkg)
+
+
+@pytest.mark.parametrize("kind", [None, "", "shortcut"])
+def test_a_repair_without_a_known_kind_fails_the_declaration(tmp_path, kind):
+    pkg = tmp_path / "pkg"
+    (pkg / "run").mkdir(parents=True)
+    repair = {"defect": "d", "evidence": "attempt-01 turn 2", "change": "c"}
+    if kind is not None:
+        repair["kind"] = kind
+    (pkg / "run/repair.json").write_text(json.dumps([repair]))
+    with pytest.raises(ValueError, match="needs a kind, one of reward_hack"):
+        ec._read_repairs(pkg)
+
+
+def test_both_rewrite_prompts_ask_for_every_repair_kind():
+    for prompt in (ec._HARDER_REPAIR_NOTE, so.prompt("vague")):
+        assert '"change" and "kind"' in prompt
+        for kind in ("reward_hack", "hidden_requirement", "broken_setup", "other"):
+            assert f'"{kind}"' in prompt
 
 
 def _rewrite(tmp_path, monkeypatch, job: str = "harder") -> layout.RewriteDir:
