@@ -323,7 +323,8 @@ def test_the_verifier_author_is_told_the_defects_the_author_repaired(tmp_path, m
             (cwd / "run" / "repair.json").write_text(json.dumps([{
                 "defect": "the HTTPS check rejects a served body when curl exits 56",
                 "evidence": "attempt-04.jsonl turn 5",
-                "change": "PRIVATE author draft wording"}]))
+                "change": "PRIVATE author draft wording",
+                "kind": "hidden_requirement"}]))
         return out
 
     monkeypatch.setattr(ec, "_run_codex", author_reports_a_repair)

@@ -89,9 +89,12 @@ cause, then act on that cause:
   it is part of this rewrite: state the requirement, fix the setup, or correct
   the check, and record every repair in run/repair.json as a list of objects
   with nonempty "defect", "evidence" (attempt file and turn, or the conflicting
-  file locations) and "change"; each repair is reported for review. The
-  attempts measured the task with its defect, so they cannot show what the
-  repaired task needs: the repair is this rewrite's only change, and the
+  file locations), "change" and "kind"; each repair is reported for review.
+  "kind" is "reward_hack" for a shortcut an attempt was rewarded for,
+  "hidden_requirement" for a check the instruction never states,
+  "broken_setup" for an environment missing what the task needs, and "other"
+  for anything else. The attempts measured the task with its defect, so they
+  cannot show what the repaired task needs: the repair is this rewrite's only change, and the
   repaired task is measured before any help is added.
 - Mechanics around the task: tool use, writing files through the terminal,
   exhausted time or context. Help with the mechanics and leave the task's

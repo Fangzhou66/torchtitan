@@ -36,7 +36,11 @@ Each signal is classified when it is consumed, so the counts only grow.
 `repairs/*` counts the defects harder and easier rewrites repaired on the way
 (declared in run/repair.json; one line each in evolution/repairs.jsonl):
 `rewrites` that repaired anything, the `fixes` they declared, how many of
-those rewrites were accepted, and the rewrites per signal direction.
+those rewrites were accepted, the rewrites per signal direction, and the
+fixes per declared kind (`kind_reward_hack`, `kind_hidden_requirement`,
+`kind_broken_setup`, `kind_other`). `repair_rows` keeps each fix with the
+rewriter's own defect, evidence and change, for the `evolution/repairs/report`
+table.
 """
 
 from __future__ import annotations
@@ -55,6 +59,9 @@ REWRITE_OUTCOMES = (
 )
 REWRITE_ROUTES = ("evolve", "simplify", "repair_spec", "invalid_signal")
 REPAIR_KEYS = ("rewrites", "fixes", "accepted_rewrites", "harder", "easier")
+# What a declared repair fixed; evolve_codex._read_repairs requires one per fix.
+REPAIR_KINDS = ("reward_hack", "hidden_requirement", "broken_setup", "other")
+REPAIR_COLUMNS = ("step", "task", "direction", "status", "kind", "defect", "evidence", "change")
 FLOW_KEYS = ("signals_issued", "signals_consumed", "rewrites_accepted", "rewrites_trained")
 DIRECTIONS = ("harder", "easier")
 # Merges the latency median looks back over: recent enough to move when the
@@ -83,6 +90,10 @@ def record_outcome(root: layout.Root, rewrite: layout.RewriteDir, meta: dict) ->
             "finished": meta.get("finished"),
             "signal": meta["signal"],
             "repairs": len(meta.get("repair") or []),
+            "repair": [
+                {k: r.get(k) for k in ("kind", "defect", "evidence", "change")}
+                for r in meta.get("repair") or []
+            ],
         },
     )
 
@@ -145,6 +156,8 @@ class EvolutionMetrics:
         self.stale_claims: set[str] = set()
         self.stale: Counter[str] = Counter()
         self.repairs: Counter[str] = Counter()
+        # One row per declared repair, for the report table beside the counts.
+        self.repair_rows: list[list] = []
 
     def _poll_claims(self) -> None:
         events, self.claim_offset = _new_lines(
@@ -238,6 +251,12 @@ class EvolutionMetrics:
                 self.repairs["rewrites"] += 1
                 self.repairs["fixes"] += fixes
                 self.repairs[event["direction"]] += 1
+                for repair in event.get("repair") or []:
+                    self.repairs[f"kind_{repair.get('kind')}"] += 1
+                    self.repair_rows.append(
+                        [step, event["task"], event["direction"], status,
+                         *(repair.get(k) for k in REPAIR_COLUMNS[4:])]
+                    )
                 if status == "accepted":
                     self.repairs["accepted_rewrites"] += 1
             self.stages[("failed" if status == "interrupted" else status, event.get("stage") or "none")] += 1
@@ -343,6 +362,7 @@ class EvolutionMetrics:
                 for o in REWRITE_OUTCOMES
             },
             **{f"evolution/repairs/{k}": float(self.repairs[k]) for k in REPAIR_KEYS},
+            **{f"evolution/repairs/kind_{k}": float(self.repairs[f"kind_{k}"]) for k in REPAIR_KINDS},
             **{
                 f"evolution/stale/{k}": float(self.stale[k])
                 for k in ("while_waiting", "while_rewriting")

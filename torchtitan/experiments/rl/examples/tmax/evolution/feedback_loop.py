@@ -940,8 +940,10 @@ def _report_repairs(rec: dict) -> None:
     the instruction never states, a shortcut the verifier accepts, a broken
     setup) and declares each fix in run/repair.json. A repair changes what the
     task asks or how it is graded, so each one is surfaced for review rather
-    than left inside its rewrite.json. A failure to write the report is logged
-    and does not cost the rewrite.
+    than left inside its rewrite.json. A reward hack -- an attempt rewarded for
+    a result the instruction rules out -- is logged as a warning with the
+    attempt it cites, so it stands out in loop.log. A failure to write the
+    report is logged and does not cost the rewrite.
     """
     for repair in rec.get("repair") or []:
         line = {
@@ -950,19 +952,31 @@ def _report_repairs(rec: dict) -> None:
             "direction": rec.get("job"),
             "status": rec.get("status"),
             "stage": rec.get("stage"),
+            "kind": repair.get("kind"),
             "defect": repair.get("defect"),
             "evidence": repair.get("evidence"),
             "change": repair.get("change"),
             "changed": rec.get("changed"),
             "reason": rec.get("reason"),
         }
-        log.info(
-            "repair %s (%s, %s): %s",
-            rec.get("task"),
-            rec.get("job"),
-            rec.get("status"),
-            str(repair.get("defect"))[:200],
-        )
+        if repair.get("kind") == "reward_hack":
+            log.warning(
+                "reward hack repaired in %s (%s, %s): %s; evidence: %s",
+                rec.get("task"),
+                rec.get("job"),
+                rec.get("status"),
+                str(repair.get("defect"))[:200],
+                str(repair.get("evidence"))[:200],
+            )
+        else:
+            log.info(
+                "repair %s (%s, %s, %s): %s",
+                rec.get("task"),
+                rec.get("job"),
+                rec.get("status"),
+                repair.get("kind"),
+                str(repair.get("defect"))[:200],
+            )
         try:
             layout.append_jsonl(layout.Root.from_env().evolution.repairs, line)
         except Exception as error:  # noqa: BLE001 -- the report must not cost the rewrite

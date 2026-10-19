@@ -54,6 +54,7 @@ import task_size as ts
 import verifier_literals as vl
 from rewrite_deadline import RewriteDeadline
 from torchtitan.experiments.rl.examples.tmax import layout, rollout_record
+from torchtitan.experiments.rl.examples.tmax.evolution_metrics import REPAIR_KINDS
 from verifier_probes import (
     run_executable,
     SemanticProbeContract,
@@ -2021,9 +2022,12 @@ check, an edited test or grading file -- or the task setup itself is broken,
 repairing that is part of this rewrite: make the requirement the shortcut
 skipped explicit and checkable, or fix the setup, then harden the repaired
 task. Record every repair in `run/repair.json`: a list of objects with
-nonempty "defect", "evidence" (attempt file and turn) and "change"; each repair
-is reported for review. An attempt that solved the task the intended way is not
-a defect, however quickly it did so."""
+nonempty "defect", "evidence" (attempt file and turn), "change" and "kind";
+each repair is reported for review. "kind" is "reward_hack" for a shortcut an
+attempt was rewarded for, "hidden_requirement" for a check the instruction
+never states, "broken_setup" for an environment missing what the task needs,
+and "other" for anything else. An attempt that solved the task the intended
+way is not a defect, however quickly it did so."""
 
 _EASIER_JOB = """This task was solved {solved} of {attempts} attempts.
 Diagnose the attempts and reduce one obstacle while retaining a stated skill.
@@ -3152,8 +3156,9 @@ def _read_repairs(pkg: Path) -> list[dict]:
     """The defects a harder or easier rewrite repaired on the way, from run/repair.json.
 
     Repair is part of the rewrite rather than a route of its own; the loop
-    reports each entry in evolution/repairs.jsonl. A malformed declaration
-    fails the rewrite, as a malformed simplify declaration does.
+    reports each entry in evolution/repairs.jsonl and counts it under its kind.
+    A malformed declaration fails the rewrite, as a malformed simplify
+    declaration does.
     """
     path = pkg / "run" / "repair.json"
     if not path.exists():
@@ -3167,6 +3172,10 @@ def _read_repairs(pkg: Path) -> list[dict]:
         for key in ("defect", "evidence", "change"):
             if not isinstance(repair, dict) or not str(repair.get(key) or "").strip():
                 raise ValueError(f"each repair in run/repair.json needs a nonempty {key}")
+        if repair.get("kind") not in REPAIR_KINDS:
+            raise ValueError(
+                f"each repair in run/repair.json needs a kind, one of {', '.join(REPAIR_KINDS)}"
+            )
     return repairs
 
 

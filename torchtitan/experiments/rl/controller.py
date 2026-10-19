@@ -2213,6 +2213,25 @@ class Controller(Configurable):
                                 )
                             )
                         wandb.log(charts, step=step, commit=False)
+                        # Each repair with the rewriter's own report, so a
+                        # reward hack is read in W&B, not only counted. Logged
+                        # only when a row arrives: every table is an upload.
+                        rows = self._evolution_flow.repair_rows
+                        if len(rows) > getattr(self, "_evolution_repair_rows", 0):
+                            from torchtitan.experiments.rl.examples.tmax.evolution_metrics import (
+                                REPAIR_COLUMNS,
+                            )
+
+                            wandb.log(
+                                {
+                                    "evolution/repairs/report": wandb.Table(
+                                        columns=list(REPAIR_COLUMNS), data=rows
+                                    )
+                                },
+                                step=step,
+                                commit=False,
+                            )
+                            self._evolution_repair_rows = len(rows)
                 except Exception:
                     logger.exception("failed to log the evolution flow chart")
         if run is not None and self.config.metrics.enable_wandb:
