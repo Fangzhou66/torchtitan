@@ -37,6 +37,7 @@ def test_evolution_ratio(
     worker._reward_mode = "sparse"
     worker._evolution_harder_ratio = ratio
     worker._evolution_easier_ratio = 0.0
+    worker._evolution_min_scored = 2
     sample = SimpleNamespace(instance_id="task", rev=0, image="image")
     siblings = [
         Rollout(
@@ -122,6 +123,7 @@ def test_easier_ratio_counts_solves_not_zero_rewards(
     worker._reward_mode = "sparse"
     worker._evolution_harder_ratio = 1.0
     worker._evolution_easier_ratio = easier_ratio
+    worker._evolution_min_scored = 2
     siblings = [
         Rollout(
             group_id=4,
@@ -159,6 +161,7 @@ def test_dense_evolution_keeps_zero_variance_rule(
     worker._reward_mode = "dense"
     worker._evolution_harder_ratio = 0.9
     worker._evolution_easier_ratio = 0.0
+    worker._evolution_min_scored = 2
     siblings = [
         Rollout(group_id=1, rollout_id=i, status=RolloutStatus.COMPLETED, reward=r)
         for i, r in enumerate(rewards)
@@ -170,3 +173,32 @@ def test_dense_evolution_keeps_zero_variance_rule(
     assert len(signals) == int(expected is not None)
     if signals:
         assert json.loads(signals[0].read_text())["direction"] == expected
+
+
+
+@pytest.mark.parametrize("min_scored,expect_signal", [(10, False), (9, True)])
+def test_min_scored_gates_thin_groups(monkeypatch, tmp_path, min_scored, expect_signal):
+    """9 scored solves plus 3 infra failures: a signal only when min_scored <= 9."""
+    monkeypatch.setenv("TRL_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("SWE_EVOLUTION_SIGNALS", "1")
+    worker = object.__new__(rollouter.TMaxRollouter)
+    worker._reward_mode = "sparse"
+    worker._evolution_harder_ratio = 1.0
+    worker._evolution_easier_ratio = 0.0
+    worker._evolution_min_scored = min_scored
+    sample = SimpleNamespace(instance_id="task", rev=0, image="image")
+    rewards = [1.0] * 9 + [float("nan")] * 3
+    siblings = [
+        Rollout(
+            group_id=3,
+            rollout_id=i,
+            status=RolloutStatus.COMPLETED,
+            reward=reward,
+            turns=[object()],
+            advantage=0.0,
+            diagnostics={"record": f"attempt-{i}.jsonl"},
+        )
+        for i, reward in enumerate(rewards)
+    ]
+    worker._maybe_emit_evolution_signal(sample, siblings)
+    assert bool(list(tmp_path.glob("signals/*.json"))) == expect_signal

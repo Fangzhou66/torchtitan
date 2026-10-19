@@ -227,6 +227,9 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         evolution_harder_ratio=float(
             os.environ.get("SWE_EVOLUTION_HARDER_RATIO", "1.0")
         ),
+        # SWE_EVOLUTION_MIN_SCORED: scored siblings a group needs to emit an
+        # evolution signal (both directions); match EVOLVE_EASIER_MIN_SCORED_ATTEMPTS.
+        evolution_min_scored=int(os.environ.get("SWE_EVOLUTION_MIN_SCORED", "2")),
         evolution_easier_ratio=float(
             os.environ.get("SWE_EVOLUTION_EASIER_RATIO", "0.0")
         ),

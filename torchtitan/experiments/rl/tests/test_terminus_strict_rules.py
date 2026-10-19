@@ -426,6 +426,7 @@ def _emit(monkeypatch, tmp_path, rollouts):
     worker._reward_mode = "sparse"
     worker._evolution_harder_ratio = 1.0
     worker._evolution_easier_ratio = 0.0
+    worker._evolution_min_scored = 2
     worker._maybe_emit_evolution_signal(
         SimpleNamespace(instance_id="task", rev=0, image="image"), rollouts
     )

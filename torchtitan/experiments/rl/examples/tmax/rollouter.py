@@ -1140,6 +1140,12 @@ class TMaxRollouter(Rollouter):
         existing zero-variance rule. Must be in (0, 1]. Mixed groups still train.
         """
 
+        evolution_min_scored: int = 2
+        """Fewest scored siblings (not infra-failed, not ended by a strict rule) a
+        training group needs before it emits an evolution signal in either
+        direction. The evolve loop applies its own floor to easier signals
+        (EVOLVE_EASIER_MIN_SCORED_ATTEMPTS); keep the two equal."""
+
         evolution_easier_ratio: float = 0.0
         """Maximum solved fraction for simplification. Must be in
         [0, evolution_harder_ratio).
@@ -1299,6 +1305,7 @@ class TMaxRollouter(Rollouter):
         self._reward_mode = config.reward_mode
         self._evolution_harder_ratio = config.evolution_harder_ratio
         self._evolution_easier_ratio = config.evolution_easier_ratio
+        self._evolution_min_scored = max(2, config.evolution_min_scored)
         self._length_penalty = config.length_penalty
         self._length_penalty_max = config.length_penalty_max
         self._length_penalty_deadzone = config.length_penalty_deadzone
@@ -1720,7 +1727,7 @@ class TMaxRollouter(Rollouter):
                 and r.diagnostics.get("finish_reason") not in _RULE_TERMINATED_REASONS
             ]
             rewards = [r.reward for r in scored]
-            if len(rewards) < 2:
+            if len(rewards) < self._evolution_min_scored:
                 return
             solved = sum(reward > 0 for reward in rewards)
             # How much of the group solved it, which is what both directions are

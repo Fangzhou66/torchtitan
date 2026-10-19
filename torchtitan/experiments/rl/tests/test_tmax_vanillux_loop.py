@@ -85,6 +85,7 @@ def _patch_sandbox_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(TMaxRollouter, "_reward_mode", "sparse", raising=False)
     monkeypatch.setattr(TMaxRollouter, "_evolution_harder_ratio", 1.0, raising=False)
     monkeypatch.setattr(TMaxRollouter, "_evolution_easier_ratio", 0.0, raising=False)
+    monkeypatch.setattr(TMaxRollouter, "_evolution_min_scored", 2, raising=False)
 
     async def prepare_runtime(sb: Any) -> None:
         pass
