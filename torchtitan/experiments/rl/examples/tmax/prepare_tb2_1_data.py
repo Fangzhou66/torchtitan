@@ -253,6 +253,37 @@ fi
             '&& Rscript -e \'stopifnot(Sys.getenv("R_REMOTES_UPGRADE") == "never")\'\n'
         ),
     },
+    # torch-pipeline-parallelism's verifier installs torch==2.7.0 from PyPI, which
+    # on Linux x86_64 is the CUDA build: ~3 GB with its nvidia-* wheels, on a task
+    # that declares gpus = 0. On its 1-vCPU sandbox, downloading that and importing
+    # it in every spawned rank runs the reference solution past the declared 900 s
+    # verifier budget (2026-10-19 oracle run: 3 of 4 tests done, exit 124).
+    # terminal-bench-2 #80 points at the pattern sam-cell-seg and pytorch-model-cli
+    # already use in their own verifiers: torch from PyTorch's CPU index
+    # (--index https://download.pytorch.org/whl/cpu --index-strategy
+    # unsafe-best-match). The same two settings are given here through uv's
+    # environment (UV_INDEX / UV_INDEX_STRATEGY), so the verifier's uvx line, its
+    # pins and its tests are unchanged: torch==2.7.0 resolves to 2.7.0+cpu, the
+    # same release on the same CPU kernels. uv checks every wheel against the
+    # sha256 the index lists. If the index cannot be reached the patch says so
+    # (TB21_ENV_PATCH_FAILED, /logs/verifier/tb21_env_patch_failed) and leaves the
+    # published behaviour in place.
+    "torch-pipeline-parallelism": {
+        "upstream": (
+            "harbor-framework/terminal-bench-2#80 (torch from the PyTorch CPU index, "
+            "as sam-cell-seg and pytorch-model-cli do; set through uv's environment)"
+        ),
+        "test_sh": r"""# torch==2.7.0 from PyTorch's CPU index (terminal-bench-2 #80): on PyPI it is the ~3 GB
+# CUDA build, on a gpus = 0 task, and it runs this verifier past its 900 s budget.
+if timeout 20 bash -c 'exec 3<>/dev/tcp/download.pytorch.org/443' 2>/dev/null; then
+  export UV_INDEX="https://download.pytorch.org/whl/cpu"
+  export UV_INDEX_STRATEGY=unsafe-best-match
+else
+  echo "TB21_ENV_PATCH_FAILED: torch-pipeline-parallelism could not reach the PyTorch CPU index; the verifier keeps the CUDA build and may run past its budget" >&2
+  mkdir -p /logs/verifier && echo "PyTorch CPU index unreachable" > /logs/verifier/tb21_env_patch_failed
+fi
+""",
+    },
 }
 
 

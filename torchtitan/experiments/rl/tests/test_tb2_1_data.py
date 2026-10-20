@@ -391,7 +391,7 @@ def test_size_string_parsing(size, expected):
     assert got == (1 if size == "512M" else expected)
 
 
-_PATCHED = ("qemu-startup", "qemu-alpine-ssh", "build-cython-ext")
+_PATCHED = ("qemu-startup", "qemu-alpine-ssh", "build-cython-ext", "torch-pipeline-parallelism")
 
 
 def test_env_patches_touch_only_the_listed_tasks(tmp_path):
@@ -406,7 +406,7 @@ def test_env_patches_touch_only_the_listed_tasks(tmp_path):
         for row in build_rows(tasks_root=str(root), env_patches=False)[0]
     }
 
-    assert len(rows) == len(plain) == 6
+    assert len(rows) == len(plain) == 7
     for task_id in ("build-pov-ray", "fix-git"):
         assert rows[task_id] == plain[task_id]
     # stan's patch lives in the image layer only; its verifier is untouched.
@@ -427,6 +427,10 @@ def test_env_patches_touch_only_the_listed_tasks(tmp_path):
         subprocess.run(["bash", "-n"], input=test_sh, text=True, check=True)
     assert "archive.debian.org" in rows["qemu-startup"]["metadata"]["tmax"]["test_sh"]
     assert "planarity==0.6" in rows["build-cython-ext"]["metadata"]["tmax"]["test_sh"]
+    assert "download.pytorch.org/whl/cpu" in (
+        rows["torch-pipeline-parallelism"]["metadata"]["tmax"]["test_sh"]
+    )
+    assert "dockerfile" not in rows["torch-pipeline-parallelism"]["metadata"]
     # A plain build carries the image layer as a Dockerfile on the task image, which
     # the sandbox builds instead of pulling the image.
     image = "docker.io/alexgshaw/demo:20260403"
@@ -441,6 +445,32 @@ def test_env_patches_touch_only_the_listed_tasks(tmp_path):
         assert "dockerfile" not in rows[task_id]["metadata"]
     assert not any("dockerfile" in row["metadata"] for row in plain.values())
 
+
+
+@pytest.mark.parametrize("reachable", [True, False])
+def test_torch_pipeline_patch_points_uv_at_the_cpu_index_or_says_why_not(
+    tmp_path, reachable
+):
+    """The torch-pipeline-parallelism block sets uv's CPU index when the index
+    answers, and otherwise leaves uv alone and prints TB21_ENV_PATCH_FAILED.
+    ``timeout`` is stubbed, so no network is needed."""
+    from torchtitan.experiments.rl.examples.tmax import prepare_tb2_1_data as B
+
+    block = B._ENV_PATCHES["torch-pipeline-parallelism"]["test_sh"]
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "timeout").write_text(f"#!/bin/sh\nexit {0 if reachable else 1}\n")
+    (stub / "timeout").chmod(0o755)
+    script = block + 'echo "UV_INDEX=${UV_INDEX-unset} STRATEGY=${UV_INDEX_STRATEGY-unset}"\n'
+    env = {"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    got = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    if reachable:
+        assert "UV_INDEX=https://download.pytorch.org/whl/cpu" in got.stdout
+        assert "STRATEGY=unsafe-best-match" in got.stdout
+        assert "TB21_ENV_PATCH_FAILED" not in got.stderr
+    else:
+        assert "UV_INDEX=unset STRATEGY=unset" in got.stdout
+        assert "TB21_ENV_PATCH_FAILED: torch-pipeline-parallelism" in got.stderr
 
 def test_env_patches_are_idempotent(tmp_path):
     from torchtitan.experiments.rl.examples.tmax.prepare_tb2_1_data import (
