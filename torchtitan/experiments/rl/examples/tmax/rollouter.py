@@ -1135,6 +1135,11 @@ class TMaxRollouter(Rollouter):
         unsubmitted rollout, inside the eval share of the rollout's guard.
         """
 
+        eval_shadow_grade_timeouts: bool = True
+        """``shadow_grade_unsubmitted`` for validation rollouts that ended on their
+        time budget. Those finish last, so their shadow grade sits on the pass's
+        critical path; off skips it (they almost never pass)."""
+
         evolution_harder_ratio: float = 1.0
         """Minimum solved fraction for sparse-reward hardening; dense keeps its
         existing zero-variance rule. Must be in (0, 1]. Mixed groups still train.
@@ -1334,6 +1339,7 @@ class TMaxRollouter(Rollouter):
             or os.environ.get("TMAX_CTRF_DIAGNOSTICS", "0") == "1"
         )
         self._shadow_grade_unsubmitted = config.shadow_grade_unsubmitted
+        self._eval_shadow_grade_timeouts = config.eval_shadow_grade_timeouts
         # Whole-rollout wall-clock guard: agent budget + eval + boot buffer.
         # Fallback guard; a rollout whose task declares its own budget derives its
         # own (see _agent_budget_sec / _guard_for).
@@ -2164,6 +2170,11 @@ class TMaxRollouter(Rollouter):
                             self._shadow_grade_unsubmitted
                             and not sample.tmax.get("separate_verifier")
                             and finish_reason not in _RULE_TERMINATED_REASONS
+                            and (
+                                group_id >= 0
+                                or self._eval_shadow_grade_timeouts
+                                or finish_reason != "hit_time_budget"
+                            )
                         ):
                             # Grade the sandbox as the agent left it, for the
                             # record only; the rollout keeps reward 0. A failed

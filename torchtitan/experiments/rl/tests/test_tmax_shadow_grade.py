@@ -41,16 +41,29 @@ def _rollouter(*, shadow: bool) -> TMaxRollouter:
     r._max_context_tokens = 4096
     r._eval_max_context_tokens = 4096
     r._eval_max_turns = 0
+    r._eval_agent_budget_cap_sec = 0
+    r._eval_verifier_budget_cap_sec = 0
     r._strict_format = r._strict_opening = r._strict_truncation = False
     r._eval_strict_format = r._eval_strict_opening = r._eval_strict_truncation = False
     r._reward_mode = "sparse"
     r._read_ctrf = False
     r._shadow_grade_unsubmitted = shadow
+    r._eval_shadow_grade_timeouts = True
     r._rollout_gate = _RolloutIssueGate(1)
     return r
 
 
-def _run(rollouter, monkeypatch, *, submitted: bool, grade, tmax=None, boot=None):
+def _run(
+    rollouter,
+    monkeypatch,
+    *,
+    submitted: bool,
+    grade,
+    tmax=None,
+    boot=None,
+    finish_reason="hit_context_limit",
+    group_id=0,
+):
     @contextlib.asynccontextmanager
     async def fake_boot(*args, **kwargs):
         sandbox = AsyncMock()
@@ -62,7 +75,7 @@ def _run(rollouter, monkeypatch, *, submitted: bool, grade, tmax=None, boot=None
         return AgentRun(
             turns=1,
             submitted=submitted,
-            finish_reason="submit" if submitted else "hit_context_limit",
+            finish_reason="submit" if submitted else finish_reason,
         )
 
     monkeypatch.delenv("TRL_RUN_DIR", raising=False)
@@ -98,7 +111,7 @@ def _run(rollouter, monkeypatch, *, submitted: bool, grade, tmax=None, boot=None
             adapter=adapter,
             generate_fn=AsyncMock(),
             sample=sample,
-            group_id=0,
+            group_id=group_id,
             rollout_idx=0,
             sampling=SimpleNamespace(seed=0),
             renderer=object(),
@@ -126,6 +139,32 @@ def test_an_unsubmitted_solve_is_recorded_but_still_scores_zero(monkeypatch):
     assert rollout.diagnostics["shadow_reward"] == 1.0
     assert rollout.diagnostics["verifier"]["shadow"] == {"reward": 1.0, "exit_code": 0}
     assert rollout.diagnostics["infra_failed"] is False
+
+
+@pytest.mark.parametrize(
+    "group_id, finish_reason, eval_timeouts, graded",
+    [
+        (-1, "hit_time_budget", False, False),
+        (-1, "hit_time_budget", True, True),
+        (-1, "hit_context_limit", False, True),
+        (0, "hit_time_budget", False, True),
+    ],
+)
+def test_validation_timeouts_skip_the_shadow_grade_when_off(
+    monkeypatch, group_id, finish_reason, eval_timeouts, graded
+):
+    rollouter = _rollouter(shadow=True)
+    rollouter._eval_shadow_grade_timeouts = eval_timeouts
+    calls = []
+    _run(
+        rollouter,
+        monkeypatch,
+        submitted=False,
+        grade=_grade(1.0, calls),
+        finish_reason=finish_reason,
+        group_id=group_id,
+    )
+    assert bool(calls) == graded
 
 
 def test_off_by_default_nothing_extra_runs(monkeypatch):

@@ -244,6 +244,18 @@ class ValidationConfig:
     ``num_eval_generators > 0``: otherwise the pass competes with rollout collection
     for the training generators."""
 
+    defer_busy_passes: bool = False
+    """With ``run_async``, a pass that comes due while the previous one is still
+    running is deferred, not skipped: it starts after the first step that ends
+    with no pass in flight, on that step's weights. At most one waits. Off keeps
+    the skip. ``validation/policy_version`` records which step was scored."""
+
+    trace_report_in_background: bool = False
+    """Write the per-pass trace report in a background task instead of inside the
+    pass, so the pass counts as finished once its rollouts are collected (the
+    report took 11-15 min per 445-trial pass). ``validation/trace_pass_at_k`` is
+    then not logged; ``validation/pass_at_k`` carries the same number."""
+
     trace: ValidationTraceRecorder.Config = field(
         default_factory=ValidationTraceRecorder.Config
     )
@@ -831,6 +843,10 @@ class Controller(Configurable):
         self._eval_guard_failures = 0
         # In-flight background validation pass (validation.run_async); None = idle.
         self._validation_task: asyncio.Task | None = None
+        # A pass that came due while one was in flight (defer_busy_passes).
+        self._validation_deferred = False
+        # Trace reports written outside their pass (trace_report_in_background).
+        self._trace_report_tasks: set[asyncio.Task] = set()
         # Set once an optimizer step has had a nonzero gradient (or on resume,
         # where earlier steps may have moved the weights); read by
         # ValidationConfig.skip_until_weights_change.
@@ -1708,12 +1724,19 @@ class Controller(Configurable):
         # Off the event loop: the report decodes and writes all 445 trials to
         # the dump mount, measured at ~500 s per pass, during which the loop
         # served no rollouts, data input or batching.
-        summary = await asyncio.to_thread(
+        report = asyncio.to_thread(
             self._record_validation_traces,
             step=step,
             samples=samples,
             rollout_groups=rollout_groups,
         )
+        summary = None
+        if validation.trace_report_in_background:
+            task = asyncio.create_task(report, name=f"validation_trace_{step}")
+            self._trace_report_tasks.add(task)
+            task.add_done_callback(self._trace_report_tasks.discard)
+        else:
+            summary = await report
         if summary is not None and summary.pass_at_k is not None:
             metrics.append(
                 m.Metric("validation/trace_pass_at_k", m.NoReduce(summary.pass_at_k))
@@ -2118,9 +2141,23 @@ class Controller(Configurable):
         A pass still running when the next interval comes around is skipped rather
         than queued: queueing would stack passes behind a slow benchmark forever, and
         the newer policy version is the one worth measuring. The skip is counted so a
-        thin eval curve is visible rather than silent.
+        thin eval curve is visible rather than silent. With
+        ``validation.defer_busy_passes`` it is deferred instead (at most one).
         """
         if self._validation_pass_in_flight():
+            if self.config.async_loop.validation.defer_busy_passes:
+                logger.warning(
+                    f"step {step}: previous validation pass still running; "
+                    "deferring this one until it finishes"
+                )
+                self._validation_deferred = True
+                self.metrics_processor.log(
+                    step=step,
+                    metrics=[m.Metric("validation/deferred", m.Sum(1.0))],
+                    is_validation=True,
+                    commit=True,
+                )
+                return
             logger.warning(
                 "step %d: previous validation pass still running; skipping this one. "
                 "Raise validation.interval or add eval capacity.",
@@ -2149,10 +2186,13 @@ class Controller(Configurable):
     async def _await_pending_validation(self) -> None:
         """Wait for an in-flight background validation pass before shutting down."""
         task = self._validation_task
-        if task is None or task.done():
-            return
-        logger.info("Waiting for the in-flight background validation pass to finish")
-        await task
+        if task is not None and not task.done():
+            logger.info(
+                "Waiting for the in-flight background validation pass to finish"
+            )
+            await task
+        if self._trace_report_tasks:
+            await asyncio.gather(*self._trace_report_tasks, return_exceptions=True)
 
     def _log_reward_delta(self, pre: dict[str, float], post: dict[str, float]) -> None:
         """Console pre/post reward summary, visible without scrolling back through the loop."""
@@ -2750,6 +2790,10 @@ class Controller(Configurable):
             will_validate = _will_validate_after_step(
                 validation=validation, step=step, num_training_steps=num_training_steps
             )
+            # A deferred pass runs on the first step that starts with none in flight.
+            if self._validation_deferred and not self._validation_pass_in_flight():
+                will_validate = True
+                self._validation_deferred = False
             step_timer = MetricsTimer()
             if prev_post_step_s is not None:
                 step_timer.durations["timing/step/post_step"].append(prev_post_step_s)

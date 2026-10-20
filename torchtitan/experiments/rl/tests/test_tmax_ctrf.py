@@ -167,6 +167,7 @@ def _stub_rollouter(
     rollouter._reward_mode = reward_mode
     rollouter._read_ctrf = True
     rollouter._shadow_grade_unsubmitted = False
+    rollouter._eval_shadow_grade_timeouts = True
     rollouter._rollout_gate = _RolloutIssueGate(1)
 
     @contextlib.asynccontextmanager

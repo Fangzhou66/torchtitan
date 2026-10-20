@@ -1050,7 +1050,12 @@ def test_async_validation_skips_while_a_pass_is_in_flight() -> None:
 
     async def run() -> None:
         controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(validation=ValidationConfig())
+        )
         controller._validation_task = None
+        controller._validation_deferred = False
+        controller._trace_report_tasks = set()
         controller.metrics_processor = MagicMock()
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1073,6 +1078,44 @@ def test_async_validation_skips_while_a_pass_is_in_flight() -> None:
         controller.metrics_processor.log.assert_called_once()
         skipped = controller.metrics_processor.log.call_args.kwargs["metrics"]
         assert [metric.key for metric in skipped] == ["validation/skipped"]
+
+        release.set()
+        await controller._await_pending_validation()
+        assert not controller._validation_pass_in_flight()
+
+    asyncio.run(run())
+
+
+def test_async_validation_defers_while_a_pass_is_in_flight() -> None:
+    """With defer_busy_passes a pass that comes due under another is remembered,
+    not dropped, and no second pass starts under the first."""
+
+    async def run() -> None:
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(
+                validation=ValidationConfig(defer_busy_passes=True)
+            )
+        )
+        controller._validation_task = None
+        controller._validation_deferred = False
+        controller._validation_deferred = False
+        controller._trace_report_tasks = set()
+        controller.metrics_processor = MagicMock()
+        release = asyncio.Event()
+
+        async def _slow_validate(*, step: int):
+            await release.wait()
+            return []
+
+        controller._validate_and_log = _slow_validate
+        controller._start_async_validation(step=20)
+        first_task = controller._validation_task
+        controller._start_async_validation(step=40)
+        assert controller._validation_task is first_task
+        assert controller._validation_deferred
+        deferred = controller.metrics_processor.log.call_args.kwargs["metrics"]
+        assert [metric.key for metric in deferred] == ["validation/deferred"]
 
         release.set()
         await controller._await_pending_validation()
@@ -1122,6 +1165,7 @@ def test_eval_log_step_ping_only_while_validation_is_idle(
         if validation_in_flight:
             validation_task = asyncio.create_task(asyncio.Event().wait())
         controller._validation_task = validation_task
+        controller._validation_deferred = False
 
         training_batch_queue = asyncio.Queue()
         training_batch_queue.put_nowait(None)
@@ -1277,11 +1321,13 @@ def test_eval_pull_schedule(only_before_validation: bool) -> None:
             eval_pull_only_before_validation=only_before_validation
         )
         controller._validation_task = None
+        controller._validation_deferred = False
         assert controller._include_eval_pull(will_validate=True)
         assert controller._include_eval_pull(will_validate=False) is (
             not only_before_validation
         )
         controller._validation_task = asyncio.create_task(asyncio.Event().wait())
+        controller._validation_deferred = False
         try:
             assert not controller._include_eval_pull(will_validate=True)
             assert not controller._include_eval_pull(will_validate=False)
@@ -1299,6 +1345,7 @@ def test_eval_pull_only_before_validation_versions() -> None:
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(eval_pull_only_before_validation=True)
     controller._validation_task = None
+    controller._validation_deferred = False
     pulled = [
         step
         for step in range(1, 8)
@@ -1486,6 +1533,7 @@ def _bookkeeping_controller(*, async_bookkeeping: bool, num_steps: int, order: l
     controller._trainer_policy_version = 0
     controller._generator_policy_version = 0
     controller._validation_task = None
+    controller._validation_deferred = False
     controller.eval_generator_router = None
     controller.training_lineage = MagicMock()
     controller.metrics_processor = MagicMock()

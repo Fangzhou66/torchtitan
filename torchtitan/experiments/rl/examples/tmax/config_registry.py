@@ -251,6 +251,12 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         shadow_grade_unsubmitted=(
             os.environ.get("TMAX_SHADOW_GRADE_UNSUBMITTED", "1") == "1"
         ),
+        # Validation rollouts that ran out their time budget are the tail of every
+        # pass; their shadow grade added up to 900 s more. Off unless
+        # SWE_EVAL_SHADOW_GRADE_TIMEOUTS=1.
+        eval_shadow_grade_timeouts=(
+            os.environ.get("SWE_EVAL_SHADOW_GRADE_TIMEOUTS", "0") == "1"
+        ),
         # MiMo-style in-group length penalty on solves (TMaxRollouter.Config.
         # length_penalty*), off unless SWE_LENGTH_PENALTY=1. Defaults are MiMo's
         # general recipe. Over a 150-step agentpick run the median turns per rollout
@@ -323,6 +329,13 @@ def _tmax_9b_validation() -> ValidationConfig:
         # SWE_VAL_SKIP_UNCHANGED=1: no periodic pass until a step has had a nonzero
         # gradient (a run of zero-advantage batches leaves the weights unchanged).
         skip_until_weights_change=os.environ.get("SWE_VAL_SKIP_UNCHANGED", "0") == "1",
+        # The trace report is written outside the pass so the pass ends when its
+        # rollouts are in. SWE_VAL_DEFER=1 also defers a pass that comes due
+        # under a running one instead of skipping it (off by default).
+        defer_busy_passes=os.environ.get("SWE_VAL_DEFER", "0") == "1",
+        trace_report_in_background=(
+            os.environ.get("SWE_VAL_TRACE_BACKGROUND", "1") == "1"
+        ),
         trace=ValidationTraceRecorder.Config(
             enable=os.environ.get("SWE_VAL_TRACES", "1") == "1"
         ),
