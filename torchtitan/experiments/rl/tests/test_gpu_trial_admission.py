@@ -420,3 +420,74 @@ def test_slot_wait_is_reported_for_gpu_rows_only():
     assert "rollout/gpu_slot_wait_secs_mean" in keys(
         [{"boot_secs": 1.0}, {"boot_secs": 1.0, "gpu_slot_wait_secs": 4.0}]
     )
+
+
+
+def test_a_negative_limit_is_an_error_not_off(tmp_path):
+    rows = str(tmp_path / "rows.jsonl")
+    with open(rows, "w") as f:
+        f.write(
+            '{"prompt": "p", "metadata": {"instance_id": "t", "image": "i", "tmax": {"t": 1}}}\n'
+        )
+    config = TMaxRollouter.Config(
+        train_dataset=rollouter_mod.TMaxDataset.Config(data_path=rows),
+        validation_dataset=rollouter_mod.TMaxDataset.Config(data_path=rows),
+        gpu_trial_concurrency=-1,
+    )
+    with pytest.raises(ValueError, match="must be >= 0"):
+        config.build()
+    assert TMaxRollouter.Config(
+        train_dataset=rollouter_mod.TMaxDataset.Config(data_path=rows),
+        validation_dataset=rollouter_mod.TMaxDataset.Config(data_path=rows),
+        gpu_trial_concurrency=0,
+    ).build()._gpu_admission is None
+
+
+class _FailingGate:
+    async def acquire_sibling(self, priority):
+        raise RuntimeError("gate broke")
+
+    def release(self):
+        raise AssertionError("never acquired")
+
+
+def test_the_slot_comes_back_when_the_gate_raises(monkeypatch, tmp_path):
+    _patch_rollout(monkeypatch)
+    admission = GpuTrialAdmission(1, slot_dir=str(tmp_path), poll_sec=0.002)
+    rollouter = _rollouter(admission)
+    rollouter._rollout_gate = _FailingGate()
+    rows = [_row("g0", daytona_gpu=1, daytona_target="earth")]
+    (result,) = asyncio.run(_run_all(rollouter, rows))
+    assert isinstance(result, RuntimeError)
+    slot = admission.try_acquire()
+    assert slot is not None
+    slot.release()
+
+
+def test_the_slot_comes_back_when_the_gate_wait_is_cancelled(monkeypatch, tmp_path):
+    _patch_rollout(monkeypatch)
+
+    async def run():
+        admission = GpuTrialAdmission(1, slot_dir=str(tmp_path), poll_sec=0.002)
+        rollouter = _rollouter(admission)
+        rollouter._rollout_gate = _RolloutIssueGate(1)
+        await rollouter._rollout_gate.acquire_sibling((-1, 0))  # the only seat is taken
+        trial = asyncio.create_task(
+            _run_all(rollouter, [_row("g0", daytona_gpu=1, daytona_target="earth")])
+        )
+        for _ in range(200):  # until it holds the slot and waits at the gate
+            await asyncio.sleep(0.005)
+            probe = admission.try_acquire()
+            if probe is None:
+                break
+            probe.release()
+        else:
+            raise AssertionError("the trial never took the GPU slot")
+        trial.cancel()
+        await asyncio.gather(trial, return_exceptions=True)
+        slot = admission.try_acquire()
+        assert slot is not None
+        slot.release()
+        rollouter._rollout_gate.release()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=30))

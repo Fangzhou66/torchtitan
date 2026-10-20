@@ -1516,6 +1516,11 @@ class TMaxRollouter(Rollouter):
         # release. Ordering is per worker. The controller pins group-loop lanes to
         # workers, and each gate prioritizes the groups claimed by its lanes.
         self._rollout_gate = _RolloutIssueGate(config.rollout_concurrency)
+        if config.gpu_trial_concurrency < 0:
+            raise ValueError(
+                "gpu_trial_concurrency (SWE_GPU_TRIAL_CONCURRENCY) must be >= 0 "
+                f"(0 = no limit), got {config.gpu_trial_concurrency}"
+            )
         self._gpu_admission = (
             gpu_admission.GpuTrialAdmission(config.gpu_trial_concurrency)
             if config.gpu_trial_concurrency > 0
