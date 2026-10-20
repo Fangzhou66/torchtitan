@@ -211,11 +211,15 @@ class RewardObserverTest(unittest.TestCase):
                     wandb.plot = SimpleNamespace(
                         line_series=lambda xs, ys, **kwargs: (xs, ys, kwargs["title"])
                     )
+                    wandb.Table = lambda columns, data: (columns, data)
                     namespace["_evolution_metrics"](owner, step=2)
                     self.assertEqual(
                         sorted(logged[0]),
                         ["evolution/flow/chart_easier", "evolution/flow/chart_harder"],
                     )
+                    # The rewrite reaches the rewrite report.
+                    columns, rows = logged[1]["evolution/rewrites/report"]
+                    self.assertEqual(rows[0][:4], [None, "a", "harder", "accepted"])
                     self.assertEqual(
                         logged[0]["evolution/flow/chart_harder"][2],
                         "Evolution flow, harder signals (cumulative)",
@@ -580,6 +584,67 @@ class RewardObserverTest(unittest.TestCase):
             later = metrics.poll(step=10)
             self.assertEqual(later["evolution/flow/rewrites_trained"], 1)
             self.assertEqual(later["evolution/flow/train_latency_steps"], 7)
+
+    def test_rewrite_report_has_before_declaration_and_after(self):
+        """One row per rewrite: the signal's group, what the rewriter declared,
+        and the groups training finished on the revision it produced."""
+        stamp = observer.layout.stamp
+        with tempfile.TemporaryDirectory() as directory:
+            root = observer.layout.Root(Path(directory))
+            run = root.run("current")
+            events = run.trainer / "training_lineage/events.jsonl"
+            base = 1_790_000_000
+
+            def lineage(event, group, revision, at, **fields):
+                observer.layout.append_jsonl(
+                    events,
+                    {
+                        "event": event,
+                        "group_id": group,
+                        "task_id": "a",
+                        "sample_revision": revision,
+                        "occurrence_id": f"s:{group}",
+                        "time_unix_ns": (base + at) * 10**9,
+                        **fields,
+                    },
+                )
+
+            lineage("claimed", 1, "a@0", 0, generator_policy_version=2)
+            lineage("finalized", 1, "a@0", 50, num_scored_rollouts=12, num_solved=0)
+            observer.layout.write_json_atomic(
+                run.signal("a", 1),
+                {"task": "a", "group": 1, "created": stamp(base + 100),
+                 "solved": 0, "total": 12},
+            )
+            signal = observer.layout.signal_id(run.name, "a", 1)
+            outcome_metrics.record_outcome(
+                root,
+                root.evolution.task("a").rewrite("easier", "1"),
+                {
+                    "signal": signal, "task": "a", "job": "easier", "status": "accepted",
+                    "finished": stamp(base + 300), "input_rev": 0, "result_rev": 1,
+                    "simplify": {"retained_skill": "shard the weight", "change": "x" * 700,
+                                 "expected": "6 of 12"},
+                },
+            )
+            metrics = outcome_metrics.EvolutionMetrics(run, root)
+            metrics.poll(step=4)
+            [row] = metrics.report_rows()
+            cells = dict(zip(outcome_metrics.REWRITE_COLUMNS, row))
+            self.assertEqual(cells["before"], "0/12")
+            self.assertEqual(cells["revs"], "r0->r1")
+            self.assertEqual(cells["expected"], "6 of 12")
+            self.assertEqual(cells["retained_skill"], "shard the weight")
+            self.assertEqual(len(cells["change"]), outcome_metrics.REPORT_CHARS + 3)
+            self.assertIsNone(cells["after"])
+
+            # Finished before the rewrite was accepted: still the old revision.
+            lineage("finalized", 2, "a@0", 200, num_scored_rollouts=12, num_solved=0)
+            lineage("finalized", 3, "a@1", 900, num_scored_rollouts=12, num_solved=5)
+            lineage("finalized", 4, "a@1", 950, num_scored_rollouts=12, num_solved=7)
+            metrics.poll(step=6)
+            cells = dict(zip(outcome_metrics.REWRITE_COLUMNS, metrics.report_rows()[0]))
+            self.assertEqual(cells["after"], "5/12, 7/12; solved 0.50")
 
     def test_flow_is_also_split_by_the_signals_direction(self):
         stamp = observer.layout.stamp

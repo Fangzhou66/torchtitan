@@ -2272,6 +2272,29 @@ class Controller(Configurable):
                                 commit=False,
                             )
                             self._evolution_repair_rows = len(rows)
+                        # Every rewrite: before, what it did, after. Its rows
+                        # change as groups finish, so it is uploaded at most
+                        # every REWRITE_REPORT_EVERY steps, and only if changed.
+                        from torchtitan.experiments.rl.examples.tmax.evolution_metrics import (
+                            REWRITE_COLUMNS,
+                            REWRITE_REPORT_EVERY,
+                        )
+
+                        report = self._evolution_flow.report_rows()
+                        last_step, last = getattr(self, "_evolution_rewrite_report", (None, None))
+                        if report and report != last and (
+                            last_step is None or step - last_step >= REWRITE_REPORT_EVERY
+                        ):
+                            wandb.log(
+                                {
+                                    "evolution/rewrites/report": wandb.Table(
+                                        columns=list(REWRITE_COLUMNS), data=report
+                                    )
+                                },
+                                step=step,
+                                commit=False,
+                            )
+                            self._evolution_rewrite_report = (step, report)
                 except Exception:
                     logger.exception("failed to log the evolution flow chart")
         if run is not None and self.config.metrics.enable_wandb:
