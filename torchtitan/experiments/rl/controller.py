@@ -199,7 +199,9 @@ def _should_drop_group_at_batcher(*, group_age: int, max_offpolicy_steps: int) -
 _VALIDATION_SET_NAME = re.compile(r"[a-z][a-z0-9]*")
 # Single words the unnamed set already logs under validation/<word>; a set by one of
 # these names would land on top of them.
-_RESERVED_VALIDATION_SET_NAMES = frozenset({"valid", "skipped", "reward", "default"})
+_RESERVED_VALIDATION_SET_NAMES = frozenset(
+    {"valid", "skipped", "deferred", "reward", "default"}
+)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -210,7 +212,8 @@ class ValidationSetConfig:
     under ``validation/<name>/`` (pass@k, avg@k as ``validation/<name>/reward``,
     the rollouter's finish fractions, ``valid``), and its trace report under
     ``<dump>/validation_traces/<name>/step-<N>/``. Fields left at their defaults
-    inherit the main ``ValidationConfig``.
+    inherit the main ``ValidationConfig``. The eval generators' own latency metrics
+    (``validation_generator/*``) stay pooled across sets: the generators are shared.
     """
 
     name: str
@@ -233,7 +236,8 @@ class ValidationSetConfig:
 
     every: int = 1
     """Score this set on every ``every``-th validation pass (1 = every pass). The
-    pre-training pass and the final pass always include it."""
+    pre-training pass and the post-training pass always include it. The pass count
+    is not checkpointed: after a resume the first pass includes every set."""
 
     def __post_init__(self) -> None:
         if not _VALIDATION_SET_NAME.fullmatch(self.name or ""):
@@ -1831,26 +1835,28 @@ class Controller(Configurable):
         return num_samples, validation_set.group_size or validation.group_size
 
     def _validation_set_due(
-        self, validation_set: ValidationSetConfig, *, step: int
+        self, validation_set: ValidationSetConfig, *, final: bool
     ) -> bool:
-        """Whether this pass scores ``validation_set`` (see ``every``)."""
+        """Whether this pass scores ``validation_set`` (see ``every``). ``final`` is
+        the post-training pass, which may come before ``num_training_steps`` when
+        the loop exits early."""
         pass_index = getattr(self, "_validation_pass_index", 0)
-        num_training_steps = getattr(self.config.async_loop, "num_training_steps", None)
         return validation_set.num_samples != 0 and (
             validation_set.every == 1
             or pass_index % validation_set.every == 0
-            or step == num_training_steps
+            or final
         )
 
     # TODO: we currently determine validation.num_samples
     # but what if i want to run the entire dataset?
     @sl.log_trace_span("validate")
-    async def validate(self, *, step: int) -> list[m.Metric]:
+    async def validate(self, *, step: int, final: bool = False) -> list[m.Metric]:
         """Run one validation pass over held-out prompts.
 
         Args:
             step: Policy version this pass scores (0 for the pre-training pass);
                 tagged into logged rollout samples and the trace report directory.
+            final: The post-training pass; it scores every named set.
 
         Returns:
             Validation rollout metrics, generation metrics, and validation
@@ -1878,7 +1884,7 @@ class Controller(Configurable):
         due_sets = [
             validation_set
             for validation_set in validation.sets
-            if self._validation_set_due(validation_set, step=step)
+            if self._validation_set_due(validation_set, final=final)
         ]
         self._validation_pass_index = getattr(self, "_validation_pass_index", 0) + 1
 
@@ -1917,16 +1923,28 @@ class Controller(Configurable):
                 due_sets, shapes, strict=True
             )
         )
-        # A lone main set is awaited as before; only extra sets need the gather.
+        # A lone main set is awaited as before. With more than one collection, one
+        # that raises costs only its own set: the others are still awaited and
+        # logged, and the failed one is marked invalid.
         results = (
             [await collections[0]]
             if len(collections) == 1
-            else await asyncio.gather(*collections)
+            else await asyncio.gather(*collections, return_exceptions=True)
         )
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                raise result  # cancellation and the like are not a set's failure
         main_result = results[0] if validation.num_samples > 0 else None
         set_results = results[1:] if validation.num_samples > 0 else results
 
         metrics: list[m.Metric] = []
+        if isinstance(main_result, Exception):
+            logger.error(
+                f"step {step}: main validation set failed; marking it invalid",
+                exc_info=main_result,
+            )
+            metrics.append(m.Metric("validation/valid", m.NoReduce(0.0)))
+            main_result = None
         if main_result is not None:
             samples, rollout_groups, main_metrics = main_result
             metrics.extend(main_metrics)
@@ -1943,10 +1961,22 @@ class Controller(Configurable):
         for validation_set, (num_groups, group_size), result in zip(
             due_sets, shapes, set_results, strict=True
         ):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"step {step}: validation set {validation_set.name} failed; "
+                    "marking it invalid",
+                    exc_info=result,
+                )
+                metrics.append(
+                    m.Metric(f"validation/{validation_set.name}/valid", m.NoReduce(0.0))
+                )
+                continue
             samples, rollout_groups, set_metrics = result
             metrics.extend(set_metrics)
             self.rollout_recorder.record(
-                is_validation=True, rollout_groups=rollout_groups
+                is_validation=True,
+                rollout_groups=rollout_groups,
+                set_name=validation_set.name,
             )
             summary = await self._validation_trace_report(
                 step=step,
@@ -2246,7 +2276,10 @@ class Controller(Configurable):
             requested_training_steps=num_training_steps,
         )
         self._training_activity_phase = "complete"
+        await self._post_training_validation()
 
+    async def _post_training_validation(self) -> None:
+        """The final pass, after the loop: it scores every named set (``final``)."""
         # Drain any background pass first: it holds the eval generators, and its
         # curve point would otherwise be lost when the controller exits.
         await self._await_pending_validation()
@@ -2263,13 +2296,15 @@ class Controller(Configurable):
         # Label the pass with the version actually reached, not the requested step
         # count: the loop also exits early when the batcher drains.
         post_validation = await self._validate_and_log(
-            step=self._trainer_policy_version
+            step=self._trainer_policy_version, final=True
         )
         self._log_reward_delta(
             self._validation_results.get(self.start_step, {}), post_validation
         )
 
-    async def _validate_and_log(self, *, step: int) -> dict[str, float]:
+    async def _validate_and_log(
+        self, *, step: int, final: bool = False
+    ) -> dict[str, float]:
         """Run one validation pass, log it, and return its aggregated values for the pre/post delta.
 
         Metrics are logged at ``self._trainer_policy_version`` (the live training
@@ -2279,7 +2314,9 @@ class Controller(Configurable):
         version is carried in ``validation/policy_version`` and in the trace report's
         directory name instead.
         """
-        metrics = await self.validate(step=step)
+        metrics = await (
+            self.validate(step=step, final=True) if final else self.validate(step=step)
+        )
         if metrics:
             self.metrics_processor.log(
                 step=max(step, self._trainer_policy_version),

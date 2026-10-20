@@ -175,7 +175,10 @@ def _parse_validation_sets(spec: str) -> list[tuple[str, str]]:
             continue
         name, sep, path = item.partition("=")
         if not sep or not name.strip() or not path.strip():
-            raise ValueError(f"{_VAL_SETS_ENV}: expected name=path, got {item!r}")
+            raise ValueError(
+                f"{_VAL_SETS_ENV}: expected name=path, got {item!r} "
+                "(entries are comma-separated, so a path cannot contain a comma)"
+            )
         pairs.append((name.strip(), path.strip()))
     return pairs
 
@@ -242,7 +245,7 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         holdout_n == 0
         and not _TB2_VAL_DATA
         and not validation_from_caller
-        and int(os.environ.get("SWE_VAL_SAMPLES", _TMAX_9B_VAL_SAMPLES)) > 0
+        and int(os.environ.get("SWE_VAL_SAMPLES") or _TMAX_9B_VAL_SAMPLES) > 0
     ):
         raise ValueError(
             "SWE_HOLDOUT_N=0 requires a separate SWE_TB2_VAL_DATA dataset "
@@ -287,7 +290,7 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         validation_sets=_tmax_validation_set_datasets(),
         # GPU rows (TB4 with daytona_gpu) running at once across the host, training
         # and validation together; 5 trials x (agent + verifier) = the 10-H100 quota.
-        gpu_trial_concurrency=int(os.environ.get("SWE_GPU_TRIAL_CONCURRENCY", "5")),
+        gpu_trial_concurrency=int(os.environ.get("SWE_GPU_TRIAL_CONCURRENCY") or 5),
         # Run knobs resolved from the launcher env ONCE, into config fields so they
         # land in the W&B run config (per-run differences are visible). Same env
         # names + defaults as before; the RolloutWorker pool splits
@@ -423,7 +426,7 @@ def _tmax_9b_validation() -> ValidationConfig:
     else:
         # SWE_VAL_SAMPLES=0 skips the pre/periodic held-out validation entirely
         # (e.g. a pure step-time / speedup run); defaults to the paper's 32.
-        num_samples = int(os.environ.get("SWE_VAL_SAMPLES", _TMAX_9B_VAL_SAMPLES))
+        num_samples = int(os.environ.get("SWE_VAL_SAMPLES") or _TMAX_9B_VAL_SAMPLES)
         group_size, temperature, top_p = 1, 0.0, 1.0
     return ValidationConfig(
         num_samples=num_samples,
@@ -1522,9 +1525,11 @@ def rl_grpo_qwen3_5_9b_tmax_tb2_eval() -> Controller.Config:
         num_training_steps=0,
         validation=dataclasses.replace(
             _tmax_9b_validation(),
+            # The row count only of an explicit SWE_TB2_DATA file: without it this
+            # recipe reads the training mix, whose row count is no eval size.
             num_samples=_validation_samples(
                 "main",
-                tb2_data,
+                _TB2_DATA,
                 explicit=os.environ.get("SWE_VAL_SAMPLES"),
                 fallback=_TB2_NUM_TASKS,
             ),

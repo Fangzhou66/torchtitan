@@ -65,7 +65,8 @@ def test_set_names_that_are_accepted(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["", "TB4", "tb-4", "tb_4", "4tb", "tb 4", "valid", "skipped", "reward"]
+    "name",
+    ["", "TB4", "tb-4", "tb_4", "4tb", "tb 4", "valid", "skipped", "deferred", "reward"],
 )
 def test_set_names_that_are_refused(name):
     with pytest.raises(ValueError, match="validation set name"):
@@ -324,7 +325,16 @@ def test_named_sets_share_the_pass_and_inherit_unset_sampling():
     assert keys.count("validation/policy_version") == 1
 
 
-def test_every_runs_a_set_on_every_nth_pass_and_always_on_the_last():
+@pytest.mark.parametrize(
+    "steps,expected",
+    [
+        ((0, 10, 20, 30, 40, 50), [0, 30, 50]),
+        # The loop exited early (the batcher drained): the post-training pass is
+        # labelled 37, not num_training_steps=50, and must still score the set.
+        ((0, 10, 20, 30, 37), [0, 30, 37]),
+    ],
+)
+def test_every_runs_a_set_on_every_nth_pass_and_always_on_the_final(steps, expected):
     validation = ValidationConfig(
         num_samples=89, interval=10, sets=[ValidationSetConfig(name="tb4", every=3)]
     )
@@ -332,13 +342,46 @@ def test_every_runs_a_set_on_every_nth_pass_and_always_on_the_last():
         validation, num_training_steps=50, set_sizes={"tb4": 66}
     )
     scored = []
-    for step in (0, 10, 20, 30, 40, 50):
+    for step in steps:
         calls.clear()
-        asyncio.run(controller.validate(step=step))
+        final = step == steps[-1]
+        asyncio.run(controller.validate(step=step, final=final))
         assert any("set_name" not in call for call in calls)  # main set every pass
         if any(call.get("set_name") == "tb4" for call in calls):
             scored.append(step)
-    assert scored == [0, 30, 50]
+    assert scored == expected
+
+
+def test_validate_and_log_forwards_final_and_keeps_the_old_call_otherwise():
+    from unittest.mock import AsyncMock, MagicMock
+
+    controller = object.__new__(Controller)
+    controller._trainer_policy_version = 37
+    controller._validation_results = {}
+    controller.metrics_processor = MagicMock()
+    controller.validate = AsyncMock(return_value=[])
+    asyncio.run(controller._validate_and_log(step=37, final=True))
+    controller.validate.assert_awaited_once_with(step=37, final=True)
+    controller.validate.reset_mock()
+    asyncio.run(controller._validate_and_log(step=20))
+    controller.validate.assert_awaited_once_with(step=20)
+
+
+def test_the_post_training_pass_is_marked_final():
+    """The post-training pass is labelled with the version reached, which can be
+    below num_training_steps; it must still say final."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    controller = object.__new__(Controller)
+    controller._trainer_policy_version = 37
+    controller.start_step = 0
+    controller._validation_results = {0: {}}
+    controller.eval_generator_router = None
+    controller._await_pending_validation = AsyncMock()
+    controller._validate_and_log = AsyncMock(return_value={})
+    controller._log_reward_delta = MagicMock()
+    asyncio.run(controller._post_training_validation())
+    controller._validate_and_log.assert_awaited_once_with(step=37, final=True)
 
 
 def test_a_pass_with_only_a_named_set():
@@ -626,3 +669,98 @@ def test_background_trace_reports_cover_every_set(tmp_path):
     assert not any("trace_pass_at_k" in metric.key for metric in metrics)
     assert (tmp_path / "validation_traces/step-5/index.json").exists()
     assert (tmp_path / "validation_traces/tb4/step-5/index.json").exists()
+
+
+def test_one_failing_set_costs_only_itself():
+    validation = ValidationConfig(
+        num_samples=2,
+        group_size=1,
+        sets=[
+            ValidationSetConfig(name="tb4", num_samples=1),
+            ValidationSetConfig(name="probe", num_samples=1),
+        ],
+    )
+    controller, _calls = _controller(validation)
+    recorded = []
+    controller.rollout_recorder = SimpleNamespace(
+        record=lambda **kwargs: recorded.append(kwargs.get("set_name"))
+    )
+
+    async def collect(**kwargs):
+        name = kwargs.get("set_name")
+        if name == "tb4":
+            await asyncio.sleep(0)
+            raise RuntimeError("tb4 dataset broke")
+        await asyncio.sleep(0.01)  # still running when tb4 fails
+        prefix = "validation" if name is None else f"validation/{name}"
+        return [], [], [m.Metric(f"{prefix}/valid", m.NoReduce(1.0))]
+
+    controller._collect_validation_rollouts = collect
+    metrics = asyncio.run(controller.validate(step=0))
+    values = {
+        metric.key: metric.value.value
+        for metric in metrics
+        if metric.key.endswith("/valid")
+    }
+    assert values == {
+        "validation/valid": 1.0,
+        "validation/tb4/valid": 0.0,
+        "validation/probe/valid": 1.0,
+    }
+    assert recorded == [None, "probe"]
+
+
+def test_a_lone_main_set_failure_still_raises():
+    validation = ValidationConfig(num_samples=2)
+    controller, _calls = _controller(validation)
+
+    async def collect(**kwargs):
+        raise RuntimeError("main broke")
+
+    controller._collect_validation_rollouts = collect
+    with pytest.raises(RuntimeError, match="main broke"):
+        asyncio.run(controller.validate(step=0))
+
+
+def test_rollout_samples_carry_the_set_label(tmp_path):
+    from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
+
+    recorder = RolloutSampleRecorder.Config().build(dump_dir=str(tmp_path))
+    recorder.record(is_validation=True, rollout_groups=[_group(-1, [1.0])])
+    recorder.record(
+        is_validation=True, rollout_groups=[_group(-2, [0.0])], set_name="tb4"
+    )
+    lines = [
+        json.loads(line)
+        for path in tmp_path.rglob("*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert [line.get("validation_set") for line in lines] == [None, "tb4"]
+    assert "validation_set" not in lines[0]
+
+
+def test_eval_recipe_without_swe_tb2_data_keeps_89(no_val_env, tmp_path, monkeypatch):
+    """Without SWE_TB2_DATA the eval recipe reads the training mix; its row count
+    (15k for a real mix) is not an eval size."""
+    mix = _write_rows(tmp_path / "mix.jsonl", [f"t{i}" for i in range(200)])
+    monkeypatch.setattr(tmax_config_registry, "_TB2_DATA", "")
+    monkeypatch.setattr(tmax_config_registry, "_DEFAULT_DATA", mix)
+    config = tmax_config_registry.rl_grpo_qwen3_5_9b_tmax_tb2_eval()
+    assert config.async_loop.validation.num_samples == 89
+
+
+def test_a_comma_in_a_set_path_is_a_clear_error(no_val_env, monkeypatch):
+    monkeypatch.setenv("SWE_VAL_SETS", "tb4=/data/a,b.jsonl")
+    with pytest.raises(ValueError, match="cannot contain a comma"):
+        tmax_config_registry._tmax_9b_validation()
+
+
+def test_empty_swe_val_samples_means_unset(no_val_env, monkeypatch):
+    monkeypatch.setenv("SWE_VAL_SAMPLES", "")
+    monkeypatch.setattr(tmax_config_registry, "_TB2_VAL_DATA", "")
+    monkeypatch.setenv("SWE_HOLDOUT_N", "8")
+    assert tmax_config_registry._tmax_rollouter().train_dataset.holdout_n == 8
+    assert tmax_config_registry._tmax_9b_validation().num_samples == 32
+    monkeypatch.setenv("SWE_HOLDOUT_N", "0")
+    with pytest.raises(ValueError, match="requires a separate SWE_TB2_VAL_DATA"):
+        tmax_config_registry._tmax_rollouter()
