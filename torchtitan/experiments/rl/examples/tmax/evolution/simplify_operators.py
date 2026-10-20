@@ -143,25 +143,43 @@ traces/history/since-original.diff is every change since the original task
 student is given, and if it already supplies part of the retained skill,
 withdrawing that part is this rewrite's first change.
 
-## Choose the strength of help
+## Choose where the help lives
 
-Choose the change from the attempts. Help comes in increasing strength: a
-direction for the failing decision; the goal decomposed into checked
-subgoals; the work around the retained skill supplied (setup, input and
-output handling, a prepared input) so the student spends its budget on the
-skill; a worked instance of the hard step on an input other than the graded
-one. Use the weakest help the evidence says will produce successes. A failed
+Choose the change from the attempts. The student will meet the original task
+with none of this help, so what it learns here has to be triggered by
+something the original task also shows it. Prefer help in this order:
+
+1. The original task's own signals, made easier to reach. The student reacts
+   to the error, test output or state the original also produces -- a
+   ModuleNotFoundError, a crash under the original's input, a wrong value it
+   can compare against a stated requirement. Change how soon or how plainly it
+   meets that signal, not the signal: a smaller instance that reaches the
+   failing step early, a starting state that removes unrelated steps before
+   it, an instruction to run the program on a stated input and read what it
+   reports. The cue it learns to act on is still there in the original.
+2. Words in the instruction: a direction for the failing decision, or the goal
+   decomposed into checked subgoals. The student still does the work, but on a
+   cue the original lacks, so a later hardening must be able to withdraw it:
+   write each hint as its own sentences, removable without rewriting the rest.
+3. Work supplied in the environment: only for work outside the retained skill
+   that the attempts already do reliably, so the student spends its budget on
+   the skill, or that the original environment did not let it do (record that
+   as a repair). The student never does supplied work, so it learns nothing
+   from it. What the student could have obtained in the original environment
+   itself -- a package or tool it can install, a file it can fetch, a setting
+   it can change -- is part of the work: help with it by saying what to obtain
+   and how, not by obtaining it for the student.
+
+Help comes in increasing strength within each place, up to a worked instance
+of the hard step on an input other than the graded one. Use the earliest place
+and the weakest help the evidence says will produce successes. A failed
 prediction at one strength needs a reason, from the traces, to stay at that
 strength. When no attempt has a foothold, reduce what the retained decision
 demands -- a smaller instance, fewer cases, feedback that exposes the mistake
 where it is made -- and leave the decision itself to the student; when the
 student cannot make it in any form the task can still grade, write GIVE UP
-with that reason rather than hand it over. What the student could have obtained in the original
-environment itself -- a package or tool it can install, a file it can fetch,
-a setting it can change -- is part of the work: help with it by saying what to
-obtain and how, not by obtaining it for the student. Supply it directly only
-when the original environment did not let the student get it, and record that
-as a repair.
+with that reason rather than hand it over. Say in change which place the help
+is in and which signal of the original the student learns to act on.
 
 ## Invariants
 
