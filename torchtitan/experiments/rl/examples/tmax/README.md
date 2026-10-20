@@ -306,16 +306,23 @@ finish fractions, `valid`, and `trace_pass_at_k` when the trace report is writte
 inside the pass), its trace report goes to `validation_traces/<name>/step-<N>/`
 with `"set": "<name>"` on every row, and its records in `rollout_samples.jsonl`
 carry `"validation_set": "<name>"`. The eval generators' latency metrics
-(`validation_generator/*`) stay pooled across sets. A set whose collection raises
-is logged with `validation/<name>/valid = 0` without costing the other sets.
+(`validation_generator/*`) stay pooled across sets. In a pass with more than one
+set, a set whose collection raises is logged with `validation/<name>/valid = 0`
+without costing the other sets; this includes the main set, whose error raises (as
+before) only in a pass where no named set is due. So in a blocking or eval-only run
+with TB4, a main-set collection error leaves no TB2.1 score and the run still exits
+0: check `validation/valid`.
 
 ```bash
 export SWE_TB2_VAL_DATA=$TRL_BASE/data/evalsets/tb2_1_eval.jsonl
 export SWE_VAL_SAMPLES=89 SWE_TB2_VAL_K=5
 export SWE_VAL_SETS=tb4=$TRL_BASE/data/evalsets/tb4_eval.jsonl   # 66 rows, k=5 inherited
 export SWE_GPU_TRIAL_CONCURRENCY=5   # the default: 10 H100 on earth / (agent + verifier)
-# Bound TB4's share of every pass (see "How long a pass takes"):
-export SWE_EVAL_AGENT_BUDGET_CAP_SEC=7200 SWE_VAL_SET_TB4_EVERY=3
+# Bound TB4's share of the passes (see "How long a pass takes"):
+export SWE_VAL_SET_TB4_EVERY=3
+# The cap applies to every set: below 12000 it also cuts TB2.1's build-pov-ray
+# (declares 12000 s), so keep it >= 12000 when TB2.1 must stay comparable.
+export SWE_EVAL_AGENT_BUDGET_CAP_SEC=12000
 ```
 
 Build the TB4 file from the v4.0.0 release tree (digest-pinned images). The
@@ -346,11 +353,15 @@ A pass therefore lasts as long as its slowest part, and with TB4 that is long:
   group ids first, and the named sets' ids come after the main set's, so TB4's long
   trials queue ahead of TB2.1's. A pass takes roughly total trial time / 64.
 - At the end of training the controller waits for a pass still in flight, then
-  runs the post-training pass, which always includes TB4, and then waits for its
-  background trace reports (TB4's is the largest).
+  runs the post-training pass, which always includes TB4. Its background trace
+  reports (TB4's is the largest) are written at the very end of shutdown, after the
+  trainer and generators are released; they complete on a normal exit, and a stop
+  signal during that wait cancels them.
 
-So set `SWE_EVAL_AGENT_BUDGET_CAP_SEC` (validation only, every set) and
-`SWE_VAL_SET_TB4_EVERY` together, and widen `SWE_VAL_INTERVAL` to match. With
+So set `SWE_VAL_SET_TB4_EVERY` and `SWE_EVAL_AGENT_BUDGET_CAP_SEC` together, and
+widen `SWE_VAL_INTERVAL` to match. The cap is validation-only but covers every set:
+TB2.1's build-pov-ray declares 12000 s, so a cap below that changes TB2.1's score;
+use a cap of at least 12000, or `_EVERY` alone, when TB2.1 comparability matters. With
 `run_async` (dedicated eval generators) a pass still running at the next interval
 is skipped as a whole (with `SWE_VAL_DEFER=1`, deferred: at most one waits and then
 scores the step it starts on), so the TB2.1 curve thins to TB4's pace rather than
