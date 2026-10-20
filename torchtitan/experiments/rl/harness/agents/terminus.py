@@ -108,14 +108,19 @@ _CONTEXT_REPEAT_WARN_FRACS = (0.75, 0.9)
 # trajectories ever mention it, against 11% for the warning). The label keeps
 # the stakes and says where the line comes from.
 _CONTEXT_NOTICE_LABEL = "[Harness notice, not terminal output]"
-# Default to the della notice used by ivuaqcol: one warning at 50% of context,
-# then a status line every turn, appended after the terminal observation.
-# "v2" remains an opt-in labelled notice before the observation, repeated at
+# "della" is the notice used by ivuaqcol: one warning at the warn fraction, then
+# a status line every turn, appended after the terminal observation. "checked"
+# (default) is della without its closing "mark the task complete": a policy
+# trained on it learned to submit unfinished work as soon as the warning showed,
+# so it says a failing submission scores like running out. "v2" remains an
+# opt-in labelled notice before the observation, repeated at
 # _CONTEXT_REPEAT_WARN_FRACS.
-_CONTEXT_NOTICE_STYLE = os.environ.get("TMAX_CONTEXT_NOTICE_STYLE", "della")
-if _CONTEXT_NOTICE_STYLE not in ("v2", "della"):
+_CONTEXT_NOTICE_STYLE = os.environ.get("TMAX_CONTEXT_NOTICE_STYLE", "checked")
+_APPENDED_NOTICE_STYLES = ("della", "checked")
+if _CONTEXT_NOTICE_STYLE not in ("v2", *_APPENDED_NOTICE_STYLES):
     raise ValueError(
-        f"TMAX_CONTEXT_NOTICE_STYLE must be v2 or della, got {_CONTEXT_NOTICE_STYLE!r}"
+        "TMAX_CONTEXT_NOTICE_STYLE must be v2, della or checked, got "
+        f"{_CONTEXT_NOTICE_STYLE!r}"
     )
 
 # Placeholder model name handed to Terminus-2. The real policy is our swapped-in
@@ -272,16 +277,23 @@ class _AdapterLLM:
         pct = min(100, round(100 * used / self._max_context))
         if used < self._context_warn_frac * self._max_context:
             return ""
-        if _CONTEXT_NOTICE_STYLE == "della":
+        if _CONTEXT_NOTICE_STYLE in _APPENDED_NOTICE_STYLES:
             if not self._context_warned_at:
                 self._context_warned_at.add(pct)
+                advice = (
+                    ", finish the essential work, verify it, and mark the task "
+                    "complete."
+                    if _CONTEXT_NOTICE_STYLE == "della"
+                    else " and keep working efficiently. A submission that fails the "
+                    "tests scores the same as running out, so mark the task "
+                    "complete only once your checks pass."
+                )
                 return (
                     f"WARNING: You have used {pct}% of your context window "
                     f"({used:,} of {self._max_context:,} tokens); about {left:,} "
                     "tokens remain. If it runs out, the episode ends before you can "
                     "submit and the task counts as failed. Avoid commands that print "
-                    "large output, finish the essential work, verify it, and mark the "
-                    "task complete."
+                    f"large output{advice}"
                 )
             return f"[Context: {pct}% used, about {left:,} tokens remain]"
         first = round(100 * self._context_warn_frac)
@@ -733,7 +745,7 @@ class _SandboxEnvironment:
         shown = "new" if observation.startswith("New") else "screen"
         notice = self.context_notice() if self.context_notice else ""
         if notice:
-            if _CONTEXT_NOTICE_STYLE == "della":
+            if _CONTEXT_NOTICE_STYLE in _APPENDED_NOTICE_STYLES:
                 observation = f"{observation.rstrip()}\n\n{notice}\n"
             else:
                 observation = f"{notice}\n\n{observation}"
