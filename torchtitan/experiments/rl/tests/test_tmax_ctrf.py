@@ -162,8 +162,8 @@ def _stub_rollouter(
     rollouter._max_context_tokens = 4096
     rollouter._eval_max_context_tokens = 4096
     rollouter._eval_max_turns = 0
-    rollouter._strict_format = rollouter._strict_truncation = False
-    rollouter._eval_strict_format = rollouter._eval_strict_truncation = False
+    rollouter._strict_format = rollouter._strict_opening = rollouter._strict_truncation = False
+    rollouter._eval_strict_format = rollouter._eval_strict_opening = rollouter._eval_strict_truncation = False
     rollouter._reward_mode = reward_mode
     rollouter._read_ctrf = True
     rollouter._shadow_grade_unsubmitted = False

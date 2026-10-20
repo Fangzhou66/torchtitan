@@ -153,7 +153,7 @@ _FINISH_REASONS = (
     # The agent filled its own sandbox disk (see _run_agent_rollout); scored 0.
     "disk_exhausted",
     # A strict environment rule ended the episode on the offending turn, ungraded
-    # (TMaxRollouter.Config.strict_format / strict_truncation).
+    # (TMaxRollouter.Config.strict_format / strict_opening / strict_truncation).
     "format_error",
     "truncated",
 )
@@ -1192,6 +1192,13 @@ class TMaxRollouter(Rollouter):
         rollouts are left out of the evolution signal. Only the terminus harness
         honors it."""
 
+        strict_opening: bool = False
+        """``strict_format`` limited to the opening: only a turn the parser
+        rejects before the policy's first usable turn (a command or a completion
+        signal) ends the episode with reward 0. Later rejected turns get
+        Terminus-2's re-ask as usual. Targets the absorbing turn-0 format drift
+        without touching long or mid-episode turns."""
+
         strict_truncation: bool = False
         """Strict truncation rule for training rollouts: a turn that hits the
         per-turn generation cap ends the episode the same way, instead of
@@ -1200,6 +1207,9 @@ class TMaxRollouter(Rollouter):
         eval_strict_format: bool = False
         """``strict_format`` for validation groups. Off by default so validation
         scores stay comparable with upstream Terminus-2 numbers."""
+
+        eval_strict_opening: bool = False
+        """``strict_opening`` for validation groups; off by default."""
 
         eval_strict_truncation: bool = False
         """``strict_truncation`` for validation groups; off by default."""
@@ -1289,13 +1299,17 @@ class TMaxRollouter(Rollouter):
         self._eval_agent_budget_cap_sec = config.eval_agent_budget_cap_sec
         self._eval_verifier_budget_cap_sec = config.eval_verifier_budget_cap_sec
         self._strict_format = config.strict_format
+        self._strict_opening = config.strict_opening
         self._strict_truncation = config.strict_truncation
         self._eval_strict_format = config.eval_strict_format
+        self._eval_strict_opening = config.eval_strict_opening
         self._eval_strict_truncation = config.eval_strict_truncation
         if self._agent_name != "terminus" and (
             self._strict_format
+            or self._strict_opening
             or self._strict_truncation
             or self._eval_strict_format
+            or self._eval_strict_opening
             or self._eval_strict_truncation
         ):
             logger.warning(
@@ -1877,10 +1891,14 @@ class TMaxRollouter(Rollouter):
         max_turns = None
         if group_id < 0 and self._eval_max_turns:
             max_turns = _UNCAPPED_TURNS if self._eval_max_turns < 0 else self._eval_max_turns
-        strict_format, strict_truncation = (
-            (self._eval_strict_format, self._eval_strict_truncation)
+        strict_format, strict_opening, strict_truncation = (
+            (
+                self._eval_strict_format,
+                self._eval_strict_opening,
+                self._eval_strict_truncation,
+            )
             if group_id < 0
-            else (self._strict_format, self._strict_truncation)
+            else (self._strict_format, self._strict_opening, self._strict_truncation)
         )
         violation_turn = 0
         started_at = time.monotonic()
@@ -2044,6 +2062,7 @@ class TMaxRollouter(Rollouter):
                             max_context_tokens=max_context_tokens,
                             max_turns=max_turns,
                             strict_format=strict_format,
+                            strict_opening=strict_opening,
                             strict_truncation=strict_truncation,
                         )
                     )

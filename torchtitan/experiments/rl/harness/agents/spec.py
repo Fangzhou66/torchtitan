@@ -70,6 +70,11 @@ class AgentTask:
     the trajectory and no re-ask is generated. Off keeps the harness's own
     recovery. Only harnesses that track format errors (terminus) honor it."""
 
+    strict_opening: bool = False
+    """Opening format rule: ``strict_format`` limited to turns before the first
+    usable one (a command or a completion signal). A rejected opening ends the
+    episode the same way; later rejected turns keep the harness's recovery."""
+
     strict_truncation: bool = False
     """Strict truncation rule: a turn that hits the per-turn generation cap ends
     the episode the same way, instead of the harness salvaging or re-asking.

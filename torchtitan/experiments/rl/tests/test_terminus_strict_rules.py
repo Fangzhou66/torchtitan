@@ -148,6 +148,38 @@ def test_valid_and_complete_turns_do_not_trigger():
     assert llm.violation is None
 
 
+@pytest.mark.parametrize("category", sorted(REJECTED))
+def test_opening_rule_ends_a_rejected_first_turn(category):
+    llm = _llm()
+    llm.calls += 1
+    parser = _CountingParser(SafeTerminusXMLParser(), llm=llm, strict_opening=True)
+    parser.parse_response(REJECTED[category])
+    assert (llm.violation, llm.violation_category) == ("format", category)
+
+
+@pytest.mark.parametrize("category", sorted(REJECTED))
+def test_opening_rule_ignores_rejected_turns_after_the_first_usable_one(category):
+    llm = _llm()
+    parser = _CountingParser(SafeTerminusXMLParser(), llm=llm, strict_opening=True)
+    for reply in (VALID, REJECTED[category]):
+        llm.calls += 1
+        parser.parse_response(reply)
+    assert llm.violation is None
+
+
+def test_opening_rule_still_counts_warning_only_turns_as_opening():
+    """Empty commands move nothing, so a rejected turn after them is still the
+    opening; the warning-only turn itself does not trigger."""
+    llm = _llm()
+    parser = _CountingParser(SafeTerminusXMLParser(), llm=llm, strict_opening=True)
+    llm.calls += 1
+    parser.parse_response(WARNING_ONLY["empty_commands"])
+    assert llm.violation is None
+    llm.calls += 1
+    parser.parse_response(REJECTED["plain_text"])
+    assert (llm.violation, llm.violation_turn) == ("format", 2)
+
+
 def test_reparsing_a_capped_turn_is_left_to_the_truncation_rule():
     """Lenient truncation re-parses the capped text for warnings; that is not a
     rejected turn of its own, even with the format rule on."""
@@ -209,7 +241,15 @@ class _FakeSession:
         return "Current Terminal Screen:\n$ "
 
 
-def _run_terminus(monkeypatch, replies, *, strict_format, strict_truncation, max_turns=8):
+def _run_terminus(
+    monkeypatch,
+    replies,
+    *,
+    strict_format,
+    strict_truncation,
+    strict_opening=False,
+    max_turns=8,
+):
     from harbor.agents.terminus_2 import Terminus2
 
     from torchtitan.experiments.rl.harness.agents import terminus
@@ -244,6 +284,7 @@ def _run_terminus(monkeypatch, replies, *, strict_format, strict_truncation, max
                 max_turns=max_turns,
                 max_context_tokens=63488,
                 strict_format=strict_format,
+                strict_opening=strict_opening,
                 strict_truncation=strict_truncation,
             )
         )
@@ -278,6 +319,35 @@ def test_strict_an_opening_rejected_turn_is_turn_one(monkeypatch):
         1,
         1,
     )
+
+
+def test_opening_rule_ends_a_rejected_first_turn_in_the_harness(monkeypatch):
+    run, adapter, _ = _run_terminus(
+        monkeypatch,
+        [REJECTED["missing_wrapper"], DONE, DONE],
+        strict_format=False,
+        strict_truncation=False,
+        strict_opening=True,
+    )
+    assert (run.finish_reason, run.submitted, run.violation_turn) == (
+        "format_error",
+        False,
+        1,
+    )
+    assert adapter.calls == 1
+
+
+def test_opening_rule_re_asks_after_the_first_usable_turn(monkeypatch):
+    run, adapter, _ = _run_terminus(
+        monkeypatch,
+        [VALID, REJECTED["plain_text"], DONE, DONE],
+        strict_format=False,
+        strict_truncation=False,
+        strict_opening=True,
+    )
+    assert (run.finish_reason, run.submitted) == ("submit", True)
+    assert run.violation_turn == 0
+    assert adapter.calls == 4
 
 
 def test_strict_a_rejected_turn_on_the_last_episode_still_counts(monkeypatch):
@@ -485,8 +555,10 @@ def _rollouter_for_agent_task(*, strict_format, strict_truncation, eval_format, 
     r._shadow_grade_unsubmitted = True
     r._length_penalty = False
     r._strict_format = strict_format
+    r._strict_opening = False
     r._strict_truncation = strict_truncation
     r._eval_strict_format = eval_format
+    r._eval_strict_opening = False
     r._eval_strict_truncation = eval_truncation
     r._rollout_gate = _RolloutIssueGate(1)
     return r
@@ -635,28 +707,33 @@ def test_other_unsubmitted_endings_are_still_shadow_graded(monkeypatch):
 @pytest.mark.parametrize(
     "env,expected",
     [
-        ({}, (True, True, False, False)),
+        ({}, (False, True, False, False, False, False)),
         (
             {
-                "SWE_STRICT_FORMAT": "0",
-                "SWE_STRICT_TRUNCATION": "0",
+                "SWE_STRICT_FORMAT": "1",
+                "SWE_STRICT_OPENING": "0",
+                "SWE_STRICT_TRUNCATION": "1",
                 "SWE_EVAL_STRICT_FORMAT": "1",
+                "SWE_EVAL_STRICT_OPENING": "1",
                 "SWE_EVAL_STRICT_TRUNCATION": "1",
             },
-            (False, False, True, True),
+            (True, False, True, True, True, True),
         ),
     ],
 )
 def test_config_registry_defaults(monkeypatch, env, expected):
-    """Training strict, validation lenient, each switch read from its own env."""
+    """Training checks only the opening, validation is lenient, and each switch
+    is read from its own env."""
     from torchtitan.experiments.rl.examples.tmax.config_registry import (
         _tmax_rollouter,
     )
 
     for name in (
         "SWE_STRICT_FORMAT",
+        "SWE_STRICT_OPENING",
         "SWE_STRICT_TRUNCATION",
         "SWE_EVAL_STRICT_FORMAT",
+        "SWE_EVAL_STRICT_OPENING",
         "SWE_EVAL_STRICT_TRUNCATION",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -665,7 +742,9 @@ def test_config_registry_defaults(monkeypatch, env, expected):
     r = _tmax_rollouter(validation_from_caller=True)
     assert (
         r.strict_format,
+        r.strict_opening,
         r.strict_truncation,
         r.eval_strict_format,
+        r.eval_strict_opening,
         r.eval_strict_truncation,
     ) == expected

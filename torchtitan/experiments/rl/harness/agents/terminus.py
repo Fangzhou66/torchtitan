@@ -429,13 +429,21 @@ class _CountingParser:
     case Terminus-2 answers with "Previous response had parsing errors") flags a
     violation on ``llm``, which ends the episode before the next model call.
     Warning-only turns (empty commands, silent no-op) do not, and neither does
-    re-parsing a capped turn's text, which the truncation rule owns.
+    re-parsing a capped turn's text, which the truncation rule owns. With
+    ``strict_opening`` only a rejected turn before the first usable one does.
     """
 
-    def __init__(self, inner: Any, llm: Any = None, strict_format: bool = False) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        llm: Any = None,
+        strict_format: bool = False,
+        strict_opening: bool = False,
+    ) -> None:
         self._inner = inner
         self._llm = llm
         self._strict_format = strict_format
+        self._strict_opening = strict_opening
         self.format_errors = 0
         self.completion_signals = 0
         self.categories = dict.fromkeys(FORMAT_ERROR_CATEGORIES, 0)
@@ -452,6 +460,7 @@ class _CountingParser:
 
     def parse_response(self, content: str) -> Any:
         result = self._inner.parse_response(content)
+        opening = not self._acted
         # Harbor leaves a pending completion unchanged on parsing errors. Only
         # successfully parsed responses can confirm it or withdraw it.
         if not getattr(result, "error", None):
@@ -479,7 +488,7 @@ class _CountingParser:
             self._streak = 0
             self._acted = True
         if (
-            self._strict_format
+            (self._strict_format or (self._strict_opening and opening))
             and self._llm is not None
             and getattr(result, "error", None)
             and content != self._llm.last_truncated_text
@@ -981,7 +990,10 @@ async def terminus_agent(
                 if isinstance(inner_parser, TerminusXMLPlainParser):
                     inner_parser = SafeTerminusXMLParser()
                 parser = _CountingParser(
-                    inner_parser, llm=llm, strict_format=task.strict_format
+                    inner_parser,
+                    llm=llm,
+                    strict_format=task.strict_format,
+                    strict_opening=task.strict_opening,
                 )
                 agent._parser = parser
             _count_subagent_calls(agent, llm)

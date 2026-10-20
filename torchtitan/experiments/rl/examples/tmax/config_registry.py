@@ -214,13 +214,16 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         eval_verifier_budget_cap_sec=int(
             os.environ.get("SWE_EVAL_VERIFIER_BUDGET_CAP_SEC", "0")
         ),
-        # Strict format rule (TMaxRollouter.Config.strict_format): a turn the
-        # Terminus-2 parser rejects, or one cut at the per-turn cap, ends the
-        # episode at that turn with reward 0 and no re-ask. On for training;
-        # validation stays lenient so its scores compare with upstream numbers.
-        strict_format=os.environ.get("SWE_STRICT_FORMAT", "1") == "1",
-        strict_truncation=os.environ.get("SWE_STRICT_TRUNCATION", "1") == "1",
+        # Strict environment rules (TMaxRollouter.Config.strict_*): a rejected
+        # turn ends the episode with reward 0 and no re-ask. Training only checks
+        # the opening (the turn-0 format drift); every-turn format and per-turn
+        # truncation rules are off, since they pushed the policy toward short
+        # turns. Validation stays lenient so its scores compare with upstream.
+        strict_format=os.environ.get("SWE_STRICT_FORMAT", "0") == "1",
+        strict_opening=os.environ.get("SWE_STRICT_OPENING", "1") == "1",
+        strict_truncation=os.environ.get("SWE_STRICT_TRUNCATION", "0") == "1",
         eval_strict_format=os.environ.get("SWE_EVAL_STRICT_FORMAT", "0") == "1",
+        eval_strict_opening=os.environ.get("SWE_EVAL_STRICT_OPENING", "0") == "1",
         eval_strict_truncation=(
             os.environ.get("SWE_EVAL_STRICT_TRUNCATION", "0") == "1"
         ),
