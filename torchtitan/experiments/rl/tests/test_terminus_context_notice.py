@@ -208,18 +208,50 @@ def test_checked_style_drops_the_call_to_mark_complete(monkeypatch):
     from torchtitan.experiments.rl.harness.agents import terminus
 
     monkeypatch.setattr(terminus, "_CONTEXT_NOTICE_STYLE", "checked")
-    llm = _llm(warn_frac=0.5)
-    llm.context_tokens = 5000
+    monkeypatch.setattr(terminus, "_CONTEXT_WARN_TOKENS_LEFT", 3000)
+    llm = _llm()
+    llm.context_tokens = 7000
     assert llm.context_notice() == (
-        "WARNING: You have used 50% of your context window (5,000 of 10,000 "
-        "tokens); about 5,000 tokens remain. If it runs out, the episode ends "
+        "WARNING: You have used 70% of your context window (7,000 of 10,000 "
+        "tokens); about 3,000 tokens remain. If it runs out, the episode ends "
         "before you can submit and the task counts as failed. Avoid commands that "
         "print large output and keep working efficiently. A submission that fails the "
         "tests scores the same as running out, so mark the task complete only once "
         "your checks pass."
     )
-    llm.context_tokens = 7600
-    assert llm.context_notice() == "[Context: 76% used, about 2,400 tokens remain]"
+
+
+@pytest.mark.parametrize("max_context", [100_000, 200_000])
+def test_checked_style_warns_on_tokens_left_whatever_the_window(monkeypatch, max_context):
+    """The same tokens-left thresholds for an 80K training and a 160K eval window:
+    full warning at the first and repeat thresholds, status lines in between."""
+    from torchtitan.experiments.rl.harness.agents import terminus
+
+    monkeypatch.setattr(terminus, "_CONTEXT_NOTICE_STYLE", "checked")
+    monkeypatch.setattr(terminus, "_CONTEXT_WARN_TOKENS_LEFT", 30_000)
+    monkeypatch.setattr(terminus, "_CONTEXT_REPEAT_TOKENS_LEFT", 10_000)
+    llm = _llm(max_context=max_context)
+    notices = []
+    for left in (40_000, 28_000, 20_000, 9_000, 5_000):
+        llm.context_tokens = max_context - left
+        notices.append(llm.context_notice())
+    assert notices[0] == ""
+    assert [n.startswith("WARNING:") for n in notices[1:]] == [True, False, True, False]
+    assert notices[2].startswith("[Context:")
+    assert "about 9,000 tokens remain" in notices[3]
+
+
+def test_checked_style_warns_once_when_both_thresholds_pass_together(monkeypatch):
+    from torchtitan.experiments.rl.harness.agents import terminus
+
+    monkeypatch.setattr(terminus, "_CONTEXT_NOTICE_STYLE", "checked")
+    monkeypatch.setattr(terminus, "_CONTEXT_WARN_TOKENS_LEFT", 3000)
+    monkeypatch.setattr(terminus, "_CONTEXT_REPEAT_TOKENS_LEFT", 1000)
+    llm = _llm()
+    llm.context_tokens = 9500
+    assert llm.context_notice().startswith("WARNING:")
+    llm.context_tokens = 9600
+    assert llm.context_notice().startswith("[Context:")
 
 
 def test_della_style_goes_after_the_observation(tmp_path: Path, monkeypatch):

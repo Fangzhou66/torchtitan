@@ -117,6 +117,15 @@ _CONTEXT_NOTICE_LABEL = "[Harness notice, not terminal output]"
 # _CONTEXT_REPEAT_WARN_FRACS.
 _CONTEXT_NOTICE_STYLE = os.environ.get("TMAX_CONTEXT_NOTICE_STYLE", "checked")
 _APPENDED_NOTICE_STYLES = ("della", "checked")
+# "checked" triggers on tokens remaining rather than a fraction, so a 160K
+# validation context warns at the same "about N tokens remain" as the 80K
+# training one (0.7 and 0.9 of it) instead of at 82K, already past anything the
+# policy trained on. The full warning comes at the first threshold and again at
+# the repeat one (0 = no repeat); status lines run in between.
+_CONTEXT_WARN_TOKENS_LEFT = int(os.environ.get("TMAX_CONTEXT_WARN_TOKENS_LEFT", "24576"))
+_CONTEXT_REPEAT_TOKENS_LEFT = int(
+    os.environ.get("TMAX_CONTEXT_REPEAT_TOKENS_LEFT", "8192")
+)
 if _CONTEXT_NOTICE_STYLE not in ("v2", *_APPENDED_NOTICE_STYLES):
     raise ValueError(
         "TMAX_CONTEXT_NOTICE_STYLE must be v2, della or checked, got "
@@ -263,7 +272,10 @@ class _AdapterLLM:
     def context_notice(self) -> str:
         """The context-budget notice preceding this turn's observation, or "".
 
-        Nothing below ``context_warn_frac``. The first turn at or past it, and the
+        Under the "checked" style the thresholds are tokens remaining
+        (``_CONTEXT_WARN_TOKENS_LEFT`` and ``_CONTEXT_REPEAT_TOKENS_LEFT``) and
+        ``context_warn_frac`` only switches the notice off at 0. Otherwise:
+        nothing below ``context_warn_frac``. The first turn at or past it, and the
         first at or past each of ``_CONTEXT_REPEAT_WARN_FRACS``, get the full
         warning: the stakes and what to do. Every other turn past it gets one line
         with the share used and the tokens left, so the model can pace the rest.
@@ -275,11 +287,22 @@ class _AdapterLLM:
         used = self.context_tokens
         left = max(0, self._max_context - used)
         pct = min(100, round(100 * used / self._max_context))
-        if used < self._context_warn_frac * self._max_context:
+        if _CONTEXT_NOTICE_STYLE == "checked":
+            if left > _CONTEXT_WARN_TOKENS_LEFT:
+                return ""
+            due = {_CONTEXT_WARN_TOKENS_LEFT}
+            if 0 < _CONTEXT_REPEAT_TOKENS_LEFT and left <= _CONTEXT_REPEAT_TOKENS_LEFT:
+                due.add(_CONTEXT_REPEAT_TOKENS_LEFT)
+            warn = not due <= self._context_warned_at
+            self._context_warned_at.update(due)
+        elif used < self._context_warn_frac * self._max_context:
             return ""
-        if _CONTEXT_NOTICE_STYLE in _APPENDED_NOTICE_STYLES:
-            if not self._context_warned_at:
+        elif _CONTEXT_NOTICE_STYLE == "della":
+            warn = not self._context_warned_at
+            if warn:
                 self._context_warned_at.add(pct)
+        if _CONTEXT_NOTICE_STYLE in _APPENDED_NOTICE_STYLES:
+            if warn:
                 advice = (
                     ", finish the essential work, verify it, and mark the task "
                     "complete."
