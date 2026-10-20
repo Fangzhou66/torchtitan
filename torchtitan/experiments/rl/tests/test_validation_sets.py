@@ -821,31 +821,37 @@ def _slow_report(controller, state, name):
     task.add_done_callback(controller._trace_report_tasks.discard)
 
 
-def test_the_post_training_pass_drains_its_trace_reports():
-    from unittest.mock import AsyncMock, MagicMock
+def test_close_drains_trace_reports_after_the_actors_are_down():
+    """The last pass's background reports are written at the end of close(), once
+    the trainer and generators are released, not while they wait."""
+    from unittest.mock import MagicMock
 
     controller = object.__new__(Controller)
-    controller._trainer_policy_version = 10
-    controller.start_step = 0
-    controller._validation_results = {0: {}}
-    controller.eval_generator_router = None
     controller._validation_task = None
+    controller.trainer = None
+    controller.generator_router = None
+    controller.eval_generator_router = None
+    controller.metrics_processor = MagicMock()
     controller._trace_report_tasks = set()
-    controller._log_reward_delta = MagicMock()
-    written = []
+    events = []
 
-    async def validate_and_log(**kwargs):
-        _slow_report(controller, written, "main")
-        _slow_report(controller, written, "tb4")
-        return {}
+    class _Mesh:
+        async def stop(self):
+            events.append("mesh stopped")
 
-    controller._validate_and_log = AsyncMock(side_effect=validate_and_log)
-    asyncio.run(controller._post_training_validation())
-    assert sorted(written) == ["main", "tb4"]
+    controller._proc_meshes = [_Mesh()]
+
+    async def run():
+        _slow_report(controller, events, "main report written")
+        _slow_report(controller, events, "tb4 report written")
+        await controller.close()
+
+    asyncio.run(run())
+    assert events == ["mesh stopped", "main report written", "tb4 report written"]
     assert not controller._trace_report_tasks
 
 
-def test_the_eval_only_pass_drains_its_trace_reports():
+def test_the_eval_only_pass_leaves_its_reports_to_close():
     from unittest.mock import AsyncMock
 
     controller = object.__new__(Controller)
@@ -864,5 +870,87 @@ def test_the_eval_only_pass_drains_its_trace_reports():
         return {}
 
     controller._validate_and_log = AsyncMock(side_effect=validate_and_log)
-    asyncio.run(controller.run())
-    assert written == ["main"]
+
+    async def run():
+        await controller.run()
+        pending = len(controller._trace_report_tasks)
+        await controller._drain_trace_reports()
+        return pending
+
+    assert asyncio.run(run()) == 1 and written == ["main"]
+
+
+def test_a_childs_cancellation_is_reraised():
+    """gather(return_exceptions=True) hands back a child's CancelledError as a
+    value; unpacking it would turn a cancellation into a TypeError."""
+    validation = ValidationConfig(
+        num_samples=2, sets=[ValidationSetConfig(name="tb4", num_samples=1)]
+    )
+    controller, _calls = _controller(validation)
+
+    async def collect(**kwargs):
+        if kwargs.get("set_name") is None:
+            raise asyncio.CancelledError()
+        return [], [], []
+
+    controller._collect_validation_rollouts = collect
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(controller.validate(step=5))
+
+
+def test_cancelling_a_multi_set_pass_cancels_every_collection():
+    validation = ValidationConfig(
+        num_samples=2, sets=[ValidationSetConfig(name="tb4", num_samples=1)]
+    )
+    controller, _calls = _controller(validation)
+    cancelled = []
+
+    async def collect(**kwargs):
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.append(kwargs.get("set_name"))
+            raise
+
+    controller._collect_validation_rollouts = collect
+
+    async def run():
+        task = asyncio.create_task(controller.validate(step=5))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+        orphans = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        return result, orphans
+
+    result, orphans = asyncio.run(run())
+    assert isinstance(result[0], asyncio.CancelledError) and orphans == []
+    assert sorted(cancelled, key=str) == [None, "tb4"]
+
+
+@pytest.mark.parametrize("tb4_due", [True, False])
+def test_a_main_set_error_raises_only_when_no_named_set_is_due(tb4_due):
+    """With a named set due, the main set's error is logged (validation/valid=0)
+    and the pass goes on; with none due it raises, as it always has."""
+    validation = ValidationConfig(
+        num_samples=2, sets=[ValidationSetConfig(name="tb4", num_samples=1, every=3)]
+    )
+    controller, _calls = _controller(validation)
+    controller._validation_pass_index = 0 if tb4_due else 1
+
+    async def collect(**kwargs):
+        if kwargs.get("set_name") is None:
+            raise RuntimeError("main broke")
+        return [], [], [m.Metric("validation/tb4/valid", m.NoReduce(1.0))]
+
+    controller._collect_validation_rollouts = collect
+    if not tb4_due:
+        with pytest.raises(RuntimeError, match="main broke"):
+            asyncio.run(controller.validate(step=10))
+        return
+    metrics = asyncio.run(controller.validate(step=10))
+    valid = {
+        metric.key: metric.value.value
+        for metric in metrics
+        if metric.key.endswith("/valid")
+    }
+    assert valid == {"validation/valid": 0.0, "validation/tb4/valid": 1.0}
