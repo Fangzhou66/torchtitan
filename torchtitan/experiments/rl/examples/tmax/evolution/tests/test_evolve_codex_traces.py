@@ -229,6 +229,20 @@ def test_easier_never_supplies_the_retained_skill_and_counts_all_help():
     assert "leave the decision itself to the student" in p
 
 
+def test_easier_prefers_help_whose_cue_the_original_task_also_shows():
+    """The original is graded without the help, so help ranks by whether the
+    cue the student learns to act on survives into the original: its own
+    signals first, removable instruction hints next, supplied work last."""
+    p = " ".join(so.prompt("vague").split())
+    assert "has to be triggered by something the original task also shows it" in p
+    first = p.index("1. The original task's own signals")
+    second = p.index("2. Words in the instruction")
+    third = p.index("3. Work supplied in the environment")
+    assert first < second < third
+    assert "removable without rewriting the rest" in p
+    assert "Say in change which place the help is in" in p
+
+
 def test_real_harder_keeps_the_upstream_fix_out_of_the_environment():
     g = " ".join(ec._REAL_HARDER_GUIDANCE.split())
     assert "The environment holds the problem, never its fix" in g
