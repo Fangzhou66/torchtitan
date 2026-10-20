@@ -41,6 +41,12 @@ fixes per declared kind (`kind_reward_hack`, `kind_hidden_requirement`,
 `kind_broken_setup`, `kind_other`). `repair_rows` keeps each fix with the
 rewriter's own defect, evidence and change, for the `evolution/repairs/report`
 table.
+
+`report_rows` is one row per rewrite for the `evolution/rewrites/report` table:
+what training measured before it (the signal's group), what the rewriter says
+it did (an easier rewrite's retained skill, change and expected count, or the
+opening of a harder rewrite's notes), and, for an accepted rewrite, the groups
+training has since finished on the revision it produced.
 """
 
 from __future__ import annotations
@@ -62,6 +68,17 @@ REPAIR_KEYS = ("rewrites", "fixes", "accepted_rewrites", "harder", "easier")
 # What a declared repair fixed; evolve_codex._read_repairs requires one per fix.
 REPAIR_KINDS = ("reward_hack", "hidden_requirement", "broken_setup", "other")
 REPAIR_COLUMNS = ("step", "task", "direction", "status", "kind", "defect", "evidence", "change")
+REWRITE_COLUMNS = (
+    "step", "task", "direction", "status", "stage", "revs", "before", "expected", "after",
+    "retained_skill", "change", "reason",
+)
+# Each text cell is cut to this many characters: the table is uploaded whole.
+REPORT_CHARS = 600
+# Groups shown in "after"; the solved fraction covers every finished group.
+AFTER_GROUPS = 6
+# Training steps between uploads of the rewrite report: its rows change as
+# groups finish, and every upload is the whole table.
+REWRITE_REPORT_EVERY = 10
 FLOW_KEYS = ("signals_issued", "signals_consumed", "rewrites_accepted", "rewrites_trained")
 DIRECTIONS = ("harder", "easier")
 # Merges the latency median looks back over: recent enough to move when the
@@ -94,8 +111,28 @@ def record_outcome(root: layout.Root, rewrite: layout.RewriteDir, meta: dict) ->
                 {k: r.get(k) for k in ("kind", "defect", "evidence", "change")}
                 for r in meta.get("repair") or []
             ],
+            "input_rev": meta.get("input_rev"),
+            "result_rev": meta.get("result_rev"),
+            "reason": meta.get("reason"),
+            "summary": _summary(rewrite, meta),
         },
     )
+
+
+def _summary(rewrite: layout.RewriteDir, meta: dict) -> dict:
+    """What the rewriter says it did: an easier rewrite's declaration, or the
+    opening of a harder rewrite's notes (kept beside the rewrite by the fold)."""
+    decision = meta.get("simplify") or {}
+    note = ""
+    for path in (rewrite.notes / "hardening.md", rewrite.package / "run/hardening.md"):
+        if path.is_file():
+            note = path.read_text(errors="replace")[:REPORT_CHARS]
+            break
+    return {
+        "retained_skill": decision.get("retained_skill"),
+        "change": decision.get("change") or note or None,
+        "expected": decision.get("expected"),
+    }
 
 
 def _new_lines(path: Path, offset: int) -> tuple[list[dict], int]:
@@ -158,12 +195,30 @@ class EvolutionMetrics:
         self.repairs: Counter[str] = Counter()
         # One row per declared repair, for the report table beside the counts.
         self.repair_rows: list[list] = []
+        # Rewrite report: every outcome line, each signal's measured group, and
+        # every finished group by task as (time, revision, solved, scored).
+        self.rewrite_events: list[tuple[int | None, dict]] = []
+        self.signal_measured: dict[str, str] = {}
+        self.finished_groups: dict[str, list[tuple[float, str, int, int]]] = {}
 
     def _poll_claims(self) -> None:
         events, self.claim_offset = _new_lines(
             self.base.trainer / "training_lineage/events.jsonl", self.claim_offset
         )
         for event in events:
+            if (
+                event["event"] == "finalized"
+                and "sample_revision" in event
+                and event.get("num_scored_rollouts")
+            ):
+                self.finished_groups.setdefault(event["task_id"], []).append(
+                    (
+                        event["time_unix_ns"] / 1e9,
+                        event["sample_revision"],
+                        int(event.get("num_solved") or 0),
+                        int(event["num_scored_rollouts"]),
+                    )
+                )
             if event["event"] == "trained" and "sample_revision" in event:
                 self.trained.setdefault(event["task_id"], []).append(
                     (
@@ -198,6 +253,8 @@ class EvolutionMetrics:
         if identity in self.issued:
             return
         signal = json.loads(path.read_text())
+        if signal.get("total") is not None:
+            self.signal_measured[identity] = f"{signal.get('solved')}/{signal['total']}"
         key = (attempt.session_id, signal["group"])
         origin = self.claimed_origin.get(key)
         # Counted once its claim is visible, so its issue step is known.
@@ -240,6 +297,7 @@ class EvolutionMetrics:
             if event["rewrite"] in self.rewrites:
                 continue
             self.rewrites.add(event["rewrite"])
+            self.rewrite_events.append((step, event))
             if event.get("started") and event.get("signal"):
                 started = layout.parse_stamp(event["started"])
                 # A retried signal waited until its first attempt began.
@@ -399,6 +457,48 @@ class EvolutionMetrics:
             )
         return values
 
+    def report_rows(self) -> list[list]:
+        """One row per rewrite, in the order the loop finished them."""
+        rows = []
+        for step, event in self.rewrite_events:
+            summary = event.get("summary") or {}
+            signal = event.get("signal")
+            rows.append([
+                step,
+                event["task"],
+                event["direction"],
+                event["status"],
+                event.get("stage"),
+                f"r{event.get('input_rev')}->r{event.get('result_rev')}"
+                if event["status"] == "accepted" else f"r{event.get('input_rev')}",
+                self.signal_measured.get(signal),
+                summary.get("expected"),
+                self._after(event) if event["status"] == "accepted" else None,
+                _cut(summary.get("retained_skill")),
+                _cut(summary.get("change")),
+                _cut(event.get("reason")),
+            ])
+        return rows
+
+    def _after(self, event: dict) -> str | None:
+        """Groups training finished on the revision an accepted rewrite
+        produced: the first revision of its task, other than the one its
+        signal measured, finished after the rewrite was accepted."""
+        span = self.signal_span.get(event.get("signal"))
+        if span is None or not event.get("finished"):
+            return None
+        task, old, _ = span
+        accepted_at = layout.parse_stamp(event["finished"])
+        groups = [g for g in self.finished_groups.get(task, ()) if g[0] >= accepted_at and g[1] != old]
+        if not groups:
+            return None
+        revision = groups[0][1]
+        groups = [g for g in groups if g[1] == revision]
+        shown = ", ".join(f"{g[2]}/{g[3]}" for g in groups[:AFTER_GROUPS])
+        more = f", ... ({len(groups)} groups)" if len(groups) > AFTER_GROUPS else ""
+        solved = sum(g[2] for g in groups) / sum(g[3] for g in groups)
+        return f"{shown}{more}; solved {solved:.2f}"
+
     def flow_series(
         self, direction: str | None = None
     ) -> tuple[list[int], list[list[int]], list[str]]:
@@ -410,3 +510,10 @@ class EvolutionMetrics:
             [[self.history[s][direction][i] for s in steps] for i in range(len(FLOW_KEYS))],
             list(FLOW_KEYS),
         )
+
+
+def _cut(text: object) -> str | None:
+    if text is None:
+        return None
+    text = str(text)
+    return text if len(text) <= REPORT_CHARS else text[:REPORT_CHARS] + "..."
