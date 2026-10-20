@@ -2228,6 +2228,7 @@ class Controller(Configurable):
             sl.log_trace_instant("validation_start")
             await self._validate_and_log(step=self.start_step)
             if num_training_steps == 0:
+                await self._drain_trace_reports()
                 return
         sl.log_trace_instant("training_start")
         self._training_activity_phase = "training"
@@ -2396,6 +2397,18 @@ class Controller(Configurable):
         self._log_reward_delta(
             self._validation_results.get(self.start_step, {}), post_validation
         )
+        await self._drain_trace_reports()
+
+    async def _drain_trace_reports(self) -> None:
+        """Wait for the background trace reports (``trace_report_in_background``)
+        of the last pass: nothing awaits them otherwise, and a stop right after the
+        pass would lose them."""
+        tasks = getattr(self, "_trace_report_tasks", None)
+        if tasks:
+            logger.info(
+                "Waiting for %d validation trace report(s) to finish writing", len(tasks)
+            )
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _validate_and_log(
         self, *, step: int, final: bool = False
@@ -2589,8 +2602,7 @@ class Controller(Configurable):
                 "Waiting for the in-flight background validation pass to finish"
             )
             await task
-        if self._trace_report_tasks:
-            await asyncio.gather(*self._trace_report_tasks, return_exceptions=True)
+        await self._drain_trace_reports()
 
     def _log_reward_delta(self, pre: dict[str, float], post: dict[str, float]) -> None:
         """Console pre/post reward summary, visible without scrolling back through the loop."""

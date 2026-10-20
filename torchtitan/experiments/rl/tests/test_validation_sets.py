@@ -764,3 +764,105 @@ def test_empty_swe_val_samples_means_unset(no_val_env, monkeypatch):
     monkeypatch.setenv("SWE_HOLDOUT_N", "0")
     with pytest.raises(ValueError, match="requires a separate SWE_TB2_VAL_DATA"):
         tmax_config_registry._tmax_rollouter()
+
+
+def test_a_failing_named_set_leaves_no_collection_running():
+    """The reviewer's probe at 492a3a59: tb4's collection raised, validate()
+    re-raised while the main collection kept running unawaited, so a run_async
+    pass counted as done under orphaned trials."""
+    validation = ValidationConfig(
+        num_samples=2,
+        sets=[ValidationSetConfig(name="tb4", num_samples=1)],
+        trace_report_in_background=True,
+    )
+    controller, _calls = _controller(validation, set_sizes={"tb4": 3})
+    controller._trace_report_tasks = set()
+    state = {"main_done": False}
+
+    async def collect(**kwargs):
+        if kwargs.get("set_name") == "tb4":
+            raise RuntimeError("tb4 collection failed")
+        await asyncio.sleep(0.2)
+        state["main_done"] = True
+        return [], [], [m.Metric("validation/valid", m.NoReduce(1.0))]
+
+    controller._collect_validation_rollouts = collect
+
+    async def run():
+        metrics = await controller.validate(step=5)
+        # The main set's background trace report is tracked and drained at the
+        # end of the run; anything else still running would be orphaned.
+        orphans = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task not in controller._trace_report_tasks
+        ]
+        await controller._drain_trace_reports()
+        return metrics, orphans
+
+    metrics, orphans = asyncio.run(run())
+    assert orphans == [] and state["main_done"]
+    valid = {
+        metric.key: metric.value.value
+        for metric in metrics
+        if metric.key.endswith("/valid")
+    }
+    assert valid == {"validation/valid": 1.0, "validation/tb4/valid": 0.0}
+
+
+def _slow_report(controller, state, name):
+    async def report():
+        await asyncio.sleep(0.05)
+        state.append(name)
+
+    task = asyncio.ensure_future(report())
+    controller._trace_report_tasks.add(task)
+    task.add_done_callback(controller._trace_report_tasks.discard)
+
+
+def test_the_post_training_pass_drains_its_trace_reports():
+    from unittest.mock import AsyncMock, MagicMock
+
+    controller = object.__new__(Controller)
+    controller._trainer_policy_version = 10
+    controller.start_step = 0
+    controller._validation_results = {0: {}}
+    controller.eval_generator_router = None
+    controller._validation_task = None
+    controller._trace_report_tasks = set()
+    controller._log_reward_delta = MagicMock()
+    written = []
+
+    async def validate_and_log(**kwargs):
+        _slow_report(controller, written, "main")
+        _slow_report(controller, written, "tb4")
+        return {}
+
+    controller._validate_and_log = AsyncMock(side_effect=validate_and_log)
+    asyncio.run(controller._post_training_validation())
+    assert sorted(written) == ["main", "tb4"]
+    assert not controller._trace_report_tasks
+
+
+def test_the_eval_only_pass_drains_its_trace_reports():
+    from unittest.mock import AsyncMock
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        training_heartbeat_interval_sec=0,
+        async_loop=SimpleNamespace(
+            num_training_steps=0, validation=ValidationConfig(run_async=False)
+        ),
+    )
+    controller.start_step = 0
+    controller._trace_report_tasks = set()
+    written = []
+
+    async def validate_and_log(**kwargs):
+        _slow_report(controller, written, "main")
+        return {}
+
+    controller._validate_and_log = AsyncMock(side_effect=validate_and_log)
+    asyncio.run(controller.run())
+    assert written == ["main"]
