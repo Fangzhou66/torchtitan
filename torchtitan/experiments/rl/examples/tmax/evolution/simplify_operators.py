@@ -66,7 +66,8 @@ def prompt(hint: str) -> str:
 say about how to solve: none permits structural changes only; vague permits a
 direction or subgoal, not concrete solution steps; specific permits one
 trace-supported step. Structural help -- a starter, a completed stage, a
-prepared input -- is allowed at every level. No level permits the final answer,
+prepared input -- is allowed at every level for the work around the retained
+skill, never for the retained skill itself. No level permits the final answer,
 an exact patch, the output the retained skill should compute, or private
 verifier details.
 
@@ -125,18 +126,37 @@ comparison in previous. A change that already failed, repeated, is not a new
 attempt. If an earlier rewrite made this task harder, what it changed is the
 first candidate to restore in part.
 
+## Keep the retained skill with the student
+
+retained_skill is the decision the task exists to train: the algorithm, the
+bug, the technique its name points at. A version is trained so that the
+student can later do the original task, so the student makes that decision in
+every version, however much help surrounds it. A version in which the student
+only completes what the help left open -- a line or a boundary check in an
+implementation supplied around it, a skeleton the verifier now requires, the
+original source or reference solution anywhere it can reach -- is solved
+without the skill and teaches submitting a half-done task instead.
+
+Judge the help as a whole, not this rewrite's increment:
+traces/history/since-original.diff is every change since the original task
+(absent when this is the original). Help that earlier simplifications already added counts toward what the
+student is given, and if it already supplies part of the retained skill,
+withdrawing that part is this rewrite's first change.
+
 ## Choose the strength of help
 
 Choose the change from the attempts. Help comes in increasing strength: a
 direction for the failing decision; the goal decomposed into checked
-subgoals; part of the work supplied (a starter, a completed stage, a prepared
-input) so the student does the rest; a worked instance of the hard step on an
-input other than the graded one. Use the weakest help the evidence says will
-produce successes. A failed prediction at one strength needs a reason, from
-the traces, to stay at that strength. Keep the task's goal and as much of its
-decision-making as the student can still learn from; when no attempt has a
-foothold, supplying part of the core decision is better than another rewrite
-that changes nothing. What the student could have obtained in the original
+subgoals; the work around the retained skill supplied (setup, input and
+output handling, a prepared input) so the student spends its budget on the
+skill; a worked instance of the hard step on an input other than the graded
+one. Use the weakest help the evidence says will produce successes. A failed
+prediction at one strength needs a reason, from the traces, to stay at that
+strength. When no attempt has a foothold, reduce what the retained decision
+demands -- a smaller instance, fewer cases, feedback that exposes the mistake
+where it is made -- and leave the decision itself to the student; when the
+student cannot make it in any form the task can still grade, write GIVE UP
+with that reason rather than hand it over. What the student could have obtained in the original
 environment itself -- a package or tool it can install, a file it can fetch,
 a setting it can change -- is part of the work: help with it by saying what to
 obtain and how, not by obtaining it for the student. Supply it directly only
