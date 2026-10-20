@@ -208,11 +208,25 @@ def test_easier_scales_help_by_evidence_and_predicts_a_number():
     predicts a solved count."""
     p = so.prompt("vague")
     assert "Help comes in increasing strength" in p
-    assert "supplying part of the core decision is better than another rewrite" in p
+    assert "supplying part of the core decision" not in p
     assert 'written as "k of n"' in p
     assert "Prefer a strict subset of the help." not in so.CALIBRATION_GUIDANCE
     # What the student could obtain itself is taught, not done for it.
     assert "not by obtaining it for the student" in " ".join(p.split())
+
+
+def test_easier_never_supplies_the_retained_skill_and_counts_all_help():
+    """1019: easier rewrites handed over the core step a little at a time (a
+    starter with one line left, a required skeleton, the original source in
+    the image), so the chain was solved without the skill. Help is judged as
+    the whole stack since the original, and the retained skill stays with the
+    student at every strength."""
+    p = " ".join(so.prompt("vague").split())
+    assert "never for the retained skill itself" in p
+    assert "the student makes that decision in every version" in p
+    assert "traces/history/since-original.diff is every change since the original task" in p
+    assert "withdrawing that part is this rewrite's first change" in p
+    assert "leave the decision itself to the student" in p
 
 
 def test_real_harder_keeps_the_upstream_fix_out_of_the_environment():
