@@ -91,6 +91,7 @@ from renderers import Message, Renderer
 
 from torchtitan.experiments.rl.environment import TokenEnv
 from torchtitan.experiments.rl.examples.tmax import (
+    gpu_admission,
     harbor_env,
     layout,
     rollout_record,
@@ -510,6 +511,8 @@ def _timing_metrics(timings: list[Mapping[str, float]]) -> list[m.Metric]:
     mean_of("agent_exec_secs", "rollout/agent_exec_secs_mean")
     mean_of("grade_secs", "rollout/grade_secs_mean")
     mean_of("shadow_grade_secs", "rollout/shadow_grade_secs_mean")
+    # GPU rows only: time queued for a GPU trial slot (see gpu_admission).
+    mean_of("gpu_slot_wait_secs", "rollout/gpu_slot_wait_secs_mean")
 
     # The agent loop split. A loop of zero seconds has no split to report.
     loops = [
@@ -1129,6 +1132,15 @@ class TMaxRollouter(Rollouter):
         num_rollout_workers x this. Each completed sibling immediately releases its
         slot to the next waiting rollout."""
 
+        gpu_trial_concurrency: int = 5
+        """Max concurrently running trials of GPU rows (a TB4 row whose agent sandbox
+        or separate verifier asks for a GPU), across training and validation and
+        every worker process on the host. One trial can hold two GPUs (agent +
+        verifier), so 5 fits the 10-H100 ``earth`` quota. A trial takes its slot
+        before it boots and keeps it through grading, so its verifier always has
+        room (see ``gpu_admission``). Rows without a GPU are not counted or delayed.
+        0 turns the limit off."""
+
         time_budget_sec: int = 2400
         """Per-rollout agent wall-clock budget (the vanillux loop stops after this)."""
 
@@ -1405,6 +1417,11 @@ class TMaxRollouter(Rollouter):
         # release. Ordering is per worker. The controller pins group-loop lanes to
         # workers, and each gate prioritizes the groups claimed by its lanes.
         self._rollout_gate = _RolloutIssueGate(config.rollout_concurrency)
+        self._gpu_admission = (
+            gpu_admission.GpuTrialAdmission(config.gpu_trial_concurrency)
+            if config.gpu_trial_concurrency > 0
+            else None
+        )
         self._adapter: AnthropicAdapter | None = None
         if config.bench_scheduler and _SYNC_WAIT_FOR_REWRITES:
             raise ValueError(
@@ -2090,7 +2107,21 @@ class TMaxRollouter(Rollouter):
             and group_id >= 0
             and os.environ.get("TMAX_PANE_DUMP", "0") == "1"
         )
-        await self._rollout_gate.acquire_sibling((group_id, rollout_idx))
+        # A GPU row first waits for one of the host's GPU trial slots, before it
+        # takes a gate slot, so a queue of GPU trials never holds gate capacity that
+        # other rows could use. It keeps the slot until its finally, verifier included.
+        gpu_slot = None
+        admission = getattr(self, "_gpu_admission", None)
+        if admission is not None and gpu_admission.gpu_trial(sample):
+            wait_at = time.monotonic()
+            gpu_slot = await admission.acquire()
+            timing["gpu_slot_wait_secs"] = time.monotonic() - wait_at
+        try:
+            await self._rollout_gate.acquire_sibling((group_id, rollout_idx))
+        except BaseException:
+            if gpu_slot is not None:
+                gpu_slot.release()
+            raise
         slot_at = time.monotonic()
         try:
             # open_session is inside the try so a failure still releases the slot.
@@ -2414,6 +2445,8 @@ class TMaxRollouter(Rollouter):
                 }
         finally:
             self._rollout_gate.release()
+            if gpu_slot is not None:
+                gpu_slot.release()
             captured = await adapter.finish_session(rollout_id)
 
         disk_gb = (
