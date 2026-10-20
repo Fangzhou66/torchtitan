@@ -342,7 +342,8 @@ A pass therefore lasts as long as its slowest part, and with TB4 that is long:
   group ids first, and the named sets' ids come after the main set's, so TB4's long
   trials queue ahead of TB2.1's. A pass takes roughly total trial time / 64.
 - At the end of training the controller waits for a pass still in flight, then
-  runs the post-training pass, which always includes TB4.
+  runs the post-training pass, which always includes TB4, and then waits for its
+  background trace reports (TB4's is the largest).
 
 So set `SWE_EVAL_AGENT_BUDGET_CAP_SEC` (validation only, every set) and
 `SWE_VAL_SET_TB4_EVERY` together, and widen `SWE_VAL_INTERVAL` to match. With
