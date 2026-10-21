@@ -40,6 +40,7 @@ import os
 import shutil
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -512,6 +513,12 @@ def _harness_env() -> dict:
     # jq sits beside the codex binary, for reading traces/; the loop's own
     # PATH (a systemd unit's) does not carry that directory.
     env["PATH"] = str(_tool_bin()) + os.pathsep + env.get("PATH", "")
+    # ./sandbox prefers TRL_VENV_PY over TRL_VENV. An inherited value can name a
+    # system Python too old for the harness (a shell profile that exports
+    # $TRL_VENV/bin/python before TRL_VENV is set yields /bin/python), and then
+    # every sandbox the loop itself boots dies on import while the ones a codex
+    # session boots work. The loop already runs on the harness venv, so pin it.
+    env["TRL_VENV_PY"] = sys.executable
     return env
 
 
