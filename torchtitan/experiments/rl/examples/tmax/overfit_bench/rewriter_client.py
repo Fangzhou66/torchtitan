@@ -249,13 +249,14 @@ def run_reference(job: Path, argv: list[str]) -> None:
     evolution = Path(__file__).resolve().parent.parent / "evolution"
     sys.path.insert(0, str(evolution))
     import evolve_ondella as ev  # noqa: E402
+    import grader_replay  # noqa: E402
 
     # Validation records here are the bench's readout, which a rewriter may not
     # read: the author record indexes training attempts only.
     ev.ATTEMPT_RECORD_DIRS = ("rollouts",)
     # An easier rewrite must still pass the parent's passing finals and
     # reference solutions (grader_replay.py); on here unless the env says 0.
-    ev.EASIER_GRADER_REPLAY = ev.grader_replay.enabled(default="1")
+    ev.EASIER_GRADER_REPLAY = grader_replay.enabled(default="1")
     client = RewriterClient(job)
 
     def connect() -> None:
