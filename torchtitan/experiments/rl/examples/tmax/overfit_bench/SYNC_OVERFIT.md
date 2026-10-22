@@ -13,7 +13,10 @@ solve is the rewriter's doing.
 
 The bench recipe is asynchronous (two active groups); this run is strictly
 synchronous so that every rollout is on the newest policy and on the newest
-task version. Everything not listed keeps `recipe.env`.
+task version. Everything not listed keeps `recipe.env` as it was at eed109f3,
+before the version pool (LR 5e-7, a wall-clock budget per attempt). Against
+today's `recipe.env` it also needs `SWE_BENCH_SCHEDULER=0`, and
+`SWE_BENCH_MAX_TURNS=0` for the budget below to apply.
 
 | setting | value | why |
 |---|---|---|
@@ -21,6 +24,7 @@ task version. Everything not listed keeps `recipe.env`.
 | `SWE_NUM_ROLLOUT_WORKERS` | 1 | one active group needs one worker to keep its gate supplied |
 | `SWE_ALLOW_IDLE_ROLLOUT_SLOTS` | 1 | allows one active group (the work-conserving check otherwise asks for 2) |
 | `SWE_SYNC_WAIT_FOR_REWRITES` | 1 | the next group waits for this run's pending rewrites (below) |
+| `SWE_BENCH_SCHEDULER` | 0 | the scheduler never lets training wait, so the rollouter refuses it with the line above |
 | `SWE_GROUP_SIZE`, `SWE_ROLLOUT_CONCURRENCY` | 12 | more attempts per task version; 32 had too long a tail |
 | `SWE_TB2_VAL_K` | 5 | readout = 5 attempts at the original |
 | `SWE_VAL_INTERVAL` | 1 | a readout of every step's weights (see below) |

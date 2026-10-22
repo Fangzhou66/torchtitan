@@ -127,6 +127,14 @@ class TMaxSample:
     """The non-root user a TB4 image declares; the agent runs as it while the
     harness keeps root. "" = the agent runs as root, as on every other row."""
 
+    version: str = field(default="", compare=False)
+    """The overfit bench's version id of this row: its content sha
+    (``content_revision`` of the row, the same value as the lineage's
+    ``sample_revision``), set when the bench scheduler draws it; "" otherwise.
+    Excluded from equality like ``lineage``: it names the content, it is not
+    content. Last field, so a controller checkpoint pickled before it existed
+    still restores (see ``__setstate__``)."""
+
     def __setstate__(self, state) -> None:
         """Unpickle, filling the fields a pickle older than them does not carry.
 

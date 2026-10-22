@@ -208,6 +208,11 @@ class Root:
     def logs(self) -> Path:
         return self.path / "logs"
 
+    @property
+    def scheduler_json(self) -> Path:
+        """Where the overfit bench's scheduler says which socket it listens on."""
+        return self.path / "scheduler.json"
+
     def run(self, name: str) -> "Run":
         return Run(self.runs / name)
 
@@ -238,6 +243,12 @@ class MixDir:
     @property
     def live(self) -> Path:
         return self.path / "live.jsonl"
+
+    @property
+    def pool_state(self) -> Path:
+        """The overfit bench's version pool (weights, parents, status) as of its
+        last change; ``live.jsonl`` holds the same pool's active rows."""
+        return self.path / "pool.json"
 
     def read_live(self, attempts: int = 20) -> str:
         """``live.jsonl``'s text, read again while a publish swaps it in.
@@ -505,6 +516,12 @@ class Run:
     @property
     def advisories(self) -> Path:
         return self.path / "advisories"
+
+    @property
+    def scheduler(self) -> Path:
+        """The overfit bench scheduler's logs: pool.jsonl (every pool change),
+        events.jsonl (every event), draws.jsonl (every training draw)."""
+        return self.path / "scheduler"
 
     def rollout_record(self, task: str, group: int, idx: int) -> Path:
         root = self.validation_rollouts if group < 0 else self.rollouts

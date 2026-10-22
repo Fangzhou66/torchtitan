@@ -10,7 +10,11 @@ those two modules and never spells a path itself.
    only its run directory. The evolve loop writes only `evolution/` and
    `data/mix/`. The trainer reads `evolution/status.json` and its own run's
    `evolution/outcomes/<run>.jsonl`; the loop reads
-   `runs/*/signals/` and `runs/*/rollouts/`. Nothing else crosses.
+   `runs/*/signals/` and `runs/*/rollouts/`. Nothing else crosses. The one
+   exception is an overfit-bench job under its scheduler
+   (`overfit_bench/README.md`): there the trainer's version pool owns
+   `data/mix/` (it publishes the versions, and `pool.json`) and writes
+   `scheduler.json` at the root.
 2. **One unit of work, one directory, with everything it read and produced
    inside it.** One process lifetime is one run. One handled signal is one
    rewrite. One codex invocation is one session. A task's whole history is one
@@ -32,6 +36,7 @@ those two modules and never spells a path itself.
 ```
 $TRL_BASE/
 ├── experiment.json               name, created, profile, purpose, seed_mix_version, forked_from
+├── scheduler.json                overfit bench only: the scheduler's socket, host, pid, run
 ├── bin/                          codex, jq
 ├── data/
 │   ├── sources/…                 corpora as obtained; read-only
@@ -40,7 +45,8 @@ $TRL_BASE/
 │       ├── history/v0001--<stamp>.jsonl           every version ever served; append-only
 │       ├── history/v0001--<stamp>.manifest.json   version, parent_version, sha256, rows, stamp
 │       ├── history/v0001--<stamp>.inputs.json     the seed builder's own manifest, copied in (v1 only)
-│       └── live.jsonl            a hardlink to the current version (replaced atomically); never edited in place
+│       ├── live.jsonl            a hardlink to the current version (replaced atomically); never edited in place
+│       └── pool.json             overfit bench only: the version pool (rows, weights, parents, status)
 ├── runs/
 │   ├── latest -> tmax-9b--<stamp>
 │   └── tmax-9b--<stamp>/         one process lifetime; only the trainer writes here
@@ -60,6 +66,7 @@ $TRL_BASE/
 │       │                     …/g<group>-r<idx>.pane    the terminal transcript, when TMAX_PANE_DUMP=1
 │       ├── validation_rollouts/<task>/g<group>-r<idx>.jsonl   completed validation attempts, saved before the full report
 │       ├── signals/<task>--g<group>.json           one per zero-variance training group
+│       ├── scheduler/            overfit bench only: pool.jsonl (pool changes), events.jsonl, draws.jsonl
 │       └── advisories/no_tmux.jsonl              per-rollout warnings; append-only
 ├── evals/<stamp>--<run>-step<N>/ an evaluation is neither a run nor the loop
 ├── evolution/                    only the loop writes here
@@ -113,7 +120,7 @@ times are `stamp` strings (UTC) unless the key ends in `_unix_ns`.
 Line 1, the rollout:
 
 ```json
-{"task": "tw_380466", "rev": 2, "run": "tmax-9b--20260904-181500Z",
+{"task": "tw_380466", "rev": 2, "version": null, "run": "tmax-9b--20260904-181500Z",
  "group": 713, "rollout": 13, "reward": 1.0, "status": "completed",
  "finish_reason": "submit", "submitted": true, "format_errors": 0,
  "infra_failed": false, "error": "",
@@ -130,6 +137,10 @@ Every later line, one turn, keys in reading order:
  "output": "New Terminal Output:\n…", "analysis": "…", "plan": "…", "think": "…"}
 ```
 
+`version` is the overfit bench's version id (the row's content sha) when the
+sample came from its pool, else null; `budget_sec` is 0 for a turn-capped
+bench attempt, which has no wall clock.
+
 `keystrokes` is a list (a turn may send several); empty on a closing turn. A
 turn whose completion holds no Terminus response keeps its text under `raw`
 instead of `keystrokes`. `output` is the terminal reply the next turn was
@@ -141,7 +152,7 @@ also writes its browsable report after the full validation pass finishes.
 ### Signal `runs/<run>/signals/<task>--g<group>.json`
 
 ```json
-{"task": "tw_380466", "rev": 2, "run": "tmax-9b--20260904-181500Z", "group": 713,
+{"task": "tw_380466", "rev": 2, "version": null, "run": "tmax-9b--20260904-181500Z", "group": 713,
  "direction": "harder", "solved": 16, "total": 16, "created": "20260904-183012Z",
  "attempts": ["rollouts/tw_380466/g713-r0.jsonl", "…", "rollouts/tw_380466/g713-r15.jsonl"]}
 ```

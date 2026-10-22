@@ -64,6 +64,9 @@ Knobs read from env (the launcher sets these; see ``submit_swe_tmax_9b.sh``):
   ``TMAX_PANE_DUMP``                  =1 files the Terminus terminal transcript
                                       beside the rollout record (default off:
                                       up to 8 MiB per rollout)
+  ``SWE_BENCH_*``                     the overfit bench's switches, read by
+                                      config_registry into ``Config.bench_*``
+                                      (see overfit_bench/README.md)
 
 The three above write under ``TRL_RUN_DIR`` (``layout.Run``) and nowhere else;
 with it unset they write nothing. LAYOUT.md is the contract for what they write.
@@ -103,6 +106,7 @@ from torchtitan.experiments.rl.examples.tmax.grading import (
     seed_workspace,
 )
 from torchtitan.experiments.rl.examples.tmax.integrity_baseline import capture_baseline
+from torchtitan.experiments.rl.examples.tmax.overfit_bench import events as bench_events
 from torchtitan.experiments.rl.examples.tmax.rubric import RewardTMax, TMAX_REWARD_KEY
 from torchtitan.experiments.rl.examples.tmax.vanillux_loop import (  # noqa: F401 -- registers the default agent
     vanillux_agent,
@@ -779,6 +783,35 @@ def _wait_for_rewrites() -> bool:
     return blocked
 
 
+@dataclass(frozen=True)
+class _BenchMode:
+    """The overfit bench's switches (``Config.bench_*``). The defaults are off,
+    and a rollouter built without ``__init__`` (unit tests) reads them here."""
+
+    scheduler: bool = False
+    max_turns: int = 0
+    sandbox: tuple[tuple[str, int], ...] = ()
+
+
+# A turn-capped training rollout has no wall clock of its own; this only bounds
+# a rollout that hangs outside the agent's turns.
+_TURN_CAP_GUARD_SEC = int(os.environ.get("SWE_BENCH_TURN_CAP_GUARD_SEC", "43200"))
+
+
+def _with_sandbox(sample: TMaxSample, sandbox: tuple[tuple[str, int], ...]) -> TMaxSample:
+    """The sample with the bench's fixed Daytona resources, on the agent's
+    sandbox and on its separate verifier's (``tmax.separate_verifier``), which
+    boots from its own ``daytona_*`` keys. The cached row is never mutated."""
+    if not sandbox:
+        return sample
+    over = dict(sandbox)
+    tmax = sample.tmax
+    separate = tmax.get("separate_verifier")
+    if separate:
+        tmax = {**tmax, "separate_verifier": {**separate, **over}}
+    return replace(sample, tmax=tmax, **over)
+
+
 _RUN_DIR_UNSET_LOGGED = False
 
 
@@ -907,6 +940,8 @@ def _write_rollout_record(
         header = {
             "task": sample.instance_id,
             "rev": sample.rev,
+            # The bench pool's version id (the row's content sha); None elsewhere.
+            "version": getattr(sample, "version", "") or None,
             "run": run.name,
             "group": group_id,
             "rollout": rollout_idx,
@@ -1253,6 +1288,27 @@ class TMaxRollouter(Rollouter):
         length_penalty_min_pass_rate: float = 0.5
         """Skip a group unless its solved fraction is strictly greater than this."""
 
+        bench_scheduler: bool = False
+        """Overfit bench: draw training samples from the controller's
+        BenchScheduler (version pool) instead of the dataset, and emit
+        rollout_done / group_done for training groups. Needs BenchController."""
+
+        bench_max_turns: int = 0
+        """Overfit bench: > 0 caps a training attempt at this many turns and
+        nothing else -- no wall clock (the agent gets no deadline, no floor
+        applies, and the outer guard is only ``SWE_BENCH_TURN_CAP_GUARD_SEC``).
+        Terminus only. Validation keeps its own budget and turn cap."""
+
+        bench_sandbox_cpu: int = 0
+        """Overfit bench: > 0 boots every training and validation sandbox, and a
+        separate verifier's, with this many vCPU whatever the row declares."""
+
+        bench_sandbox_mem_gb: int = 0
+        """``bench_sandbox_cpu`` for memory (GiB); 0 keeps the row's value."""
+
+        bench_sandbox_disk_gb: int = 0
+        """``bench_sandbox_cpu`` for disk (GiB); 0 keeps the row's value."""
+
     def __init__(self, config: Config) -> None:
         # Before super(), which builds the datasets: a typo in a knob that changes
         # what reward means should fail on the spot, not behind a data error.
@@ -1350,6 +1406,37 @@ class TMaxRollouter(Rollouter):
         # workers, and each gate prioritizes the groups claimed by its lanes.
         self._rollout_gate = _RolloutIssueGate(config.rollout_concurrency)
         self._adapter: AnthropicAdapter | None = None
+        if config.bench_scheduler and _SYNC_WAIT_FOR_REWRITES:
+            raise ValueError(
+                "SWE_SYNC_WAIT_FOR_REWRITES=1 cannot run under the bench scheduler: "
+                "training never waits for the rewriter there (SWE_BENCH_SCHEDULER=1)"
+            )
+        if config.bench_max_turns < 0:
+            raise ValueError("bench_max_turns must be >= 0")
+        if config.bench_max_turns and self._agent_name != "terminus":
+            raise ValueError(
+                f"bench_max_turns (SWE_BENCH_MAX_TURNS) needs the terminus agent, "
+                f"which honors a turn cap with no deadline; TMAX_AGENT={self._agent_name}"
+            )
+        sandbox = tuple(
+            (key, value)
+            for key, value in (
+                ("daytona_cpu", config.bench_sandbox_cpu),
+                ("daytona_mem_gb", config.bench_sandbox_mem_gb),
+                ("daytona_disk_gb", config.bench_sandbox_disk_gb),
+            )
+            if value > 0
+        )
+        self._bench = _BenchMode(
+            scheduler=config.bench_scheduler,
+            max_turns=config.bench_max_turns,
+            sandbox=sandbox,
+        )
+        if config.bench_scheduler and os.environ.get("SWE_DATA_HOT_RELOAD", "0") == "1":
+            logger.warning(
+                "[tmax] SWE_DATA_HOT_RELOAD=1 has no effect under the bench "
+                "scheduler: training draws from its pool, which imports live.jsonl"
+            )
         self._adapter_lock = asyncio.Lock()
 
     async def _ensure_adapter(self, renderer: Renderer) -> AnthropicAdapter:
@@ -1544,6 +1631,9 @@ class TMaxRollouter(Rollouter):
         for rollout, advantage in zip(group.rollouts, advantages, strict=True):
             rollout.advantage = advantage
         self._maybe_emit_evolution_signal(sample, rollouts)
+        # After the signal file, so a rewriter woken by this already finds it.
+        if self._bench.scheduler and group_id >= 0:
+            self._emit_group_done(sample, rollouts)
         return group
 
     def _guard_for(self, budget_sec: int, verifier_sec: int | None = None) -> int:
@@ -1656,6 +1746,8 @@ class TMaxRollouter(Rollouter):
     # their entire guard in that queue and died with turns=0 at secs=2701. The
     # guard is rescheduled back down to _guard_for(budget) the moment the sandbox
     # is up, so this allowance never extends a rollout that actually started.
+    _bench: _BenchMode = _BenchMode()
+
     _SANDBOX_BOOT_ALLOWANCE_SEC: int = int(
         os.environ.get("SWE_SANDBOX_BOOT_ALLOWANCE_SEC", "2700")
     )
@@ -1703,11 +1795,70 @@ class TMaxRollouter(Rollouter):
     def get_training_sample(self) -> TMaxSample:
         # Runs in a worker thread after the controller frees a group slot, so a
         # wait here holds back only the next group's rollouts.
+        if self._bench.scheduler:
+            from torchtitan.experiments.rl.examples.tmax.overfit_bench import scheduler
+
+            return _with_sandbox(scheduler.require_current().draw(), self._bench.sandbox)
         if _SYNC_WAIT_FOR_REWRITES and _wait_for_rewrites():
             reload = getattr(self._train_dataset, "_maybe_reload", None)
             if reload is not None:
                 reload(min_interval_sec=0.0)
-        return super().get_training_sample()
+        return _with_sandbox(super().get_training_sample(), self._bench.sandbox)
+
+    def get_validation_sample(self) -> TMaxSample:
+        # The readout boots on the same fixed sandbox as training.
+        return _with_sandbox(super().get_validation_sample(), self._bench.sandbox)
+
+    def drain_training_data_events(self) -> list[dict]:
+        # Under the scheduler the dataset is never drawn from; pool.jsonl is
+        # where the training mix's changes are recorded.
+        return [] if self._bench.scheduler else super().drain_training_data_events()
+
+    def training_data_state_dict(self) -> dict:
+        if self._bench.scheduler:
+            from torchtitan.experiments.rl.examples.tmax.overfit_bench import scheduler
+
+            return {"bench_scheduler": scheduler.require_current().state_dict()}
+        return super().training_data_state_dict()
+
+    def load_training_data_state_dict(self, state: dict) -> None:
+        if self._bench.scheduler:
+            from torchtitan.experiments.rl.examples.tmax.overfit_bench import scheduler
+
+            if "bench_scheduler" not in state:
+                raise ValueError(
+                    "the checkpoint's training data state is a dataset cursor, not "
+                    "the bench scheduler's; it was written without SWE_BENCH_SCHEDULER"
+                )
+            scheduler.require_current().load_state_dict(state["bench_scheduler"])
+            return
+        super().load_training_data_state_dict(state)
+
+    def _emit_group_done(self, sample: TMaxSample, rollouts: list[Rollout]) -> None:
+        """group_done for a training group: the evolution signal's judgement of
+        it (scored = not infra-failed and not ended by a strict rule)."""
+        scored = [
+            r
+            for r in rollouts
+            if is_scored(r)
+            and r.diagnostics.get("finish_reason") not in _RULE_TERMINATED_REASONS
+        ]
+        versions = [
+            t.max_policy_version
+            for r in rollouts
+            for t in r.turns
+            if t.max_policy_version is not None
+        ]
+        bench_events.emit(
+            bench_events.GROUP_DONE,
+            version=sample.version or None,
+            task=sample.instance_id,
+            rev=sample.rev,
+            group=rollouts[0].group_id,
+            passed=sum(r.reward > 0 for r in scored),
+            scored=len(scored),
+            policy_version=max(versions) if versions else None,
+        )
 
     def _maybe_emit_evolution_signal(
         self, sample: TMaxSample, rollouts: list[Rollout]
@@ -1778,6 +1929,7 @@ class TMaxRollouter(Rollouter):
                 {
                     "task": sample.instance_id,
                     "rev": sample.rev,
+                    "version": sample.version or None,
                     "run": run.name,
                     "group": group_id,
                     "direction": "harder" if passed else "easier",
@@ -1897,6 +2049,14 @@ class TMaxRollouter(Rollouter):
         max_turns = None
         if group_id < 0 and self._eval_max_turns:
             max_turns = _UNCAPPED_TURNS if self._eval_max_turns < 0 else self._eval_max_turns
+        # Overfit bench turn-cap mode (training only): the turn cap is the whole
+        # budget. Terminus reads time_budget_sec=0 as no deadline, and the outer
+        # guard keeps only a sanity bound, so no attempt is cut by a clock.
+        guard_budget_sec = budget_sec
+        if group_id >= 0 and self._bench.max_turns:
+            budget_sec = 0
+            max_turns = self._bench.max_turns
+            guard_budget_sec = _TURN_CAP_GUARD_SEC
         strict_format, strict_opening, strict_truncation = (
             (
                 self._eval_strict_format,
@@ -1941,7 +2101,7 @@ class TMaxRollouter(Rollouter):
                 max_context_tokens=max_context_tokens,
             )
             async with asyncio.timeout(
-                self._guard_for(budget_sec, verifier_sec)
+                self._guard_for(guard_budget_sec, verifier_sec)
                 + self._SANDBOX_BOOT_ALLOWANCE_SEC
             ) as rollout_timeout:
                 # host_loop drives the sandbox with bash directly; it never runs the
@@ -1999,7 +2159,7 @@ class TMaxRollouter(Rollouter):
                         )
                     rollout_timeout.reschedule(
                         asyncio.get_running_loop().time()
-                        + self._guard_for(budget_sec, verifier_sec)
+                        + self._guard_for(guard_budget_sec, verifier_sec)
                     )
                     # Docker would have run this as PID 1 before anything else; our
                     # backends exec commands directly, so start it here or every
@@ -2021,7 +2181,7 @@ class TMaxRollouter(Rollouter):
                         await harbor_env.run_healthcheck(root_sb, healthcheck)
                         rollout_timeout.reschedule(
                             asyncio.get_running_loop().time()
-                            + self._guard_for(budget_sec, verifier_sec)
+                            + self._guard_for(guard_budget_sec, verifier_sec)
                         )
                     # INTEGRITY BASELINE (reaudit): digest the row's protected paths NOW -- after setup,
                     # before the agent's first action -- and keep the digests harness-side for grade_tmax
@@ -2412,6 +2572,25 @@ class TMaxRollouter(Rollouter):
             )
             if pane_text is not None:
                 _write_pane(run, sample, group_id, rollout_idx, pane_text)
+        if self._bench.scheduler and group_id >= 0:
+            versions = [
+                v
+                for t in turns
+                for v in (t.min_policy_version, t.max_policy_version)
+                if v is not None
+            ]
+            bench_events.emit(
+                bench_events.ROLLOUT_DONE,
+                version=sample.version or None,
+                task=sample.instance_id,
+                rev=sample.rev,
+                group=group_id,
+                idx=rollout_idx,
+                reward=None if diagnostics.infra_failed else float(reward),
+                finish_reason=finish_reason,
+                record_path=record,
+                policy_versions=[min(versions), max(versions)] if versions else [],
+            )
         return (
             Rollout(
                 group_id=group_id,
