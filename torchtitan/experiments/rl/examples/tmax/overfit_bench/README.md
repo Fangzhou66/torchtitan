@@ -203,6 +203,13 @@ through `rewriter_client.py reference`: it wakes on `group_done` rather than
 polling for signal files, and gives each fold to the pool as add(new) +
 retire(parent) as well as publishing it.
 
+Both reference rewriters reject an easier rewrite whose grader fails a
+solution the parent's grader passed (stage `grader_stricter`): the parent
+version's passing training finals, replayed from their recorded keystrokes,
+and the parent's and the original's reference solutions, each on a fresh
+Daytona sandbox (`../evolution/grader_replay.py`; `EVOLVE_EASIER_GRADER_REPLAY=0`
+turns it off). The evolve loop outside the bench leaves it off.
+
 `SYNC_OVERFIT.md` describes a strictly synchronous variant of a job (one group
 in flight, the next group waiting for the rewrites it triggered) and how it is run.
 

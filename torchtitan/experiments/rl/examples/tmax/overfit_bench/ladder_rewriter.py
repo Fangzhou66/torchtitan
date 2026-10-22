@@ -957,6 +957,11 @@ def main() -> None:
     os.environ.setdefault("TRL_BASE", str(job))
     root = layout.Root(job)
     ev = _evolve()
+    import grader_replay  # noqa: PLC0415 -- on the path _evolve() set
+
+    # An easier rewrite must still pass the parent's passing finals and
+    # reference solutions (grader_replay.py); on here unless the env says 0.
+    ev.EASIER_GRADER_REPLAY = grader_replay.enabled(default="1")
     # The simplify prompt refuses an unknown level only when a session starts;
     # refuse it here, before anything runs.
     import simplify_operators  # noqa: PLC0415 -- on the path _evolve() set

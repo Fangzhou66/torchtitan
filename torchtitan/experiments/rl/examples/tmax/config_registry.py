@@ -1132,6 +1132,12 @@ def rl_grpo_qwen3_5_9b_tmax(
     # SWE_CKPT_KEEP_EVERY=N keeps every N-th step's checkpoint for good, on top of
     # the SWE_CKPT_KEEP rolling resume copies (0 = off).
     config.trainer.checkpoint_keep_every = int(os.environ.get("SWE_CKPT_KEEP_EVERY", "0"))
+    # SWE_SKIP_ZERO_GRAD_STEP=1: no optimizer step when the grad norm is exactly
+    # 0.0 (PolicyTrainer.Config.skip_zero_grad_step); AdamW otherwise keeps moving
+    # the weights on zero-advantage steps.
+    config.trainer.skip_zero_grad_step = (
+        os.environ.get("SWE_SKIP_ZERO_GRAD_STEP", "0") == "1"
+    )
     # Optional trainer FSDP width override for a fwd/bwd speed experiment. The mast_rl
     # launcher derives the trainer host count from data_parallel_shard_degree, so
     # SWE_DP_SHARD=16 -> 2 trainer hosts (FSDP-16), spreading the packed rows across
