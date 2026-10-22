@@ -954,3 +954,23 @@ def test_a_main_set_error_raises_only_when_no_named_set_is_due(tb4_due):
         if metric.key.endswith("/valid")
     }
     assert valid == {"validation/valid": 0.0, "validation/tb4/valid": 1.0}
+
+
+def test_the_tmax_rollouter_draws_named_sets(tmp_path):
+    """TMaxRollouter overrides get_validation_sample; the override must take the
+    set name, or every named-set draw raises and the set is never scored."""
+    from torchtitan.experiments.rl.examples.tmax.rollouter import TMaxRollouter
+
+    def dataset(name, ids):
+        return TMaxDataset.Config(
+            data_path=_write_rows(tmp_path / f"{name}.jsonl", ids),
+            seed=99,
+            shuffle=False,
+            holdout_n=0,
+        ).build()
+
+    rollouter = object.__new__(TMaxRollouter)
+    rollouter._validation_dataset = dataset("tb2", ["m0"])
+    rollouter._validation_sets = {"tb4": dataset("tb4", ["g0", "g1"])}
+    assert rollouter.get_validation_sample().instance_id == "m0"
+    assert rollouter.get_validation_sample("tb4").instance_id == "g0"
