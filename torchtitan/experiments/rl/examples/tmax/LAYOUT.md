@@ -216,7 +216,11 @@ line and is retried next round; `loop.log` holds the traceback.
 
 `stage` names the check that settled a non-accepted rewrite (`oracle`,
 `dark_literals`, `step`, `setup`, `fold`, …) and `reason` says why in a
-sentence; both are null on an accepted one. The three deadline fields record
+sentence; both are null on an accepted one. An easier rewrite checked by
+`evolution/grader_replay.py` (`EVOLVE_EASIER_GRADER_REPLAY=1`) carries
+`grader_replay`: what was replayed under its grader and each verdict, and
+stage `grader_stricter` when a solution the parent's grader passed fails it.
+The three deadline fields record
 the frozen end-to-end budget, its Unix expiration time, and the portion held
 back from authoring and repair for final validation. `status` is `running`, `accepted`, `rejected`, `failed`,
 `interrupted` (the loop died with it running; `finalize_interrupted_traces.py`

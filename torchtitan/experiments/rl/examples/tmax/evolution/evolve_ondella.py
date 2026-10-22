@@ -79,6 +79,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import evolve_codex as ec  # noqa: E402
 import feedback_loop as fb  # noqa: E402
+import grader_replay  # noqa: E402
 from finalize_interrupted_traces import finalize_interrupted  # noqa: E402
 import pack_to_dataset as pack  # noqa: E402
 from recorded_solution import solution_path  # noqa: E402
@@ -110,6 +111,11 @@ SIMPLIFY_ENABLED = os.environ.get("SWE_EVOLVE_SIMPLIFY", "0").lower() not in (
     "false",
     "no",
 )
+# An accepted easier rewrite must still pass what the parent's grader passed
+# (grader_replay.py): its passing training finals and the parent's and the
+# original's reference solutions, replayed under the rewrite's grader. Off by
+# default here; the overfit bench's rewriters turn it on.
+EASIER_GRADER_REPLAY = grader_replay.enabled()
 EASIER_MIN_SCORED_ATTEMPTS = int(
     os.environ.get("EVOLVE_EASIER_MIN_SCORED_ATTEMPTS", "2")
 )
@@ -1232,6 +1238,21 @@ def handle(
                 }
             )
             rec["simplify_context"] = context
+        if (
+            job == "easier"
+            and EASIER_GRADER_REPLAY
+            and rec.get("status") == "accepted"
+            and not dry
+        ):
+            rec["grader_replay"] = _grader_replay(
+                root, task, tid, rev, src, rewrite, declared, stage=rec.get("stage")
+            )
+            if not rec["grader_replay"]["ok"]:
+                rec.update(
+                    status="rejected",
+                    stage="grader_stricter",
+                    reason=rec["grader_replay"]["why"],
+                )
         canary_config = PolicyCanaryConfig.from_env()
         if rec.get("status") == "accepted" and canary_config.group_size:
             if dry:
@@ -1296,6 +1317,7 @@ def handle(
         "simplify",
         "calibration",
         "simplify_context",
+        "grader_replay",
         "stage",
         "reason",
         "verdicts",
@@ -1342,6 +1364,39 @@ def handle(
             except OSError as exc:
                 log.warning("could not record publish time in %s: %s", rewrite.meta, exc)
     return {"signal": sig, "rewrite": rewrite, "meta": meta, "status": status}
+
+
+def _grader_replay(
+    root: layout.Root,
+    task: layout.TaskDir,
+    tid: str,
+    rev: int,
+    src: Path,
+    rewrite: layout.RewriteDir,
+    declared: dict[str, dict],
+    *,
+    stage: str | None,
+) -> dict:
+    """grader_replay.check for an accepted easier rewrite of ``src`` (r<rev>)."""
+    if stage == "instruction_only":
+        # Only the instruction moved: grader, environment and solution are
+        # the parent's, so nothing it passed can fail now.
+        return {"ok": True, "skipped": "instruction_only"}
+    original = task.rev(0)
+    verdict = grader_replay.check(
+        rewrite.package,
+        parent=src,
+        original=original if original.exists() else None,
+        finals=grader_replay.passing_finals(root, tid, rev),
+        probe=fb.daytona_probe,
+        scratch=rewrite.path / "grader-replay",
+        resources=training_box(tid, declared),
+        pretest_file=rewrite.pretest if rewrite.pretest.exists() else None,
+    )
+    log.info(
+        "%s grader replay of r%d: ok=%s %s", tid, rev, verdict["ok"], verdict.get("counts")
+    )
+    return verdict
 
 
 # What a later rewrite of the task reads from an earlier one's run/: its

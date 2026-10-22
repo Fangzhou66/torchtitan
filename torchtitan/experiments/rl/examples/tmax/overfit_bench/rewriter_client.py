@@ -253,6 +253,9 @@ def run_reference(job: Path, argv: list[str]) -> None:
     # Validation records here are the bench's readout, which a rewriter may not
     # read: the author record indexes training attempts only.
     ev.ATTEMPT_RECORD_DIRS = ("rollouts",)
+    # An easier rewrite must still pass the parent's passing finals and
+    # reference solutions (grader_replay.py); on here unless the env says 0.
+    ev.EASIER_GRADER_REPLAY = ev.grader_replay.enabled(default="1")
     client = RewriterClient(job)
 
     def connect() -> None:

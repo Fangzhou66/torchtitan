@@ -313,6 +313,14 @@ class PolicyTrainer(Actor, Configurable):
         ``checkpoint.keep_latest_k`` still bounds the rolling resume copies;
         these milestone steps are kept on top of them, e.g. for later eval."""
 
+        skip_zero_grad_step: bool = False
+        """Skip the optimizer step when the all-reduced grad norm is exactly 0.0.
+
+        A step whose every sample has zero advantage backprops exact zeros, but
+        AdamW still moves the weights on it: the moment estimates from earlier
+        steps keep producing an update. Off keeps the historical behaviour; the
+        LR scheduler and ``policy_version`` advance either way."""
+
     def __init__(
         self,
         config: Config,
@@ -865,12 +873,24 @@ class PolicyTrainer(Actor, Configurable):
         # bookkeeping is unchanged and the generators re-pull identical weights.
         grad_norm_value = float(grad_norm.item())
         skipped_nonfinite = not math.isfinite(grad_norm_value)
+        # Exact zero, no tolerance: a step whose samples all have zero advantage
+        # backprops exact zeros, and anything else is a real (if small) gradient.
+        # Same all-reduced total as above, so every rank agrees.
+        skipped_zero_grad = (
+            self.config.skip_zero_grad_step and grad_norm_value == 0.0
+        )
         with sl.log_trace_span("optim"):
             if skipped_nonfinite:
                 logger.warning(
                     "optim_step: grad_norm=%s is not finite; skipping the "
                     "optimizer step for policy_version %d",
                     grad_norm_value,
+                    self.policy_version + 1,
+                )
+            elif skipped_zero_grad:
+                logger.info(
+                    "optim_step: grad_norm is 0.0; skipping the optimizer step "
+                    "for policy_version %d (skip_zero_grad_step)",
                     self.policy_version + 1,
                 )
             else:
@@ -890,6 +910,7 @@ class PolicyTrainer(Actor, Configurable):
             metrics={
                 "train/grad_norm/mean": grad_norm_value,
                 "train/skipped_nonfinite_grad": float(skipped_nonfinite),
+                "train/skipped_zero_grad": float(skipped_zero_grad),
                 "train/lr": current_lr,
                 "train/policy_version": float(self.policy_version),
             },
