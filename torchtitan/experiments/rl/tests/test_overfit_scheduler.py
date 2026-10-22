@@ -28,7 +28,7 @@ import pytest
 from torchtitan.experiments.rl.examples.tmax import layout
 from torchtitan.experiments.rl.examples.tmax import rollouter as rollouter_mod
 from torchtitan.experiments.rl.examples.tmax.data import _parse_sample_row, TMaxSample
-from torchtitan.experiments.rl.examples.tmax.overfit_bench import events
+from torchtitan.experiments.rl.examples.tmax.overfit_bench import bench, events
 from torchtitan.experiments.rl.examples.tmax.overfit_bench.pool import (
     PoolError,
     VersionPool,
@@ -340,6 +340,41 @@ def test_scheduler_state_round_trip_restores_the_draw_stream(root, run):
     second.load_state_dict(state)
     assert [second.draw().version for _ in range(10)] == expected
     second.stop()
+
+
+def test_a_seeded_job_starts_with_every_seeded_version(root, run, tmp_path):
+    rows = [_row("a", rev=1), _row("a", rev=1, test="exit 1"), _row("a", rev=2)]
+    seed_file = tmp_path / "seed.jsonl"
+    seed_file.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert bench.seed(root.path, seed_file, weight=2.0) == {
+        "active": 3,
+        "added": 3,
+        "retired": 1,
+    }
+    assert _live(root) == rows
+    ids = {content_revision(r) for r in rows}
+    s = BenchScheduler(root, run=run, seed=0)
+    s.start()
+    try:
+        assert {v.id for v in s.pool.active()} == ids
+        assert all(v.weight == 2.0 for v in s.pool.active())
+        assert not s.pool.is_active(content_revision(_row("a")))
+        assert {s.draw().version for _ in range(30)} == ids
+        with pytest.raises(SystemExit, match="scheduler is serving"):
+            bench.seed(root.path, seed_file)
+    finally:
+        s.stop()
+
+
+def test_seed_refuses_a_file_with_any_unparseable_row(root, tmp_path):
+    bad = _row("a", rev=1)
+    del bad["metadata"]["tmax"]
+    seed_file = tmp_path / "seed.jsonl"
+    seed_file.write_text(json.dumps(_row("a", rev=2)) + "\n" + json.dumps(bad) + "\n")
+    with pytest.raises(SystemExit, match="row 2 does not parse"):
+        bench.seed(root.path, seed_file)
+    assert _live(root) == [_row("a")] and len(root.mix.versions()) == 1
+    assert not root.mix.pool_state.exists()
 
 
 # -- connecting before the scheduler exists -------------------------------------

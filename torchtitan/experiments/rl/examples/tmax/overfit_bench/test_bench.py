@@ -49,6 +49,27 @@ def test_job_starts_from_the_original_alone_and_reads_it_out(job):
     assert (job / "data/sources/terminal-bench-2-1/tasks/a/instruction.md").is_file()
 
 
+def test_new_with_seed_rows_starts_the_pool_from_them(tmp_path):
+    evalset = tmp_path / "bench.jsonl"
+    evalset.write_text(json.dumps(_row("a")) + "\n")
+    tasks = tmp_path / "tasks"
+    bench.split(evalset, "tb21", tasks)
+    corpus = tmp_path / "terminal-bench-2-1"
+    (corpus / "tasks" / "a").mkdir(parents=True)
+    (corpus / "tasks" / "a" / "instruction.md").write_text("solve a")
+    rewrite = _row("a", test="exit 1")
+    rewrite["metadata"]["rev"] = 1
+    seed_rows = tmp_path / "seed.jsonl"
+    # The original as the tasks dir holds it (no rev) plus one rewrite.
+    seed_rows.write_text((tasks / "a.jsonl").read_text() + json.dumps(rewrite) + "\n")
+    job = bench.new_job(tasks, "a", corpus, "ref", tmp_path / "jobs", None, seed_rows)
+    pool = json.loads((job / "data/mix/pool.json").read_text())
+    active = [v for v in pool["versions"] if v["status"] == "active"]
+    # The original seeded again is the job's own v1 row, not a second version.
+    assert [(v["rev"], v["weight"]) for v in active] == [(0, 1.0), (1, 1.0)]
+    assert len(pool["versions"]) == 2
+
+
 def test_publish_refuses_a_file_with_any_unparseable_row(job, tmp_path):
     rows = tmp_path / "mix.jsonl"
     bad = _row("a2")

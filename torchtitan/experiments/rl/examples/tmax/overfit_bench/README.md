@@ -31,7 +31,8 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
   disk are the row's, clamped to Daytona's per-sandbox caps (8 GiB, 10 GiB;
   with a GPU 192 GiB, 512 GiB). A GPU task that declares 16 vCPU therefore
   runs on 4.
-- **Start**: the job's training mix is the original task alone (mix v1).
+- **Start**: the job's training mix is the original task alone (mix v1),
+  unless the rewriter seeds the pool before training starts (see Running a job).
 - **Readout**: the original task row, held in `data/evalsets/original.jsonl`
   and never served from the mix, 16 attempts every 5 steps. A readout attempt
   has the same budget as a training attempt (60 turns, no wall-clock
@@ -144,7 +145,11 @@ bench.py split --evalset <bench eval jsonl> --bench tb21 --out <tasks dir>
 
 # one job per (task, rewriter)
 bench.py new --tasks <tasks dir> --task <id> --sources <bench task tree> \
-    --rewriter <name> --jobs-root <dir> [--bin <codex/jq dir>]
+    --rewriter <name> --jobs-root <dir> [--bin <codex/jq dir>] \
+    [--seed-rows <rows.jsonl>]
+
+# optional, before training starts: the versions the pool starts from
+bench.py seed <job> --rows <rows.jsonl> [--weight W]
 
 # two processes, side by side
 TRL_PROFILE=<p> RUNNER_ENV=<hardware env> ./start_training.sh <job>
@@ -177,6 +182,17 @@ per-sandbox limits (4 vCPU, 8 GiB, 10 GiB disk; with a GPU 16 vCPU, 192 GiB,
 512 GiB) is clamped to them; 20 tasks have one. For a compose task that clamps
 the docker-in-docker host only: the compose project keeps the task's declared
 cpu/memory reservations, which can then exceed the host's.
+
+Training starts drawing immediately (with 8 groups in flight, the first 8
+draws happen at startup), so versions a rewriter adds over the socket miss the
+first round. To have them in it, seed the pool: `bench.py seed` (or `new
+--seed-rows`) makes the pool start from exactly the given rows, each its own
+active version at `--weight` (default 1), several rows of one task included.
+The original stays in only if the file holds it (`<tasks dir>/<id>.jsonl`).
+Every row must parse as the trainer parses it, or nothing changes. Seeding
+writes `data/mix/pool.json`, which the scheduler loads before its first draw,
+and publishes the rows as the next mix version; it is refused while a
+scheduler serves the job.
 
 The rewriter can be started before the trainer: `example_rewriter.py` and any
 rewriter on `RewriterClient.connect()` wait for the scheduler, and the
