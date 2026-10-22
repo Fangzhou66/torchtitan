@@ -250,6 +250,9 @@ def run_reference(job: Path, argv: list[str]) -> None:
     sys.path.insert(0, str(evolution))
     import evolve_ondella as ev  # noqa: E402
 
+    # Validation records here are the bench's readout, which a rewriter may not
+    # read: the author record indexes training attempts only.
+    ev.ATTEMPT_RECORD_DIRS = ("rollouts",)
     client = RewriterClient(job)
 
     def connect() -> None:

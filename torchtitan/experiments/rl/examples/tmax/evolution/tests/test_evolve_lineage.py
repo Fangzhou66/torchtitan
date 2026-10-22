@@ -2288,3 +2288,44 @@ def test_no_revision_dir_without_records(tmp_path):
     out = tmp_path / "revision"
     assert od._stage_revision(tmp_path, {"task": "t", "rev": 0, "group": 1}, out, ws) == 0
     assert not out.exists()
+
+
+def test_rewrite_dirs_started_in_one_second_are_distinct(tmp_path, monkeypatch):
+    """The overfit bench's ladder starts several rewrites of one task at once;
+    each gets its own directory before any of them creates it."""
+    monkeypatch.setattr(od.time, "time", lambda: 1_800_000_000.0)
+    task = layout.Root(tmp_path / "root").evolution.task("a")
+    names = {od._new_rewrite_dir(task, "easier").path for _ in range(3)}
+    assert len(names) == 3 and not any(p.exists() for p in names)
+
+
+def test_attempt_index_reads_validation_records_by_default(tmp_path, monkeypatch):
+    """The evolve loop's author record keeps validation attempts; only a
+    rewriter that sets ATTEMPT_RECORD_DIRS (the bench's ladder) drops them."""
+    root = layout.Root(tmp_path / "root")
+    run = root.run("tmax-9b--20261021-000000Z")
+    for kind, group in (("rollouts", 3), ("validation_rollouts", -1)):
+        path = run.path / kind / "a" / f"g{group}-r0.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"rev": 0, "group": group, "rollout": 0, "reward": 0}) + "\n")
+    assert od.ATTEMPT_RECORD_DIRS == ("rollouts", "validation_rollouts")
+    task = root.evolution.task("a")
+    assert sorted(e["group"] for e in od._index_attempts(root, task)) == [-1, 3]
+    monkeypatch.setattr(od, "ATTEMPT_RECORD_DIRS", ("rollouts",))
+    task.attempts.unlink()
+    assert [e["group"] for e in od._index_attempts(root, task)] == [3]
+
+
+def test_concurrent_attempt_indexes_of_one_task_do_not_collide(tmp_path):
+    """Several rewrites of one task (the bench's ladder) index it at once."""
+    root = layout.Root(tmp_path / "root")
+    run = root.run("tmax-9b--20261021-000000Z")
+    for i in range(50):
+        path = run.rollouts / "a" / f"g{i}-r0.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"rev": 0, "group": i, "rollout": 0, "reward": 0}) + "\n")
+    task = root.evolution.task("a")
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda _: od._index_attempts(root, task), range(8)))
+    assert all(len(r) == 50 for r in results)
+    assert len(layout.read_jsonl(task.attempts)) == 50
