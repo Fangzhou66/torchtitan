@@ -210,6 +210,31 @@ def _parse_sample_row(row: dict) -> TMaxSample:
     )
 
 
+# Installs tmux the way harbor's Terminus-2 does at runtime, apt lists kept so an
+# agent's bare `apt-get install` behaves as before.
+TMUX_BAKE_MARKER = "# tmux for the Terminus-2 agent"
+TMUX_BAKE_BLOCK = (
+    f"{TMUX_BAKE_MARKER}, installed the way harbor does it at runtime\n"
+    "RUN if ! command -v tmux >/dev/null 2>&1; then "
+    "if command -v apt-get >/dev/null 2>&1; then "
+    "DEBIAN_FRONTEND=noninteractive apt-get update && "
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y tmux; "
+    "elif command -v apk >/dev/null 2>&1; then apk add --no-cache tmux; "
+    "elif command -v dnf >/dev/null 2>&1; then dnf install -y tmux; "
+    "elif command -v yum >/dev/null 2>&1; then yum install -y tmux; "
+    "else echo 'no supported package manager for tmux' >&2; exit 1; fi; "
+    "fi && tmux -V\n"
+)
+
+
+def bake_tmux_dockerfile(dockerfile: str | None, image: str) -> str:
+    """``dockerfile`` (or ``FROM image``) with the tmux install appended once."""
+    base = dockerfile or f"FROM {image}\n"
+    if TMUX_BAKE_MARKER in base:
+        return base
+    return base.rstrip("\n") + "\n" + TMUX_BAKE_BLOCK
+
+
 def _load_samples(path: str) -> tuple[list[TMaxSample], list[str], str]:
     """Load and hash every complete JSONL row in source order."""
     samples: list[TMaxSample] = []
@@ -278,6 +303,12 @@ class TMaxDataset(Configurable):
         exactly the same way as normal iteration, including across dataset wraps.
         """
 
+        bake_tmux: bool = False
+        """Give every row a Dockerfile that installs tmux (``bake_tmux_dockerfile``),
+        so Daytona builds and caches it once per task instead of each sandbox
+        installing tmux at boot. For image-only eval sets (TB2), whose boot-time
+        install times out when a whole pass starts at once."""
+
     def __init__(self, config: Config) -> None:
         if not config.data_path:
             raise ValueError("TMaxDataset.Config.data_path is required")
@@ -286,6 +317,11 @@ class TMaxDataset(Configurable):
                 f"TMaxDataset.Config.split must be 'train' or 'validation', got {config.split!r}"
             )
         samples, sample_revisions, mix_revision = _load_samples(config.data_path)
+        if config.bake_tmux:
+            samples = [
+                replace(s, dockerfile=bake_tmux_dockerfile(s.dockerfile, s.image))
+                for s in samples
+            ]
         if not samples:
             raise ValueError(f"no rows found in {config.data_path}")
 

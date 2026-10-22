@@ -85,6 +85,9 @@ _TB2_NUM_TASKS = 89
 # validation_dataset at the TB-2.0 JSONL so the periodic pass reports the real
 # benchmark instead of a tmax holdout slice. Empty = keep the holdout split.
 _TB2_VAL_DATA = os.environ.get("SWE_TB2_VAL_DATA", "")
+# TB-2.0 images ship without tmux; bake it into each row's Dockerfile at load
+# (TMaxDataset.Config.bake_tmux) instead of installing it in every sandbox.
+_TB2_BAKE_TMUX = os.environ.get("SWE_TB2_BAKE_TMUX", "1") == "1"
 # Sampling for inline and standalone TB-2.0 evaluation. Defaults match
 # ivuaqcol (temperature 1.0, top_p 1.0); explicit environment overrides win.
 _TB2_VAL_TEMPERATURE = float(os.environ.get("SWE_TB2_VAL_TEMPERATURE", "1.0"))
@@ -178,7 +181,11 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         # pass reports the benchmark. Unset keeps the tmax holdout.
         validation_dataset=(
             TMaxDataset.Config(
-                data_path=_TB2_VAL_DATA, seed=99, shuffle=False, holdout_n=0
+                data_path=_TB2_VAL_DATA,
+                seed=99,
+                shuffle=False,
+                holdout_n=0,
+                bake_tmux=_TB2_BAKE_TMUX,
             )
             if _TB2_VAL_DATA
             else TMaxDataset.Config(
@@ -1399,7 +1406,12 @@ def rl_grpo_qwen3_5_9b_tmax_tb2_eval() -> Controller.Config:
             data_path=tb2_data, seed=42, holdout_n=0, split="train", shuffle=False
         ),
         validation_dataset=TMaxDataset.Config(
-            data_path=tb2_data, seed=99, holdout_n=0, split="validation", shuffle=False
+            data_path=tb2_data,
+            seed=99,
+            holdout_n=0,
+            split="validation",
+            shuffle=False,
+            bake_tmux=_TB2_BAKE_TMUX,
         ),
         # Pin the eval budget in code so a stray launcher env cannot cap it. TB-2.0
         # rows declare 600-12000s; the floor raises anything below 5400 (a 120-turn

@@ -4,7 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Bake tmux into a TB2 eval JSONL so sandboxes no longer install it at boot.
+"""Bake tmux into a TB2 eval JSONL, and warm/verify the Daytona builds.
+
+The training and eval recipes already do the bake at load time
+(``TMaxDataset.Config.bake_tmux``, on for TB2 validation; SWE_TB2_BAKE_TMUX=0
+turns it off), so no new JSONL is needed. ``verify`` is worth running once per
+Daytona org before the first eval, so the 89 builds are cached rather than
+paid inside the first pass.
 
 The TB2 images ship without tmux, so harbor's Terminus-2 runs
 ``apt-get update && apt-get install -y tmux`` (120 s exec timeout) in every
@@ -23,7 +29,7 @@ against the original image.
     python -m torchtitan.experiments.rl.examples.tmax.bake_tmux_into_tb2 \
         bake SRC.jsonl DST.jsonl
     python -m torchtitan.experiments.rl.examples.tmax.bake_tmux_into_tb2 \
-        verify DST.jsonl REPORT.jsonl [concurrency]
+        verify TB2.jsonl REPORT.jsonl [concurrency]   # baked or not
 """
 
 import argparse
@@ -31,18 +37,7 @@ import asyncio
 import json
 import time
 
-TMUX_BLOCK = (
-    "# tmux for the Terminus-2 agent, installed the way harbor does it at runtime\n"
-    "RUN if ! command -v tmux >/dev/null 2>&1; then "
-    "if command -v apt-get >/dev/null 2>&1; then "
-    "DEBIAN_FRONTEND=noninteractive apt-get update && "
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y tmux; "
-    "elif command -v apk >/dev/null 2>&1; then apk add --no-cache tmux; "
-    "elif command -v dnf >/dev/null 2>&1; then dnf install -y tmux; "
-    "elif command -v yum >/dev/null 2>&1; then yum install -y tmux; "
-    "else echo 'no supported package manager for tmux' >&2; exit 1; fi; "
-    "fi && tmux -V\n"
-)
+from torchtitan.experiments.rl.examples.tmax.data import bake_tmux_dockerfile
 
 _PROBE = (
     "echo TMUX=$(tmux -V 2>&1); echo HOME=$HOME; "
@@ -55,8 +50,7 @@ def bake(src: str, dst: str) -> None:
         for line in f_in:
             row = json.loads(line)
             md = row["metadata"]
-            base = md.get("dockerfile") or f"FROM {md['image']}\n"
-            md["dockerfile"] = base.rstrip("\n") + "\n" + TMUX_BLOCK
+            md["dockerfile"] = bake_tmux_dockerfile(md.get("dockerfile"), md["image"])
             f_out.write(json.dumps(row) + "\n")
 
 
@@ -65,7 +59,11 @@ async def _probe(md: dict, use_dockerfile: bool) -> dict:
 
     sb = DaytonaSandbox(
         md["image"],
-        dockerfile=md["dockerfile"] if use_dockerfile else None,
+        dockerfile=(
+            bake_tmux_dockerfile(md.get("dockerfile"), md["image"])
+            if use_dockerfile
+            else None
+        ),
         cpu=md.get("daytona_cpu"),
         memory=md.get("daytona_mem_gb"),
         disk_gb=md.get("daytona_disk_gb"),
