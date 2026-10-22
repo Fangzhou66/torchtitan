@@ -205,3 +205,50 @@ retire(parent) as well as publishing it.
 
 `SYNC_OVERFIT.md` describes a strictly synchronous variant of a job (one group
 in flight, the next group waiting for the rewrites it triggered) and how it is run.
+
+## The ladder rewriter
+
+`REWRITER_MODE=ladder ./start_reference_rewriter.sh <job>` runs
+`ladder_rewriter.py`, a second reference rewriter. Each rewrite is the evolve
+loop's own (`evolve_ondella.handle`: the same sessions, oracle, probes and
+verifier, and the same rewrite.json, ledger, lineage and loop.log); what
+differs is which rewrites it asks for and what it does with the result. This
+is the rewriter's policy, not a bench rule:
+
+- **Versions side by side.** A trainer signal names the version its group
+  trained on, and the ladder rewrites that version. A child that passes
+  validation becomes the task's next free revision `r<max+1>` and a new
+  version whose parent is the version it came from. A fold retires nothing.
+- **Easier: K in parallel.** A group that solved nothing (the trainer's easier
+  signal, held to `EVOLVE_EASIER_MIN_SCORED_ATTEMPTS` as in the loop) starts
+  one easier rewrite per help level, concurrently: `none`, `vague`,
+  `specific` (`--help-levels`), the simplify prompt's own levels from small
+  help to large. Each rewrite carries its level in its signal, where it takes
+  the place of `SWE_SIMPLIFY_HINT`.
+- **Harder: one.** A group at or above the trainer's
+  `SWE_EVOLUTION_HARDER_RATIO` starts one harder rewrite, the loop's
+  withdraw-help hardening, with the parent version as its previous revision.
+- **One request per version.** A version with a request running, or with an
+  active child in the signal's direction, starts nothing new (the signal is
+  closed `superseded`, with the reason); so does a signal older than the
+  version's latest group. Different versions of one task are rewritten at
+  once, up to `--workers` (16) rewrites in all.
+- **Weights**, recomputed at every `group_done` and pushed with `reweight`:
+  `p(1-p)` for `p` the solve rate of the version's last 3 groups
+  (`--history`; `(passed + 0.5) / (scored + 1)`), 0.25 for a version with no
+  group yet (`--explore`), halved while the version has an active harder
+  child (`--harder-parent-factor`), and never below 0.05 for the original,
+  rev 0 (`--original-floor`), which is never retired.
+- **Retirement.** A version other than the original is retired once it has an
+  active harder child and its last 2 groups (`--retire-after`) since that
+  child was folded each solved at least 0.9 of their scored attempts
+  (`--mastered`, default `SWE_EVOLUTION_HARDER_RATIO`). The group that asked
+  for the child does not count, or every parent would be retired the moment
+  its harder child arrived.
+
+It needs the scheduler (it waits for it), reads training records, signals,
+the scheduler's events and the pool, and never the readout: the record the
+rewrite's author reads indexes training attempts only. It takes the evolve
+loop's lock, so it never runs beside the reference rewriter on one job. A
+seeded version it did not make has no package under `evolution/tasks/` past
+r0, so a signal about it is closed as junk.

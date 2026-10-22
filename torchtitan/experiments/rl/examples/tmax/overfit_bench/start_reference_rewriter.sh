@@ -4,8 +4,11 @@
 # it reads and how it publishes. It runs through rewriter_client.py, which
 # wakes the loop on the scheduler's group_done and gives each fold to the pool;
 # with no scheduler (SWE_BENCH_SCHEDULER=0) it is the plain file-based loop.
+# REWRITER_MODE=ladder runs ladder_rewriter.py instead: the same rewrites, kept
+# side by side as versions of the pool (README.md, "The ladder rewriter").
 #
-#   REWRITER_ENV=<env file> EVOLVE_WORK_ROOT=<node-local dir> ./start_reference_rewriter.sh <job dir>
+#   REWRITER_ENV=<env file> EVOLVE_WORK_ROOT=<node-local dir> [REWRITER_MODE=ladder] \
+#       ./start_reference_rewriter.sh <job dir>
 #
 # REWRITER_ENV holds the loop's settings and credentials; see
 # reference_rewriter.env.example.
@@ -21,5 +24,13 @@ export TRL_TT="${TRL_TT:-$(cd "$HERE/../../../../../.." && pwd)}"
 export PYTHONPATH="$TRL_TT"
 : "${TRL_VENV:=/scratch/gpfs/TRIDAO/al9080/titan-rl}"
 mkdir -p "$EVOLVE_WORK_ROOT"
-exec "$TRL_VENV/bin/python" "$TRL_TT/torchtitan/experiments/rl/examples/tmax/overfit_bench/rewriter_client.py" \
-    reference "$JOB" --interval 120 --workers 16 >> "$JOB/evolution/loop.log" 2>&1
+BENCH="$TRL_TT/torchtitan/experiments/rl/examples/tmax/overfit_bench"
+case "${REWRITER_MODE:-reference}" in
+    reference)
+        exec "$TRL_VENV/bin/python" "$BENCH/rewriter_client.py" \
+            reference "$JOB" --interval 120 --workers 16 >> "$JOB/evolution/loop.log" 2>&1 ;;
+    ladder)
+        exec "$TRL_VENV/bin/python" "$BENCH/ladder_rewriter.py" \
+            "$JOB" --workers 16 >> "$JOB/evolution/loop.log" 2>&1 ;;
+    *) echo "REWRITER_MODE is reference or ladder, not $REWRITER_MODE" >&2; exit 2 ;;
+esac

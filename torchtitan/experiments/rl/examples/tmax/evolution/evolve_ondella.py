@@ -447,18 +447,23 @@ def _stage_revision(run_dir: Path, signal: dict, out: Path, workspace) -> int:
 
 
 ATTEMPT_FIELDS = ("rev", "group", "rollout", "reward", "finish_reason", "infra_failed")
+# The record directories of a run that _index_attempts reads. The overfit
+# bench's ladder rewriter sets this to ("rollouts",): validation there is the
+# bench's readout, which a rewriter may not read. The evolve loop reads both.
+ATTEMPT_RECORD_DIRS = ("rollouts", "validation_rollouts")
 
 
 def _index_attempts(root: layout.Root, task: layout.TaskDir) -> list[dict]:
     """task.attempts brought up to date and returned: one line per attempt
-    record at this task in any run of the root, training and validation. Only
+    record at this task in any run of the root, training and validation
+    (ATTEMPT_RECORD_DIRS). Only
     records not indexed yet are opened, and only their header line: on a FUSE
     root every file read is a round trip, and a task gathers thousands."""
     index = layout.read_jsonl(task.attempts)
     seen = {e["path"] for e in index}
     fresh = []
     for run in root.run_dirs():
-        for kind in (run.rollouts, run.validation_rollouts):
+        for kind in (getattr(run, name) for name in ATTEMPT_RECORD_DIRS):
             for path in sorted((kind / layout.safe(task.task_id)).glob("g*-r*.jsonl")):
                 rel = str(path.relative_to(root.path))
                 if rel in seen:
@@ -981,12 +986,22 @@ def materialize_r0(root: layout.Root, task: layout.TaskDir, tid: str) -> Path:
     return dest
 
 
+# Rewrite directory names handed out by this process. The evolve loop runs one
+# rewrite per task at a time, so a name free on disk is free; the overfit
+# bench's ladder rewriter starts several rewrites of one task in the same
+# second, and each must get its own directory before any of them creates it.
+_REWRITE_NAMES: set[Path] = set()
+_REWRITE_NAMES_LOCK = threading.Lock()
+
+
 def _new_rewrite_dir(task: layout.TaskDir, job: str) -> layout.RewriteDir:
     t = time.time()
-    rw = task.rewrite(job, layout.stamp(t))
-    while rw.path.exists():
-        t += 1
+    with _REWRITE_NAMES_LOCK:
         rw = task.rewrite(job, layout.stamp(t))
+        while rw.path.exists() or rw.path in _REWRITE_NAMES:
+            t += 1
+            rw = task.rewrite(job, layout.stamp(t))
+        _REWRITE_NAMES.add(rw.path)
     return rw
 
 

@@ -1025,3 +1025,25 @@ def test_revalidate_rejects_a_rewrite_that_changes_the_students_user(tmp_path, m
     verdict = fb.revalidate(work, task, orig, changed=["environment/Dockerfile"])
     assert not verdict["ok"] and verdict["stage"] == "identity"
     assert "unset to nobody" in verdict["why"]
+
+
+def test_a_signal_names_its_own_simplify_hint_level(tmp_path, monkeypatch):
+    """The ladder's per-rewrite help level; without it SWE_SIMPLIFY_HINT holds."""
+    rw, r0 = _rewrite(tmp_path, monkeypatch)
+    levels = []
+
+    def simplify(rewrite, task, *, hint, **kwargs):
+        levels.append(hint)
+        raise ec.Blocked("BLOCKED: recorded")
+
+    ec = _fake_ec()
+    ec.simplify_codex = simplify
+    monkeypatch.setitem(sys.modules, "evolve_codex", ec)
+    monkeypatch.setenv("SWE_RETUNE_AGENT", "codex")
+    monkeypatch.setenv("SWE_SIMPLIFY_HINT", "none")
+    easier = {**SIGNAL, "direction": "easier", "solved": 0}
+    fb.process_one(rw, easier, job="easier", seed_dir=r0)
+    fb.process_one(rw, {**easier, "simplify_hint": "specific"}, job="easier", seed_dir=r0)
+    monkeypatch.delenv("SWE_SIMPLIFY_HINT")
+    fb.process_one(rw, easier, job="easier", seed_dir=r0)
+    assert levels == ["none", "specific", "vague"]

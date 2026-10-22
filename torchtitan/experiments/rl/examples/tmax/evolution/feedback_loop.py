@@ -1101,7 +1101,14 @@ def process_one(
             # the specific level bakes "where to look" hints into hundreds of
             # instructions, and the holdout experiment showed the policy learns
             # hint-following that does not transfer to unhinted tasks.
-            hint_lvl = os.environ.get("SWE_SIMPLIFY_HINT", "vague")
+            # A signal may name its own level (simplify_hint): the overfit
+            # bench's ladder rewriter runs one rewrite per level of one signal,
+            # concurrently in one process, where the environment cannot differ.
+            # The trainer never writes that key, so the evolve loop reads the
+            # environment as before.
+            hint_lvl = signal.get("simplify_hint") or os.environ.get(
+                "SWE_SIMPLIFY_HINT", "vague"
+            )
             try:
                 new = ec.simplify_codex(
                     rewrite,
