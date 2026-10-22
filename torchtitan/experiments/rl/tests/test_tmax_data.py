@@ -274,3 +274,54 @@ def test_dataset_applies_holdout_before_include_ids(tmp_path) -> None:
                 include_ids_path=str(include_path),
             )
         )
+
+
+def test_bake_tmux_dockerfile_appends_once() -> None:
+    from torchtitan.experiments.rl.examples.tmax.data import (
+        bake_tmux_dockerfile,
+        TMUX_BAKE_BLOCK,
+    )
+
+    baked = bake_tmux_dockerfile(None, "docker.io/x/task:1")
+    assert baked == "FROM docker.io/x/task:1\n" + TMUX_BAKE_BLOCK
+    assert bake_tmux_dockerfile(baked, "ignored") == baked
+    patched = bake_tmux_dockerfile("FROM a\nRUN fix\n\n", "a")
+    assert patched == "FROM a\nRUN fix\n" + TMUX_BAKE_BLOCK
+
+
+def test_dataset_bake_tmux_only_when_enabled(tmp_path) -> None:
+    import json
+
+    from torchtitan.experiments.rl.examples.tmax.data import TMaxDataset
+
+    path = tmp_path / "tb2.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "prompt": "p",
+                "label": "t",
+                "metadata": {
+                    "instance_id": "t",
+                    "image": "img:1",
+                    "tmax": {"test_sh": "x"},
+                },
+            }
+        )
+        + "\n"
+    )
+
+    def dockerfiles(bake: bool) -> list:
+        ds = TMaxDataset(
+            TMaxDataset.Config(data_path=str(path), shuffle=False, bake_tmux=bake)
+        )
+        return [
+            s.dockerfile
+            for s in next(
+                v
+                for v in vars(ds).values()
+                if isinstance(v, list) and v and hasattr(v[0], "dockerfile")
+            )
+        ]
+
+    assert dockerfiles(False) == [None]
+    assert dockerfiles(True)[0].startswith("FROM img:1\n")

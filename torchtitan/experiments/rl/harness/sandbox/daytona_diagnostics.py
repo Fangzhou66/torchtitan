@@ -48,8 +48,10 @@ async def collect_failure_diagnostics(
     try:
         save()
         async with asyncio.timeout(_COLLECTION_TIMEOUT_SEC):
+            # trust_env: the Daytona API is external and proxy-only hosts reach it
+            # through https_proxy; without it every request failed with DNS errors.
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=5), trust_env=False
+                timeout=aiohttp.ClientTimeout(total=5), trust_env=True
             ) as http:
                 headers = dict(client._api_client.default_headers)
                 api = client._api_url.rstrip("/")
