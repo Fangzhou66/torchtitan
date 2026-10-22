@@ -1827,9 +1827,12 @@ class TMaxRollouter(Rollouter):
                 reload(min_interval_sec=0.0)
         return _with_sandbox(super().get_training_sample(), self._bench.sandbox)
 
-    def get_validation_sample(self) -> TMaxSample:
-        # The readout boots on the same fixed sandbox as training.
-        return _with_sandbox(super().get_validation_sample(), self._bench.sandbox)
+    def get_validation_sample(self, set_name: str | None = None) -> TMaxSample:
+        # The readout boots on the same fixed sandbox as training; a named
+        # validation set (ValidationConfig.sets) draws from its own dataset.
+        return _with_sandbox(
+            super().get_validation_sample(set_name), self._bench.sandbox
+        )
 
     def drain_training_data_events(self) -> list[dict]:
         # Under the scheduler the dataset is never drawn from; pool.jsonl is
