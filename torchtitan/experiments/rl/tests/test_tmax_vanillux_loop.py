@@ -975,6 +975,7 @@ def test_evolution_signal_names_the_sibling_records_and_the_direction(
     assert signal == {
         "task": "task-123",
         "rev": 2,
+        "version": None,
         "run": "tmax-9b--20260904-181500Z",
         "group": 713,
         "direction": "harder",

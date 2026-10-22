@@ -1851,7 +1851,7 @@ class TMaxRollouter(Rollouter):
         ]
         bench_events.emit(
             bench_events.GROUP_DONE,
-            version=sample.version or None,
+            version=getattr(sample, "version", "") or None,
             task=sample.instance_id,
             rev=sample.rev,
             group=rollouts[0].group_id,
@@ -1929,7 +1929,7 @@ class TMaxRollouter(Rollouter):
                 {
                     "task": sample.instance_id,
                     "rev": sample.rev,
-                    "version": sample.version or None,
+                    "version": getattr(sample, "version", "") or None,
                     "run": run.name,
                     "group": group_id,
                     "direction": "harder" if passed else "easier",
@@ -2581,7 +2581,7 @@ class TMaxRollouter(Rollouter):
             ]
             bench_events.emit(
                 bench_events.ROLLOUT_DONE,
-                version=sample.version or None,
+                version=getattr(sample, "version", "") or None,
                 task=sample.instance_id,
                 rev=sample.rev,
                 group=group_id,
