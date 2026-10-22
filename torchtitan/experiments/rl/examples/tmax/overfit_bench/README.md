@@ -21,10 +21,11 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
   (`SWE_BENCH_TURN_CAP_GUARD_SEC`). Grading keeps the task's own verifier
   timeout. The recipe used to say "2400 s per attempt on every task"; that was
   never what ran. `SWE_TIME_BUDGET_SEC` applies only to a row that declares no
-  agent timeout, and benchmark rows declare one, so an attempt got
-  max(declared, `SWE_AGENT_TIMEOUT_FLOOR_SEC`) -- 7200 s from
-  `runbook/rltrain.env` unless the runner set it -- and
-  `TMAX_TERMINUS_MAX_TURNS` (120) turns.
+  agent timeout, and every benchmark row declares one, so an attempt got
+  max(declared, `SWE_AGENT_TIMEOUT_FLOOR_SEC`) -- with the 7200 s floor of
+  `runbook/rltrain.env`, 7200 s for 88 of the 89 TB2.1 tasks, 12000 s for the
+  other, 28800 s for every TB4 task -- and `TMAX_TERMINUS_MAX_TURNS` (120)
+  turns.
 - **Sandbox**: every sandbox, training and readout, and a separate verifier's,
   gets 4 vCPU (`SWE_BENCH_SANDBOX_CPU`), whatever the row declares; memory and
   disk are the row's, clamped to Daytona's per-sandbox caps (8 GiB, 10 GiB;
