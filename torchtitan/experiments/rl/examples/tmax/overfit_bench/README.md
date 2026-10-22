@@ -218,13 +218,28 @@ is the rewriter's policy, not a bench rule:
 - **Versions side by side.** A trainer signal names the version its group
   trained on, and the ladder rewrites that version. A child that passes
   validation becomes the task's next free revision `r<max+1>` and a new
-  version whose parent is the version it came from. A fold retires nothing.
-- **Easier: K in parallel.** A group that solved nothing (the trainer's easier
-  signal, held to `EVOLVE_EASIER_MIN_SCORED_ATTEMPTS` as in the loop) starts
-  one easier rewrite per help level, concurrently: `none`, `vague`,
+  version whose parent is the version it came from. A fold retires nothing
+  unless the task is at its cap (below).
+- **Easier: up to K in parallel.** A group that solved nothing (the trainer's
+  easier signal, held to `EVOLVE_EASIER_MIN_SCORED_ATTEMPTS` as in the loop)
+  starts one easier rewrite per help level, concurrently: `none`, `vague`,
   `specific` (`--help-levels`), the simplify prompt's own levels from small
-  help to large. Each rewrite carries its level in its signal, where it takes
-  the place of `SWE_SIMPLIFY_HINT`.
+  help to large. It starts all of them only while the task has no learnable
+  version and fewer than half of `--max-active` active versions; otherwise
+  it starts one, at the middle level. Each rewrite carries its level in its
+  signal, where it takes the place of `SWE_SIMPLIFY_HINT`.
+- **Exploit before explore.** A version is learnable while one of its last 3
+  groups (`--history`) solved some but not all of its scored attempts. While
+  the task has a learnable version, an all-failed group starts no easier
+  rewrite (the signal is closed `superseded`), and a version with no group
+  yet weighs half the lowest learnable weight (`--explore-vs-learnable`),
+  never more than `--explore`.
+- **A cap per task.** At most 8 active versions per task (`--max-active`). A
+  child that would exceed it replaces the worst active version: never the
+  original, never one that solved anything in its last 3 groups
+  (`--protect-solved`); of the rest, tested before untested, the longest
+  all-failed streak first, then the lowest `p(1-p)`. A signal whose task is
+  at the cap with nothing replaceable starts nothing.
 - **Harder: one.** A group at or above the trainer's
   `SWE_EVOLUTION_HARDER_RATIO` starts one harder rewrite, the loop's
   withdraw-help hardening, with the parent version as its previous revision.
@@ -236,7 +251,8 @@ is the rewriter's policy, not a bench rule:
 - **Weights**, recomputed at every `group_done` and pushed with `reweight`:
   `p(1-p)` for `p` the solve rate of the version's last 3 groups
   (`--history`; `(passed + 0.5) / (scored + 1)`), 0.25 for a version with no
-  group yet (`--explore`), halved while the version has an active harder
+  group yet (`--explore`, lowered as above while a learnable version
+  exists), halved while the version has an active harder
   child (`--harder-parent-factor`), and never below 0.05 for the original,
   rev 0 (`--original-floor`), which is never retired.
 - **Retirement.** A version other than the original is retired once it has an
@@ -244,7 +260,23 @@ is the rewriter's policy, not a bench rule:
   child was folded each solved at least 0.9 of their scored attempts
   (`--mastered`, default `SWE_EVOLUTION_HARDER_RATIO`). The group that asked
   for the child does not count, or every parent would be retired the moment
-  its harder child arrived.
+  its harder child arrived. A version other than the original that has a
+  child is also retired once its last 2 groups (`--stale-after`) each solved
+  nothing.
+- **Decisions in loop.log.** Every spawn, retirement, reweight and sandbox
+  teardown is one `policy ...` line with its reason; a signal that starts
+  nothing is one `superseded` line with its reason.
+- **Sandbox teardown.** A sandbox server runs in its own session and outlives
+  the command that started it. A session's cleanup downs only its package's
+  own container, and `./sandbox probes` downs each case's container in a
+  `finally` that never runs when the process is killed, as an agent's command
+  cut off mid-grade is; that case's server then holds a Daytona sandbox
+  until someone kills it. So every rewrite the ladder starts has the servers
+  under its directory downed when it ends, whatever its outcome, along with
+  any server of the job whose package is gone or whose rewrite is closed.
+  Starting the ladder downs every server of the job (none can be in use: the
+  loop lock is the ladder's), and SIGTERM, SIGINT or SIGHUP downs them all
+  before the process exits. A SIGKILL leaves them for the next start.
 
 It needs the scheduler (it waits for it), reads training records, signals,
 the scheduler's events and the pool, and never the readout: the record the
