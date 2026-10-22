@@ -2329,3 +2329,23 @@ def test_concurrent_attempt_indexes_of_one_task_do_not_collide(tmp_path):
         results = list(pool.map(lambda _: od._index_attempts(root, task), range(8)))
     assert all(len(r) == 50 for r in results)
     assert len(layout.read_jsonl(task.attempts)) == 50
+
+
+def test_concurrent_rewrites_materialize_r0_once(tmp_path, monkeypatch):
+    """Several rewrites of one task starting at once (the overfit bench's
+    ladder) share one r0 instead of colliding on r0.incoming."""
+    root = _root(tmp_path, monkeypatch)
+    task = root.evolution.task("tw_a")
+    task.path.mkdir(parents=True, exist_ok=True)
+    calls = []
+    real = od.materialize_r0
+
+    def counted(*a):
+        calls.append(1)
+        time.sleep(0.2)
+        return real(*a)
+
+    monkeypatch.setattr(od, "materialize_r0", counted)
+    with ThreadPoolExecutor(3) as pool:
+        paths = list(pool.map(lambda _: od._ensure_r0(root, task, "tw_a"), range(3)))
+    assert len(calls) == 1 and len(set(paths)) == 1 and paths[0].is_dir()

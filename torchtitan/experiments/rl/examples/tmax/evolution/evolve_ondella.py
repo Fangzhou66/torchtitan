@@ -948,6 +948,22 @@ def _read_live_mix(root: layout.Root) -> list[dict]:
     return [json.loads(ln) for ln in root.mix.read_live().splitlines() if ln.strip()]
 
 
+# One materialization of a task's r0 at a time: several rewrites of one task
+# may start at once (the overfit bench's ladder), and each would otherwise copy
+# into the same r0.incoming.
+_R0_LOCKS: dict[Path, threading.Lock] = {}
+_R0_LOCKS_LOCK = threading.Lock()
+
+
+def _ensure_r0(root: layout.Root, task: layout.TaskDir, tid: str) -> Path:
+    """The task's r0, materialized by the first caller and reused by the rest."""
+    with _R0_LOCKS_LOCK:
+        lock = _R0_LOCKS.setdefault(task.path, threading.Lock())
+    with lock:
+        dest = task.rev(0)
+        return dest if dest.exists() else materialize_r0(root, task, tid)
+
+
 def materialize_r0(root: layout.Root, task: layout.TaskDir, tid: str) -> Path:
     """r0 is the seed package, copied once from whichever corpus carries it.
     Copied whole into r0.incoming and renamed, so a crash mid-copy cannot
@@ -1062,7 +1078,7 @@ def handle(
             raise NoSeed(
                 f"r{rev} does not exist under {task.path.relative_to(root.path)}"
             )
-        src = materialize_r0(root, task, tid)
+        src = _ensure_r0(root, task, tid)
     durable_rewrite = _new_rewrite_dir(task, job)
     workspace = rw_workspace.prepare_rewrite(root, durable_rewrite, src)
     rewrite = workspace.active
