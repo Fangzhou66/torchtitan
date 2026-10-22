@@ -277,7 +277,19 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         length_penalty_min_pass_rate=float(
             os.environ.get("SWE_LENGTH_PENALTY_MIN_PASS_RATE", "0.5")
         ),
+        # Overfit bench (overfit_bench/README.md): draw from the scheduler's
+        # version pool; cap a training attempt by turns alone; boot every
+        # sandbox (training, readout, separate verifier) at a fixed size.
+        bench_scheduler=_bench_scheduler(),
+        bench_max_turns=int(os.environ.get("SWE_BENCH_MAX_TURNS", "0")),
+        bench_sandbox_cpu=int(os.environ.get("SWE_BENCH_SANDBOX_CPU", "0")),
+        bench_sandbox_mem_gb=int(os.environ.get("SWE_BENCH_SANDBOX_MEM_GB", "0")),
+        bench_sandbox_disk_gb=int(os.environ.get("SWE_BENCH_SANDBOX_DISK_GB", "0")),
     )
+
+
+def _bench_scheduler() -> bool:
+    return os.environ.get("SWE_BENCH_SCHEDULER", "0") == "1"
 
 
 def _tmax_9b_validation() -> ValidationConfig:
@@ -636,6 +648,24 @@ def rl_grpo_qwen3_5_9b_tmax(
     from torchtitan.experiments.rl.examples.tmax.policy_canary import PolicyCanaryConfig
 
     canary = PolicyCanaryConfig.from_env()
+    if canary.group_size and _bench_scheduler():
+        raise ValueError(
+            "SWE_BENCH_SCHEDULER=1 cannot run with the policy canary controller: "
+            "an overfit-bench rewriter may not run extra student rollouts"
+        )
+    if _bench_scheduler():
+        from torchtitan.experiments.rl.examples.tmax.overfit_bench.bench_controller import (
+            BenchController,
+        )
+
+        # Wrapped here for the same reason as the canary below.
+        config = BenchController.Config(
+            **{
+                field.name: getattr(config, field.name)
+                for field in dataclasses.fields(config)
+            },
+            bench_root=os.environ.get("TRL_BASE", ""),
+        )
     if canary.group_size:
         from torchtitan.experiments.rl.examples.tmax.policy_canary_controller import (
             PolicyCanaryController,

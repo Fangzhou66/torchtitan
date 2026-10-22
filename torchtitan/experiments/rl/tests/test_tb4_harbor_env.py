@@ -273,9 +273,9 @@ def test_a_sample_pickled_before_the_new_fields_unpickles_with_their_defaults():
         problem_statement="x",
         tmax={"test_sh": "y"},
     )
-    new = ("boot_kwargs", "healthcheck", "agent_user")
+    new = ("boot_kwargs", "healthcheck", "agent_user", "version")
     names = [f.name for f in dataclasses.fields(TMaxSample)]
-    assert names[-3:] == list(new)  # appended, so the old fields keep their order
+    assert names[-4:] == list(new)  # appended, so the old fields keep their order
     old_fields = [n for n in names if n not in new]
 
     def old_getstate(self):
@@ -288,7 +288,12 @@ def test_a_sample_pickled_before_the_new_fields_unpickles_with_their_defaults():
     finally:
         TMaxSample.__getstate__ = current
     restored = pickle.loads(blob)
-    assert (restored.boot_kwargs, restored.healthcheck, restored.agent_user) == ({}, None, "")
+    assert (
+        restored.boot_kwargs,
+        restored.healthcheck,
+        restored.agent_user,
+        restored.version,
+    ) == ({}, None, "", "")
     assert restored == sample
     assert sample_payload(restored)["boot_kwargs"] == {}
     # and a current pickle round-trips unchanged

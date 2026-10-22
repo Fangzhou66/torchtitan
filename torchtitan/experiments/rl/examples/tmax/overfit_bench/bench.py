@@ -10,14 +10,17 @@
     bench.py split   --evalset tb2_1.jsonl --bench tb21 --out <tasks dir>
     bench.py new     --tasks <tasks dir> --task <id> --sources <corpus dir>
                      --rewriter <name> --jobs-root <dir> [--bin <dir>]
+                     [--seed-rows <jsonl>]
+    bench.py seed    <job dir> --rows <jsonl> [--weight W]
     bench.py readout <job dir> [<job dir> ...] [--json]
 
 ``split`` turns a benchmark's eval JSONL into one single-row file per task.
 ``new`` makes a job: an experiment root (LAYOUT.md) whose seed mix is that one
 row and whose validation set is the same row, the original task with its own
-grader. ``readout`` reports, per job, the original task's pass@5 at every
-validation and the first step from which it stays solved. README.md has the
-bench definition and the rewriter interface.
+grader. ``seed`` (or ``new --seed-rows``) replaces the pool a job starts from
+before training starts. ``readout`` reports, per job, the original task's
+pass@5 at every validation and the first step from which it stays solved.
+README.md has the bench definition and the rewriter interface.
 """
 
 from __future__ import annotations
@@ -72,6 +75,7 @@ def new_job(
     rewriter: str,
     jobs_root: Path,
     bin_dir: Path | None,
+    seed_rows: Path | None = None,
 ) -> Path:
     manifest = json.loads((tasks / "manifest.json").read_text())
     row_file = tasks / f"{task}.jsonl"
@@ -107,7 +111,62 @@ def new_job(
             "created": layout.stamp(),
         },
     )
+    if seed_rows is not None:
+        seed(root.path, seed_rows)
     return root.path
+
+
+def seed(job: Path, rows_file: Path, weight: float = 1.0) -> dict:
+    """Make the job's pool start from exactly these rows, each its own active
+    version at ``weight`` (the original stays only if it is one of them).
+
+    It writes ``data/mix/pool.json``, which the scheduler loads before its first
+    draw, and publishes the rows as the next mix version, so the scheduler's
+    boot import of ``live.jsonl`` finds nothing to change. A plain mix publish
+    would come up with every weight at 1. Refused while a scheduler serves the
+    job (its pool is the socket's then) and, whole, if any row does not parse."""
+    from torchtitan.experiments.rl.examples.tmax.overfit_bench.pool import (
+        PoolError,
+        VersionPool,
+    )
+    from torchtitan.experiments.rl.examples.tmax.overfit_bench.rewriter_client import (
+        scheduler_socket,
+    )
+
+    root = layout.Root(job)
+    if scheduler_socket(root)[0] is not None:
+        raise SystemExit(
+            f"a scheduler is serving {job}; seed before training starts, "
+            "or add versions through the socket"
+        )
+    rows = []
+    for line in rows_file.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            # Rows are stamped as new_root stamps the job's own (rev 0 unless
+            # given), so the original row from the tasks dir is the same version.
+            row.setdefault("metadata", {}).setdefault("rev", 0)
+            rows.append(row)
+    if not rows:
+        raise SystemExit(f"{rows_file}: no rows")
+    pool = VersionPool()
+    try:
+        if root.mix.pool_state.is_file():
+            pool.load_state_dict(json.loads(root.mix.pool_state.read_text()))
+        else:
+            # What the scheduler's boot import would make of the current mix.
+            live = [json.loads(ln) for ln in root.mix.read_live().splitlines() if ln.strip()]
+            pool.reconcile(live, source="boot")
+        changed = pool.reconcile(rows, source="seed")
+        for v in pool.active():
+            if v.weight != weight:
+                pool.reweight(v.id, weight, source="seed")
+    except PoolError as e:
+        raise SystemExit(f"{rows_file}: {e}") from e
+    layout.write_json_atomic(root.mix.pool_state, pool.state_dict())
+    if changed["added"] or changed["retired"]:
+        root.mix.publish(pool.rows())
+    return {"active": len(pool.active()), **changed}
 
 
 _ROW = re.compile(r"^\|\s*([^|]+?)\s*\|[^|]*\|\s*(PASS|FAIL)\s*\|")
@@ -198,6 +257,15 @@ def main() -> None:
     n.add_argument("--rewriter", required=True)
     n.add_argument("--jobs-root", type=Path, required=True)
     n.add_argument("--bin", type=Path, help="directory holding codex and jq")
+    n.add_argument(
+        "--seed-rows",
+        type=Path,
+        help="rows the pool starts from instead of the original alone (see seed)",
+    )
+    d = sub.add_parser("seed")
+    d.add_argument("job", type=Path)
+    d.add_argument("--rows", type=Path, required=True)
+    d.add_argument("--weight", type=float, default=1.0)
     r = sub.add_parser("readout")
     r.add_argument("jobs", type=Path, nargs="+")
     r.add_argument("--threshold", type=float, default=0.5)
@@ -208,7 +276,12 @@ def main() -> None:
         m = split(a.evalset, a.bench, a.out)
         print(f"{len(m['tasks'])} tasks -> {a.out}")
     elif a.cmd == "new":
-        print(new_job(a.tasks, a.task, a.sources, a.rewriter, a.jobs_root, a.bin))
+        print(
+            new_job(a.tasks, a.task, a.sources, a.rewriter, a.jobs_root, a.bin, a.seed_rows)
+        )
+    elif a.cmd == "seed":
+        r = seed(a.job, a.rows, a.weight)
+        print(f"{r['active']} active version(s): {r['added']} added, {r['retired']} retired")
     else:
         results = [readout(j, a.threshold, a.hold) for j in a.jobs]
         if a.json:
