@@ -564,11 +564,11 @@ def test_turn_cap_mode_has_no_deadline_and_only_the_sanity_guard(monkeypatch, ca
     _, seen = _rollout(r, monkeypatch, sample)
     assert seen["task"].time_budget_sec == 0 and seen["task"].max_turns == 60
     assert guards and set(guards) == {_TURN_CAP_GUARD_SEC}
-    # The readout keeps its own budget: max(declared, floor) and the harness turn cap.
+    # The readout runs under the same attempt budget as training.
     guards.clear()
     _, seen = _rollout(r, monkeypatch, sample, group_id=-1)
-    assert seen["task"].time_budget_sec == 7200 and seen["task"].max_turns is None
-    assert set(guards) == {7200}
+    assert seen["task"].time_budget_sec == 0 and seen["task"].max_turns == 60
+    assert set(guards) == {_TURN_CAP_GUARD_SEC}
 
 
 def test_rollout_done_is_training_only(monkeypatch, captured):

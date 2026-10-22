@@ -2049,11 +2049,12 @@ class TMaxRollouter(Rollouter):
         max_turns = None
         if group_id < 0 and self._eval_max_turns:
             max_turns = _UNCAPPED_TURNS if self._eval_max_turns < 0 else self._eval_max_turns
-        # Overfit bench turn-cap mode (training only): the turn cap is the whole
-        # budget. Terminus reads time_budget_sec=0 as no deadline, and the outer
-        # guard keeps only a sanity bound, so no attempt is cut by a clock.
+        # Overfit bench turn-cap mode: the turn cap is the whole budget, for the
+        # readout too, so the original task is read under the attempt budget the
+        # policy trains with. Terminus reads time_budget_sec=0 as no deadline, and
+        # the outer guard keeps only a sanity bound, so no attempt is cut by a clock.
         guard_budget_sec = budget_sec
-        if group_id >= 0 and self._bench.max_turns:
+        if self._bench.max_turns:
             budget_sec = 0
             max_turns = self._bench.max_turns
             guard_budget_sec = _TURN_CAP_GUARD_SEC

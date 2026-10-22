@@ -12,7 +12,7 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
 
 ## What the bench fixes
 
-- **Policy and recipe**: `recipe.env` (group size 12, LR 3e-6, 800 steps of
+- **Policy and recipe**: `recipe.env` (group size 12, LR 3e-6, 200 steps of
   one group each, 8 groups in flight, groups up to 8 steps old still trained).
   Hardware placement is the runner's.
 - **A training attempt** is 60 Terminus turns and nothing else
@@ -34,8 +34,8 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
 - **Start**: the job's training mix is the original task alone (mix v1).
 - **Readout**: the original task row, held in `data/evalsets/original.jsonl`
   and never served from the mix, 16 attempts every 5 steps. A readout attempt
-  is not turn-capped like training: it runs `TMAX_TERMINUS_MAX_TURNS` (120)
-  turns within max(declared agent timeout, `SWE_AGENT_TIMEOUT_FLOOR_SEC`).
+  has the same budget as a training attempt (60 turns, no wall-clock
+  deadline), so the original is read under the conditions the policy trains in.
   Reported as
   pass@5 per validation, the first step with any pass, and the first step from
   which pass@5 stays at or above 0.5 for three validations in a row.
