@@ -16,6 +16,7 @@ signals, rewrite.json, lineage, status -- is the loop's own.
 from __future__ import annotations
 
 import builtins
+import collections
 import io
 import json
 import os
@@ -130,8 +131,10 @@ def job(tmp_path, monkeypatch):
 class Evolve:
     """The real evolve_ondella with handle and the fold's row build replaced."""
 
-    def __init__(self, monkeypatch, root, *, status=lambda sig: "accepted", barrier=None):
+    def __init__(self, monkeypatch, root, *, status=lambda sig: "accepted", barrier=None, servers=None):
         self.ev = ev = lr._evolve()
+        # The Ladder wraps _new_rewrite_dir; restore the real one after the test.
+        monkeypatch.setattr(ev, "_new_rewrite_dir", ev._new_rewrite_dir)
         self.calls: list[dict] = []
         self.root = root
         self._lock = threading.Lock()
@@ -154,6 +157,15 @@ class Evolve:
             # The author's record, as handle builds it, from the attempt index.
             ev._write_record(root, task, rw)
             outcome = status(sig)
+            if servers is not None:
+                # A probe case's server, as a killed `./sandbox probes` leaves it.
+                case = rw.package / "run" / "probe-cases-x" / "correct"
+                case.mkdir(parents=True)
+                servers.boot(case)
+            if outcome == "raise":
+                # handle raises (a storage outage) with its rewrite left running.
+                layout.write_json_atomic(rw.meta, {"task": d["task"], "status": "running"})
+                raise RuntimeError("storage outage")
             meta = {
                 "task": d["task"], "job": job, "signal": sig.sid, "input_rev": int(d["rev"]),
                 "started": layout.stamp(), "finished": None if outcome == "accepted" else layout.stamp(),
@@ -382,3 +394,221 @@ def test_the_ladder_never_reads_the_readout(job, monkeypatch):
     for rev in (1, 2, 3):
         traces = root.evolution.task("a").rev(rev) / "traces" / "attempts.jsonl"
         assert layout.read_jsonl(traces) == index
+
+
+# -- v2: cap, exploit before explore, stale retirement, sandbox teardown --------
+
+
+def test_an_untested_version_weighs_strictly_below_the_lowest_learnable_one():
+    policy = lr.Policy()
+    assert lr.explore_weight([], policy) == policy.explore
+    learnable = [0.2263, 0.1]
+    w = lr.explore_weight(learnable, policy)
+    assert w < min(learnable) and w == pytest.approx(0.05)
+    # Never above --explore.
+    assert lr.explore_weight([0.9], policy) == policy.explore
+    assert lr.learnable([(0, 12), (4, 12)], policy)
+    assert not lr.learnable([(0, 12), (12, 12), (0, 12)], policy)
+    # Only the last `history` groups count.
+    assert not lr.learnable([(4, 12), (0, 12), (0, 12), (0, 12)], policy)
+
+
+def test_parallel_easier_children_only_when_nothing_is_learnable_and_the_pool_is_small():
+    policy = lr.Policy()
+    assert lr.easier_levels(policy, any_learnable=False, active=3) == lr.HELP_LEVELS
+    assert lr.easier_levels(policy, any_learnable=False, active=4) == ("vague",)
+    assert lr.easier_levels(policy, any_learnable=True, active=1) == ("vague",)
+
+
+def test_stale_needs_a_child_two_all_failed_groups_and_not_the_original():
+    policy = lr.Policy()
+    child, original = {"rev": 3}, {"rev": 0}
+    two = [(4, 12), (0, 12), (0, 12)]
+    assert lr.fail_streak(two) == 2 and lr.fail_streak([(0, 12), (1, 12)]) == 0
+    assert lr.stale(child, two, children=1, policy=policy)
+    assert not lr.stale(child, two, children=0, policy=policy)
+    assert not lr.stale(child, [(0, 12)], children=1, policy=policy)
+    assert not lr.stale(original, two, children=1, policy=policy)
+
+
+def _add(root, client, rev: int, *, parent=V0) -> str:
+    """Version r<rev> of task a, a child of ``parent``, with its revision on disk."""
+    task = root.evolution.task("a")
+    for r in (0, rev):
+        task.rev(r).mkdir(parents=True, exist_ok=True)
+        (task.rev(r) / "instruction.md").write_text(f"r{r}")
+    return client.add(_row(rev=rev, test=f"exit 0 # r{rev}"), weight=0.25, parent=parent)["id"]
+
+
+def _groups(ladder, sched, plan) -> None:
+    """group_done events [(version, rev, group, passed)], then wait until the
+    ladder has every one."""
+    want = collections.Counter(vid for vid, *_ in plan)
+    want = {vid: len(ladder.groups[vid]) + n for vid, n in want.items()}
+    for vid, rev, group, passed in plan:
+        _group_done(sched, version=vid, rev=rev, group=group, passed=passed)
+    assert _until(lambda: (ladder.step(0.05), all(len(ladder.groups[v]) >= n for v, n in want.items()))[1])
+
+
+def test_a_child_at_the_cap_replaces_the_worst_version_never_the_original_or_a_recent_solver(job, monkeypatch):
+    root, run, sched, client = job
+    a, b, d = _add(root, client, 1), _add(root, client, 2), _add(root, client, 3)
+    evolve = Evolve(monkeypatch, root)
+    ladder = lr.Ladder(root, client, evolve.ev, policy=lr.Policy(max_active=4), workers=4)
+    ladder.start()
+    # The original and a fail; b solved 3/12 (learnable, protected); d is
+    # mastered (protected), and asks for a harder child.
+    _groups(ladder, sched, [(V0, 0, 1, 0), (a, 1, 2, 0), (a, 1, 3, 0), (b, 2, 4, 3), (d, 3, 5, 12)])
+    _signal(run, version=d, rev=3, group=6, direction="harder", solved=12)
+    _group_done(sched, version=d, rev=3, group=6, passed=12)
+    _drain(ladder)
+    pool = _pool(sched)
+    assert pool[a]["status"] == "retired"
+    assert all(pool[v]["status"] == "active" for v in (V0, b, d))
+    (child,) = [v for v in pool.values() if v["parent"] == d]
+    assert child["status"] == "active"
+    assert sum(v["status"] == "active" for v in pool.values()) == 4
+
+
+def test_at_the_cap_with_nothing_replaceable_a_signal_starts_nothing(job, monkeypatch):
+    root, run, sched, client = job
+    b, d = _add(root, client, 1), _add(root, client, 2)
+    evolve = Evolve(monkeypatch, root)
+    ladder = lr.Ladder(root, client, evolve.ev, policy=lr.Policy(max_active=3), workers=4)
+    ladder.start()
+    _groups(ladder, sched, [(V0, 0, 1, 0), (b, 1, 2, 3), (d, 2, 3, 12)])
+    _signal(run, version=d, rev=2, group=4, direction="harder", solved=12)
+    _group_done(sched, version=d, rev=2, group=4, passed=12)
+    _drain(ladder)
+    assert evolve.calls == []
+    entry = evolve.ev.load_ledger(root)[f"{RUN}/a--g4"]
+    assert entry["outcome"] == "superseded" and "--max-active 3" in entry["reason"]
+
+
+def test_untested_versions_weigh_below_a_learnable_one(job, monkeypatch):
+    root, run, sched, client = job
+    c = _add(root, client, 1)
+    evolve = Evolve(monkeypatch, root)
+    ladder = lr.Ladder(root, client, evolve.ev, workers=4)
+    ladder.start()
+    assert _pool(sched)[c]["weight"] == lr.Policy.explore
+    _groups(ladder, sched, [(V0, 0, 1, 4)])
+    assert _until(lambda: (ladder.step(0.05), _pool(sched)[c]["weight"] < lr.Policy.explore)[1])
+    pool = _pool(sched)
+    p = 4.5 / 13
+    assert pool[V0]["weight"] == pytest.approx(p * (1 - p))
+    assert pool[c]["weight"] == pytest.approx(0.5 * p * (1 - p))
+    assert pool[c]["weight"] < pool[V0]["weight"]
+
+
+def test_no_easier_child_while_a_learnable_version_exists(job, monkeypatch):
+    root, run, sched, client = job
+    a = _add(root, client, 1)
+    evolve = Evolve(monkeypatch, root)
+    ladder = lr.Ladder(root, client, evolve.ev, workers=4)
+    ladder.start()
+    _groups(ladder, sched, [(V0, 0, 1, 4)])
+    _signal(run, version=a, rev=1, group=2, direction="easier", solved=0)
+    _group_done(sched, version=a, rev=1, group=2, passed=0)
+    _drain(ladder)
+    assert evolve.calls == []
+    entry = evolve.ev.load_ledger(root)[f"{RUN}/a--g2"]
+    assert entry["outcome"] == "superseded" and "no easier child while learnable" in entry["reason"]
+
+
+def test_one_easier_child_when_the_pool_is_half_full(job, monkeypatch):
+    root, run, sched, client = job
+    for rev in (1, 2, 3):
+        _add(root, client, rev)
+    evolve = Evolve(monkeypatch, root)
+    ladder = lr.Ladder(root, client, evolve.ev, workers=4)
+    ladder.start()
+    _signal(run, version=V0, rev=0, group=3, direction="easier", solved=0)
+    _group_done(sched, version=V0, rev=0, group=3, passed=0)
+    _drain(ladder)
+    assert [c["data"]["simplify_hint"] for c in evolve.calls] == ["vague"]
+
+
+def test_a_version_with_a_child_is_retired_after_two_all_failed_groups(job, monkeypatch):
+    root, run, sched, client = job
+    a = _add(root, client, 1)
+    a2 = _add(root, client, 2, parent=a)
+    evolve = Evolve(monkeypatch, root)
+    ladder = lr.Ladder(root, client, evolve.ev, workers=4)
+    ladder.start()
+    ladder.children[a].append((a2, "easier", 0))
+    ladder.children[V0].append((a, "easier", 0))
+    _groups(ladder, sched, [(a, 1, 1, 0), (V0, 0, 2, 0), (a2, 2, 3, 0)])
+    pool = _pool(sched)
+    # One all-failed group: stays. a2 has no child: stays.
+    assert pool[a]["status"] == "active" and pool[a2]["status"] == "active"
+    _groups(ladder, sched, [(a, 1, 4, 0), (V0, 0, 5, 0), (a2, 2, 6, 0)])
+    assert _until(lambda: (ladder.step(0.05), _pool(sched)[a]["status"] == "retired")[1])
+    pool = _pool(sched)
+    assert pool[V0]["status"] == "active" and pool[a2]["status"] == "active"
+
+
+class Servers:
+    """Sandbox servers by pid, as sandbox_servers would read them off /proc."""
+
+    def __init__(self):
+        self.live: dict[int, tuple] = {}
+        self.downed: list[int] = []
+        self._lock = threading.Lock()
+        self._next = 1000
+
+    def boot(self, pkg):
+        with self._lock:
+            self._next += 1
+            self.live[self._next] = (pkg, f"/tmp/fake-{self._next}.sock")
+            return self._next
+
+    def list(self):
+        with self._lock:
+            return [(pid, pkg, sock) for pid, (pkg, sock) in self.live.items()]
+
+    def down(self, pid, sock):
+        with self._lock:
+            self.live.pop(pid)
+            self.downed.append(pid)
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "failed", "raise"])
+def test_every_ladder_rewrite_tears_down_its_sandbox_servers(job, monkeypatch, outcome):
+    root, run, sched, client = job
+    servers = Servers()
+    evolve = Evolve(monkeypatch, root, status=lambda sig: outcome, servers=servers)
+    sweeper = lr.Sweeper(root, evolve.ev, servers=servers.list, down=servers.down)
+    ladder = lr.Ladder(root, client, evolve.ev, workers=4, sweeper=sweeper)
+    ladder.start()
+    _signal(run, version=V0, rev=0, group=3, direction="easier", solved=0)
+    _group_done(sched, version=V0, rev=0, group=3, passed=0)
+    _drain(ladder)
+    assert len(evolve.calls) == 3
+    assert servers.live == {} and len(servers.downed) == 3
+
+
+def test_a_live_rewrites_servers_are_left_alone(job, monkeypatch):
+    root, run, sched, client = job
+    servers = Servers()
+    evolve = Evolve(monkeypatch, root)
+    sweeper = lr.Sweeper(root, evolve.ev, servers=servers.list, down=servers.down)
+    task = root.evolution.task("a")
+    live = task.path / "rewrites" / "20261022-000000Z--easier"
+    (live / "package").mkdir(parents=True)
+    layout.write_json_atomic(live / "rewrite.json", {"status": "running"})
+    closed = task.path / "rewrites" / "20261022-000001Z--easier"
+    (closed / "package").mkdir(parents=True)
+    layout.write_json_atomic(closed / "rewrite.json", {"status": "rejected"})
+    keep = servers.boot(live / "package")
+    gone = servers.boot(task.path / "rewrites" / "20261022-000002Z--easier" / "package")
+    shut = servers.boot(closed / "package")
+    elsewhere = servers.boot(root.path.parent / "other-job" / "package")
+    # A sibling's rewrite ended: only orphans go.
+    assert sweeper.sweep(rewrite=("a", "20261022-000003Z--easier"), why="test") == 2
+    assert sorted(servers.downed) == sorted([gone, shut])
+    assert set(servers.live) == {keep, elsewhere}
+    # The ladder's start (or stop) takes every server of the job, and only those.
+    ladder = lr.Ladder(root, client, evolve.ev, workers=4, sweeper=sweeper)
+    ladder.start()
+    assert set(servers.live) == {elsewhere}
