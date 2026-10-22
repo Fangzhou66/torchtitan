@@ -14,11 +14,13 @@ hook); it picks the active version with the fewest groups so far. When a group
 solves every scored attempt, it halves that version's weight, which matters
 only to draws it does not answer in time. It is a template for the interface,
 not a recipe: a real rewriter adds versions (``client.add``) and retires them.
+Started before the trainer, it waits for the scheduler (``connect()``).
 """
 
 from __future__ import annotations
 
 import collections
+import logging
 import sys
 from pathlib import Path
 
@@ -33,6 +35,7 @@ from torchtitan.experiments.rl.examples.tmax.overfit_bench.rewriter_client impor
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     groups: collections.Counter[str] = collections.Counter()
 
     def which_version(candidates: list[dict]) -> str | None:

@@ -8,7 +8,7 @@
 """A rewriter's side of the bench scheduler's socket, and the reference loop on it.
 
     client = RewriterClient(job, which_version=pick)   # pick(candidates) -> id | None
-    client.connect()
+    client.connect()                 # waits for the scheduler, 30 min by default
     client.add(row, parent=old_id); client.retire(old_id); client.get_state()
     event = client.wait_for({"group_done"}, timeout=60)
 
@@ -17,8 +17,9 @@
 ``reference`` runs evolution/evolve_ondella.py unchanged except for two
 things: it wakes on ``group_done`` instead of polling for signal files every
 5 s, and each fold it publishes is also given to the pool as add(new row,
-parent) + retire(parent). Every file the loop writes is still written. With no
-scheduler to connect to it runs exactly as the file-based loop does.
+parent) + retire(parent). Every file the loop writes is still written. Until a
+scheduler is up it runs exactly as the file-based loop does, and connects to
+the scheduler when one appears (within ``connect()``'s timeout).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -44,6 +46,34 @@ log = logging.getLogger("rewriter_client")
 
 class RewriterError(RuntimeError):
     """The scheduler refused a pool call, or could not be reached."""
+
+
+def scheduler_socket(root: layout.Root) -> tuple[str | None, str]:
+    """The socket of the scheduler serving this job now, or None and why not.
+
+    ``scheduler.json`` outlives a scheduler that was killed (only a clean stop
+    removes it), so one whose pid is gone on this host, or whose socket is
+    missing, is a previous run's and does not count."""
+    try:
+        info = json.loads(root.scheduler_json.read_text())
+    except FileNotFoundError:
+        return None, f"no {root.scheduler_json.name} yet"
+    except (OSError, ValueError) as e:
+        return None, f"{root.scheduler_json.name} unreadable: {e}"
+    path, host, pid = info.get("socket"), info.get("host"), info.get("pid")
+    if host == socket.gethostname() and isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None, f"stale {root.scheduler_json.name}: pid {pid} is gone"
+        except PermissionError:
+            pass
+    if not path or not os.path.exists(path):
+        return None, (
+            f"socket {path} missing (a stale {root.scheduler_json.name}, or the "
+            f"scheduler runs on {host}, not here)"
+        )
+    return path, ""
 
 
 class RewriterClient:
@@ -70,17 +100,33 @@ class RewriterClient:
     def connected(self) -> bool:
         return self._sock is not None
 
-    def connect(self) -> None:
-        try:
-            path = json.loads(self.root.scheduler_json.read_text())["socket"]
-        except (OSError, ValueError, KeyError) as e:
-            raise RewriterError(f"no scheduler for {self.root.path}: {e}") from e
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.connect(path)
-        except OSError as e:
-            sock.close()
-            raise RewriterError(f"scheduler at {path} is not listening: {e}") from e
+    def connect(self, timeout_sec: float = 1800.0, poll_sec: float = 1.0) -> None:
+        """Connect, waiting up to ``timeout_sec`` for the scheduler: it starts
+        at the trainer's first draw, so a rewriter launched beside
+        start_training.sh is usually up first. A previous run's leftover
+        scheduler.json is waited past. 0 tries once."""
+        deadline = time.monotonic() + timeout_sec
+        next_log = 0.0
+        while True:
+            path, why = scheduler_socket(self.root)
+            if path is not None:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    sock.connect(path)
+                    break
+                except OSError as e:
+                    sock.close()
+                    why = f"scheduler at {path} is not listening: {e}"
+            now = time.monotonic()
+            if now >= deadline:
+                raise RewriterError(
+                    f"no scheduler for {self.root.path} after {timeout_sec:.0f} s: {why}"
+                )
+            if now >= next_log:
+                log.info("waiting for the scheduler of %s: %s", self.root.path, why)
+                next_log = now + 60
+            time.sleep(min(poll_sec, deadline - now))
+        log.info("connected to the scheduler at %s", path)
         self._sock = sock
         hooks = ["which_version"] if self._which_version is not None else []
         self._send({"op": "hello", "role": "rewriter", "hooks": hooks})
@@ -205,10 +251,19 @@ def run_reference(job: Path, argv: list[str]) -> None:
     import evolve_ondella as ev  # noqa: E402
 
     client = RewriterClient(job)
+
+    def connect() -> None:
+        try:
+            client.connect()
+        except RewriterError as e:
+            log.warning("running file-based only: %s", e)
+
     try:
-        client.connect()
-    except RewriterError as e:
-        log.warning("running file-based only: %s", e)
+        client.connect(timeout_sec=0)
+    except RewriterError:
+        # The loop runs file-based meanwhile; folds reach the pool through the
+        # importer until the client is connected.
+        threading.Thread(target=connect, name="rewriter-connect", daemon=True).start()
 
     def wait_for_signals(root: layout.Root, max_wait: int, tick: float = 5.0) -> None:
         ledger = ev.load_ledger(root)

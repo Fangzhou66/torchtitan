@@ -86,7 +86,9 @@ draws from. A rewriter talks to it through either interface below, or both.
 `<job>/scheduler.json` names a unix socket (under `/tmp`, node-local: the
 rewriter runs on the trainer's host). JSON lines; `rewriter_client.py` is the
 client, `example_rewriter.py` a minimal rewriter on it, and `scheduler.py`'s
-docstring the wire format.
+docstring the wire format. The scheduler starts at the trainer's first draw;
+`RewriterClient.connect()` waits for it (30 min by default, logging while it
+waits), past a `scheduler.json` a killed earlier run left behind.
 
 | call | |
 |---|---|
@@ -175,6 +177,10 @@ per-sandbox limits (4 vCPU, 8 GiB, 10 GiB disk; with a GPU 16 vCPU, 192 GiB,
 512 GiB) is clamped to them; 20 tasks have one. For a compose task that clamps
 the docker-in-docker host only: the compose project keeps the task's declared
 cpu/memory reservations, which can then exceed the host's.
+
+The rewriter can be started before the trainer: `example_rewriter.py` and any
+rewriter on `RewriterClient.connect()` wait for the scheduler, and the
+reference rewriter runs file-based until it can connect.
 
 The reference rewriter (`start_reference_rewriter.sh`) is the evolve loop run
 through `rewriter_client.py reference`: it wakes on `group_done` rather than

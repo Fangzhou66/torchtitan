@@ -14,6 +14,7 @@ import json
 import pickle
 import random
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -34,6 +35,7 @@ from torchtitan.experiments.rl.examples.tmax.overfit_bench.pool import (
 )
 from torchtitan.experiments.rl.examples.tmax.overfit_bench.rewriter_client import (
     RewriterClient,
+    RewriterError,
     run_reference,
 )
 from torchtitan.experiments.rl.examples.tmax.overfit_bench.scheduler import (
@@ -338,6 +340,104 @@ def test_scheduler_state_round_trip_restores_the_draw_stream(root, run):
     second.load_state_dict(state)
     assert [second.draw().version for _ in range(10)] == expected
     second.stop()
+
+
+# -- connecting before the scheduler exists -------------------------------------
+
+
+def _stale_scheduler_json(root: layout.Root) -> None:
+    """What a killed scheduler leaves behind: its pid gone, its socket too."""
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    layout.write_json_atomic(
+        root.scheduler_json,
+        {
+            "socket": "/tmp/no-such-bench/sched.sock",
+            "protocol": 1,
+            "host": socket.gethostname(),
+            "pid": dead.pid,
+        },
+    )
+
+
+def test_connect_waits_past_a_stale_scheduler_json_for_the_scheduler(root, run):
+    _stale_scheduler_json(root)
+    client = RewriterClient(root.path)
+    failed = []
+
+    def connect():
+        try:
+            client.connect(timeout_sec=20, poll_sec=0.05)
+        except RewriterError as e:
+            failed.append(e)
+
+    waiter = threading.Thread(target=connect)
+    waiter.start()
+    time.sleep(0.5)
+    assert waiter.is_alive() and not client.connected and not failed
+    s = BenchScheduler(root, run=run)
+    s.start()
+    try:
+        waiter.join(timeout=10)
+        assert client.connected and not failed
+        assert _until(lambda: any(c.role == "rewriter" for c in s._clients))
+        assert client.get_state()["versions"][0]["id"] == content_revision(_row("a"))
+    finally:
+        client.close()
+        s.stop()
+
+
+def test_connect_gives_up_at_its_timeout(root):
+    with pytest.raises(RewriterError, match="no scheduler.json yet"):
+        RewriterClient(root.path).connect(timeout_sec=0.2, poll_sec=0.05)
+    _stale_scheduler_json(root)
+    with pytest.raises(RewriterError, match="pid .* is gone"):
+        RewriterClient(root.path).connect(timeout_sec=0)
+
+
+def test_reference_adapter_started_first_connects_when_the_scheduler_comes_up(
+    root, run, monkeypatch
+):
+    seen: dict = {}
+
+    def fold(root, accepted):
+        accepted[0]["status"] = "accepted"
+        version, _ = root.mix.publish([json.dumps(_row("a", rev=1))])
+        return version
+
+    def main():
+        # The loop is already running file-based when the trainer starts.
+        s = BenchScheduler(root, run=run, import_interval_sec=600)
+        s.start()
+        try:
+            seen["connected"] = _until(
+                lambda: any(c.role == "rewriter" for c in s._clients), timeout=10
+            )
+            fake.fold(root, [{"meta": {"task": "a"}}])
+            new = content_revision(_row("a", rev=1))
+            seen["active"] = s.pool.is_active(new)
+            seen["parent"] = s.pool.get(new).parent if seen["active"] else None
+        finally:
+            s.stop()
+
+    fake = types.ModuleType("evolve_ondella")
+    fake.load_ledger = lambda root: {}
+    fake.admission_is_open = lambda: True
+    fake._pending = lambda root, ledger: True
+    fake._wait_for_signals = None
+    fake.fold = fold
+    fake.main = main
+    monkeypatch.setitem(sys.modules, "evolve_ondella", fake)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    run_reference(root.path, [])
+    # The importer (600 s interval) never ran, so the fold reached the pool
+    # through the socket the adapter connected after starting.
+    assert seen == {
+        "connected": True,
+        "active": True,
+        "parent": content_revision(_row("a")),
+    }
 
 
 # -- the reference rewriter adapter -------------------------------------------
