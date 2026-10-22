@@ -374,7 +374,11 @@ def test_the_ladder_never_reads_the_readout(job, monkeypatch):
     _drain(ladder)
     monkeypatch.undo()
     assert len(evolve.calls) == 3 and forbidden == []
-    # The author's record was built, from training attempts only.
-    for rw in root.evolution.task("a").rewrite_dirs():
-        index = layout.read_jsonl(rw.traces / "attempts.jsonl")
-        assert index and all(e["path"].startswith(f"runs/{RUN}/rollouts/") for e in index)
+    # The author's record was built, from training attempts only (each
+    # rewrite's traces/ moved into its revision with the fold).
+    index = layout.read_jsonl(root.evolution.task("a").attempts)
+    assert len(index) == 12
+    assert all(e["path"].startswith(f"runs/{RUN}/rollouts/") for e in index)
+    for rev in (1, 2, 3):
+        traces = root.evolution.task("a").rev(rev) / "traces" / "attempts.jsonl"
+        assert layout.read_jsonl(traces) == index
