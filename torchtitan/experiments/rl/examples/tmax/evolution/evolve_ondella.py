@@ -451,6 +451,12 @@ ATTEMPT_FIELDS = ("rev", "group", "rollout", "reward", "finish_reason", "infra_f
 # bench's ladder rewriter sets this to ("rollouts",): validation there is the
 # bench's readout, which a rewriter may not read. The evolve loop reads both.
 ATTEMPT_RECORD_DIRS = ("rollouts", "validation_rollouts")
+# One writer of a task's attempts.jsonl at a time: the overfit bench's ladder
+# rewriter runs several rewrites of one task at once, and each rewrites the
+# index through the same .incoming file. Per task, so the evolve loop, which
+# runs one rewrite per task, never waits on it.
+_ATTEMPT_INDEX_LOCKS: dict[Path, threading.Lock] = {}
+_ATTEMPT_INDEX_LOCKS_LOCK = threading.Lock()
 
 
 def _index_attempts(root: layout.Root, task: layout.TaskDir) -> list[dict]:
@@ -459,6 +465,13 @@ def _index_attempts(root: layout.Root, task: layout.TaskDir) -> list[dict]:
     (ATTEMPT_RECORD_DIRS). Only
     records not indexed yet are opened, and only their header line: on a FUSE
     root every file read is a round trip, and a task gathers thousands."""
+    with _ATTEMPT_INDEX_LOCKS_LOCK:
+        lock = _ATTEMPT_INDEX_LOCKS.setdefault(task.path, threading.Lock())
+    with lock:
+        return _update_attempt_index(root, task)
+
+
+def _update_attempt_index(root: layout.Root, task: layout.TaskDir) -> list[dict]:
     index = layout.read_jsonl(task.attempts)
     seen = {e["path"] for e in index}
     fresh = []

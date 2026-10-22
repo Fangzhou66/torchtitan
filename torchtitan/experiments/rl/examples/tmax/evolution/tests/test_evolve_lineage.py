@@ -2314,3 +2314,18 @@ def test_attempt_index_reads_validation_records_by_default(tmp_path, monkeypatch
     monkeypatch.setattr(od, "ATTEMPT_RECORD_DIRS", ("rollouts",))
     task.attempts.unlink()
     assert [e["group"] for e in od._index_attempts(root, task)] == [3]
+
+
+def test_concurrent_attempt_indexes_of_one_task_do_not_collide(tmp_path):
+    """Several rewrites of one task (the bench's ladder) index it at once."""
+    root = layout.Root(tmp_path / "root")
+    run = root.run("tmax-9b--20261021-000000Z")
+    for i in range(50):
+        path = run.rollouts / "a" / f"g{i}-r0.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"rev": 0, "group": i, "rollout": 0, "reward": 0}) + "\n")
+    task = root.evolution.task("a")
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda _: od._index_attempts(root, task), range(8)))
+    assert all(len(r) == 50 for r in results)
+    assert len(layout.read_jsonl(task.attempts)) == 50

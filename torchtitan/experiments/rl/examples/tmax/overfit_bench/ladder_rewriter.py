@@ -170,8 +170,9 @@ class Ladder:
         self.groups: dict[str, list[tuple[int, int, str]]] = collections.defaultdict(list)
         self.latest_group: dict[tuple[str, str | None], int] = {}
         self._seen_groups: set[tuple] = set()
-        # parent version -> [(child version, direction, when folded)], from rewrite.json.
-        self.children: dict[str, list[tuple[str, str, str]]] = collections.defaultdict(list)
+        # parent version -> [(child version, direction, how many of the
+        # parent's groups were recorded when the child was folded)].
+        self.children: dict[str, list[tuple[str, str, int]]] = collections.defaultdict(list)
         self.inflight: dict[str, Request] = {}
         self.taken: set[str] = set()
         self.versions: dict[str, dict] = {}
@@ -190,9 +191,10 @@ class Ladder:
         for _task, _rw, meta in self.ev._rewrite_metas(self.root):
             ladder = meta.get("ladder") or {}
             if ladder.get("version") and ladder.get("parent"):
-                self.children[ladder["parent"]].append(
-                    (ladder["version"], meta["job"], meta.get("finished") or "")
-                )
+                # The parent's groups up to the fold's second came before it.
+                folded = meta.get("finished") or ""
+                before = sum(1 for g in self.groups[ladder["parent"]] if g[2] <= folded)
+                self.children[ladder["parent"]].append((ladder["version"], meta["job"], before))
         for task in sorted({v["task"] for v in self.versions.values()}):
             self.rebalance(task)
 
@@ -212,8 +214,9 @@ class Ladder:
     def _has_active_child(self, vid: str, direction: str) -> bool:
         return self._active_child_since(vid, direction) is not None
 
-    def _active_child_since(self, vid: str, direction: str) -> str | None:
-        """When the earliest active child of ``vid`` in ``direction`` was folded."""
+    def _active_child_since(self, vid: str, direction: str) -> int | None:
+        """How many of ``vid``'s groups came before its earliest active child
+        in ``direction``, None without one."""
         stamps = [
             since for c, d, since in self.children.get(vid, ())
             if d == direction and self._active(c)
@@ -252,7 +255,7 @@ class Ladder:
                 if (
                     since is not None
                     and not is_original(v)
-                    and mastered([g for g in self.groups[v["id"]] if g[2] >= since], self.policy)
+                    and mastered(self.groups[v["id"]][since:], self.policy)
                 ):
                     self.client.retire(v["id"])
                     v["status"] = "retired"
@@ -503,7 +506,7 @@ class Ladder:
                 "rewrite": f"rewrites/{h['rewrite'].path.name}",
             },
         )
-        self.children[req.parent].append((info["id"], meta["job"], meta["finished"]))
+        self.children[req.parent].append((info["id"], meta["job"], len(self.groups[req.parent])))
         self.versions[info["id"]] = {**info, "row": row}
         req.added.append(info["id"])
         log.info(
