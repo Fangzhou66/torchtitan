@@ -36,6 +36,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from torchtitan.experiments.rl.examples.tmax import layout
 
@@ -104,7 +105,7 @@ def socket_path() -> str | None:
     if not base:
         return None
     try:
-        with open(layout.Root(base).scheduler_json) as f:
+        with open(layout.Root(Path(base)).scheduler_json) as f:
             return json.load(f).get("socket") or None
     except (OSError, ValueError):
         return None

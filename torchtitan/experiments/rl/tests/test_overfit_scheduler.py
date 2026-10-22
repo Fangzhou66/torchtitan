@@ -501,7 +501,7 @@ def _rollout(r, monkeypatch, sample, *, group_id=0, reward=1.0):
 
     @contextlib.asynccontextmanager
     async def fake_boot(*args, **kwargs):
-        seen["boot"] = kwargs
+        seen.setdefault("boots", []).append(kwargs)
         sandbox = AsyncMock()
         sandbox.sandbox_id = "sandbox-0"
         sandbox.allocated_disk_gb = 1
@@ -664,7 +664,8 @@ def test_sandbox_override_reaches_boot_verifier_and_readout(monkeypatch, capture
         assert sample.tmax["separate_verifier"] == {**separate, "daytona_cpu": 4}
     assert base.tmax["separate_verifier"]["daytona_cpu"] == 1  # the row is untouched
     _, seen = _rollout(r, monkeypatch, train)
-    assert (seen["boot"]["cpu"], seen["boot"]["memory"]) == (4, 3)
+    # The agent's sandbox, then grade_separate's verifier sandbox.
+    assert [(b["cpu"], b["memory"]) for b in seen["boots"]] == [(4, 3), (4, 2)]
 
 
 def test_bench_rollouter_draws_from_the_scheduler_and_checkpoints_it(sched):
