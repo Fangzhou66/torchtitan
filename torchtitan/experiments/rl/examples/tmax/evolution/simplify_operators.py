@@ -16,6 +16,7 @@ the retained goals -- are stated once, below.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -219,7 +220,17 @@ whose student keeps failing gives a hint, not up. When the traces are thin,
 start from the weakest help at the first point where the attempts go wrong.
 Write GIVE UP with the reason only when the task cannot be made valid here --
 a defect this environment does not let you repair -- and keep it unchanged.
-"""
+""" + extra_guidance()
+
+
+def extra_guidance() -> str:
+    """Rules a deployment adds to every simplify prompt, read from the file
+    EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE names; nothing when it is unset, so the
+    evolve loop's prompt is unchanged. A named file that is missing raises."""
+    path = os.environ.get("EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE", "")
+    if not path:
+        return ""
+    return "\n" + Path(path).read_text()
 
 
 EXPECTED = re.compile(r"^\s*\d+\s+of\s+\d+\s*$")

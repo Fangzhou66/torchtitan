@@ -152,3 +152,23 @@ def test_an_all_failed_task_gets_a_hint_not_a_give_up():
     p = " ".join(so.prompt("vague").split())
     assert "gives a hint, not up" in p
     assert "only when the task cannot be made valid here" in p
+
+
+def test_extra_guidance_unset_leaves_prompt_unchanged(monkeypatch):
+    monkeypatch.delenv("EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE", raising=False)
+    assert so.prompt("vague").rstrip().endswith("keep it unchanged.")
+
+
+def test_extra_guidance_file_is_appended(monkeypatch, tmp_path):
+    extra = tmp_path / "extra.md"
+    extra.write_text("## Bench rule\n\nDo not preinstall what the student can install.\n")
+    monkeypatch.setenv("EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE", str(extra))
+    text = so.prompt("none")
+    assert text.index("keep it unchanged.") < text.index("## Bench rule")
+    assert text.rstrip().endswith("Do not preinstall what the student can install.")
+
+
+def test_extra_guidance_missing_file_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE", str(tmp_path / "absent.md"))
+    with pytest.raises(FileNotFoundError):
+        so.prompt("vague")
