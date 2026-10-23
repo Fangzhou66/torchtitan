@@ -210,6 +210,13 @@ and the parent's and the original's reference solutions, each on a fresh
 Daytona sandbox (`../evolution/grader_replay.py`; `EVOLVE_EASIER_GRADER_REPLAY=0`
 turns it off). The evolve loop outside the bench leaves it off.
 
+`EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE`, set in a job's `evolution/rewriter.env`,
+appends a file to every easier-rewrite prompt (`../evolution/simplify_operators.py`).
+`simplify_extra.md` here holds the bench's rules: the original task is the exam, so an
+easier version does not preinstall what the student can install, supply a checker for
+the retained skill, or record an inferable convention as a repair. Each rule cites the
+readout it came from (torch-tensor-parallelism, v6, 2026-10-23).
+
 `SYNC_OVERFIT.md` describes a strictly synchronous variant of a job (one group
 in flight, the next group waiting for the rewrites it triggered) and how it is run.
 
