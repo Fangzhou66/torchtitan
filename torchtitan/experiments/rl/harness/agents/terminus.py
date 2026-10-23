@@ -108,6 +108,8 @@ _CONTEXT_REPEAT_WARN_FRACS = (0.75, 0.9)
 # trajectories ever mention it, against 11% for the warning). The label keeps
 # the stakes and says where the line comes from.
 _CONTEXT_NOTICE_LABEL = "[Harness notice, not terminal output]"
+# Terminus-2's completion-confirmation question (terminus_2.py).
+_CONFIRMATION_PROMPT = "Are you sure you want to mark the task as complete?"
 # "della" is the notice used by ivuaqcol: one warning at the warn fraction, then
 # a status line every turn, appended after the terminal observation. "checked"
 # (default) is della without its closing "mark the task complete": a policy
@@ -235,6 +237,9 @@ class _AdapterLLM:
         # Turns cut off at the per-turn cap, and the last such text: Terminus-2
         # parses it once more for warnings, which _CountingParser then labels.
         self.truncated_turns = 0
+        # Terminus-2 asks "Are you sure...?" after the first task_complete and
+        # submits only if the next reply repeats it.
+        self.confirm_asks = 0
         self.last_truncated_text: str | None = None
         # Strict rules (AgentTask.strict_format / strict_truncation). ``calls`` is
         # the 1-based index of the latest model reply; a violation records its
@@ -356,6 +361,8 @@ class _AdapterLLM:
             raise _TimeBudgetExhausted(
                 f"time budget spent before an episode for {self._session_id}"
             )
+        if _CONFIRMATION_PROMPT in prompt:
+            self.confirm_asks += 1
         messages = list(message_history or [])
         messages.append({"role": "user", "content": prompt})
         # No max_tokens: the adapter does not read it from the body (generation runs
@@ -1151,6 +1158,13 @@ async def terminus_agent(
                 format_errors = parser.format_errors
                 format_breakdown = parser.breakdown(
                     llm.truncated_turns if llm is not None else 0
+                )
+            if llm is not None:
+                # Each ask that did not end in the submit was declined: the agent
+                # went back to work (or ran out) instead of confirming.
+                format_breakdown["confirm_asks"] = llm.confirm_asks
+                format_breakdown["confirm_declines"] = llm.confirm_asks - (
+                    1 if submitted and llm.confirm_asks else 0
                 )
             if llm is not None and llm.subagent_calls:
                 # Summarization is off by default, so this is 0 on the normal path.

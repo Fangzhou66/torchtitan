@@ -582,7 +582,21 @@ def _format_breakdown_metrics(
             "rollout/truncated_turns_mean",
             mean(b.get("truncated_turns", 0) for b in present),
         ),
+        m.Metric(
+            "rollout/confirm_asks_mean",
+            mean(b.get("confirm_asks", 0) for b in present),
+        ),
     ]
+    # Of the siblings Terminus-2 asked "Are you sure?", the share that declined
+    # at least once (went back to work instead of confirming).
+    asked = [b for b in present if b.get("confirm_asks", 0) > 0]
+    if asked:
+        out.append(
+            m.Metric(
+                "rollout/confirm_declined_frac",
+                m.Mean(sum(b.get("confirm_declines", 0) > 0 for b in asked) / len(asked)),
+            )
+        )
     return out
 
 

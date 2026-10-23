@@ -165,3 +165,32 @@ def test_format_breakdown_metrics():
     assert metrics["rollout/repeat_turn_frac_mean"].value == pytest.approx(1 / 6)
     assert metrics["rollout/truncated_turns_mean"].value == 0.5
     assert _format_breakdown_metrics([None, {}]) == []
+
+
+def test_confirmation_declines_are_counted():
+    from torchtitan.experiments.rl.examples.tmax.rollouter import (
+        _format_breakdown_metrics,
+    )
+
+    asked_once = {"replies": 3, "confirm_asks": 1, "confirm_declines": 0}
+    declined = {"replies": 9, "confirm_asks": 3, "confirm_declines": 2}
+    never = {"replies": 5, "confirm_asks": 0, "confirm_declines": 0}
+    metrics = {
+        metric.key: metric.value
+        for metric in _format_breakdown_metrics([asked_once, declined, never])
+    }
+    assert metrics["rollout/confirm_asks_mean"].value == pytest.approx(4 / 3)
+    # Only the two asked siblings are in the denominator.
+    assert metrics["rollout/confirm_declined_frac"].value == 0.5
+    assert "rollout/confirm_declined_frac" not in {
+        metric.key for metric in _format_breakdown_metrics([never])
+    }
+
+
+def test_adapter_counts_the_confirmation_question():
+    from torchtitan.experiments.rl.harness.agents import terminus
+
+    assert terminus._CONFIRMATION_PROMPT in (
+        "Current terminal state:\n$ \n\nAre you sure you want to mark the task as "
+        "complete? This will trigger your solution to be graded"
+    )
