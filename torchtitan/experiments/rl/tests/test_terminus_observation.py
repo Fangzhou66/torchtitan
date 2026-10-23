@@ -173,3 +173,36 @@ def test_output_printed_between_turns_is_the_next_observation(tmp_path):
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session])
         Path(f"/dev/shm/.torchtitan_turn_pre.{session}").unlink(missing_ok=True)
+
+
+def test_keys_that_start_with_a_dash_are_not_read_as_flags():
+    end = _SandboxEnvironment._end_send_keys_options
+    assert end("tmux send-keys -t terminus-1 '-EOF' Enter") == (
+        "tmux send-keys -t terminus-1 -- '-EOF' Enter"
+    )
+    assert end("timeout 5s tmux send-keys -t terminus-1 ls Enter") == (
+        "timeout 5s tmux send-keys -t terminus-1 -- ls Enter"
+    )
+    # Already ended, other tmux commands and compound wrappers stay as they are.
+    for cmd in (
+        "tmux send-keys -t terminus-1 -- '-EOF'",
+        "tmux capture-pane -p -t terminus-1",
+        "cd /app && tmux send-keys -t terminus-1 ls",
+    ):
+        assert end(cmd) == cmd
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="needs tmux")
+def test_dash_key_reaches_a_real_tmux():
+    session = f"dash-test-{os.getpid()}"
+    subprocess.run(["tmux", "new-session", "-d", "-s", session, "bash --norc --noprofile"], check=True)
+    try:
+        raw = f"tmux send-keys -t {session} '-EOF'"
+        assert subprocess.run(["bash", "-c", raw], capture_output=True).returncode != 0
+        cmd = _SandboxEnvironment._end_send_keys_options(raw)
+        subprocess.run(["bash", "-c", cmd], check=True)
+        time.sleep(0.3)
+        pane = subprocess.run(["tmux", "capture-pane", "-p", "-t", session], capture_output=True, text=True).stdout
+        assert "-EOF" in pane
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", session])

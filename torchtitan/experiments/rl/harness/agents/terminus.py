@@ -647,6 +647,7 @@ class _SandboxEnvironment:
         if cwd:
             command = f"cd {shlex.quote(cwd)} && {command}"
         command = self._bound_pane_pipe(command)
+        command = self._end_send_keys_options(command)
         command = self._record_turn_start(command)
         return await self.terminal.run(
             command,
@@ -673,6 +674,28 @@ class _SandboxEnvironment:
 
     def _turn_pre_path(self) -> str:
         return f"/dev/shm/.torchtitan_turn_pre.{self.terminal.session or 'none'}"
+
+    @staticmethod
+    def _end_send_keys_options(command: str) -> str:
+        """Harbor sends keys as ``tmux send-keys -t <session> <keys>``, so a key
+        that starts with ``-`` (a heredoc line like ``-EOF``) reads as a flag and
+        tmux rejects the whole delivery. ``--`` ends the options."""
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return command
+        offset = 2 if tokens[:1] == ["timeout"] else 0
+        head = tokens[offset : offset + 4]
+        if (
+            len(tokens) < offset + 5
+            or head[:3] != ["tmux", "send-keys", "-t"]
+            or tokens[offset + 4] == "--"
+        ):
+            return command
+        prefix = f"tmux send-keys -t {shlex.quote(head[3])} "
+        if prefix not in command:
+            return command
+        return command.replace(prefix, prefix + "-- ", 1)
 
     def _record_turn_start(self, command: str) -> str:
         """Before the turn's first key delivery, note where the history stands."""

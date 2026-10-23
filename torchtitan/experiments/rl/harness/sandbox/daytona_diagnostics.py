@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -19,9 +18,23 @@ from urllib.parse import quote
 import aiohttp
 
 logger = logging.getLogger(__name__)
-_COLLECTION_TIMEOUT_SEC = 60
+_COLLECTION_TIMEOUT_SEC = 120
+_REQUEST_TIMEOUT_SEC = 20
 _RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024
 _PAGE_SIZE = 1000
+_SANDBOX_FIELDS = (
+    "state",
+    "desiredState",
+    "errorReason",
+    "backupState",
+    "autoStopInterval",
+    "autoDeleteInterval",
+    "cpu",
+    "memory",
+    "disk",
+    "createdAt",
+    "updatedAt",
+)
 
 
 async def collect_failure_diagnostics(
@@ -51,7 +64,8 @@ async def collect_failure_diagnostics(
             # trust_env: the Daytona API is external and proxy-only hosts reach it
             # through https_proxy; without it every request failed with DNS errors.
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=5), trust_env=True
+                timeout=aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SEC),
+                trust_env=True,
             ) as http:
                 headers = dict(client._api_client.default_headers)
                 api = client._api_url.rstrip("/")
@@ -76,6 +90,17 @@ async def collect_failure_diagnostics(
                         ) as response:
                             entry["http_status"] = response.status
                             entry["attempts"] = 2 if retried else 1
+                            if response.status == 429 and not retried:
+                                # Failures cluster, so their collectors share the
+                                # provider's rate limit.
+                                entry["status"] = "retrying_rate_limited"
+                                save()
+                                await asyncio.sleep(
+                                    min(float(response.headers.get("Retry-After") or 2), 10)
+                                )
+                                return await get(
+                                    name, url, params, authenticated=authenticated, retried=True
+                                )
                             if response.status == 401 and authenticated and not retried:
                                 # The provider has returned isolated 401s while
                                 # other requests with the same key succeeded.
@@ -94,7 +119,12 @@ async def collect_failure_diagnostics(
                                 "ok" if response.status == 200 else "http_error"
                             )
                             # Discovery replies contain API key/configuration fields.
-                            if name not in ("key", "config"):
+                            if name == "sandbox" and isinstance(payload, dict):
+                                # The sandbox record also carries its env.
+                                entry["payload"] = {
+                                    k: payload.get(k) for k in _SANDBOX_FIELDS
+                                }
+                            elif name not in ("key", "config"):
                                 entry["payload"] = payload
                                 if isinstance(payload, list) and len(payload) >= 1000:
                                     entry["possibly_truncated"] = True
@@ -184,24 +214,9 @@ async def collect_failure_diagnostics(
                             return
                         page += 1
 
-                async def latest_metrics():
-                    entry = {"status": "pending"}
-                    record["requests"]["metrics_latest"] = entry
-                    try:
-                        async with asyncio.timeout(5):
-                            metrics = await sandbox.get_metrics_latest()
-                        entry.update(status="ok", payload=asdict(metrics))
-                    except Exception as exc:
-                        entry.update(
-                            status="request_error", error_type=type(exc).__name__
-                        )
-                    finally:
-                        save()
-
-                key, config, _ = await asyncio.gather(
+                key, config = await asyncio.gather(
                     get("key", api + "/api-keys/current"),
                     get("config", api + "/config", authenticated=False),
-                    latest_metrics(),
                 )
                 organization = (key or {}).get("organizationId")
                 if not organization:
@@ -217,26 +232,32 @@ async def collect_failure_diagnostics(
                 )
                 base = f"{api}/sandbox/{sandbox_id}"
                 window = {"from": started_at, "to": now}
-                await asyncio.gather(
-                    pages(
+                # One request at a time: concurrent telemetry reads from many
+                # failing rollouts drew 429s and timeouts.
+                requests = (
+                    lambda: pages(
                         "audit",
                         f"{api}/audit/organizations/{organization}",
                         {"targetId[eq]": sandbox.id, "limit": 100, **window},
                     ),
-                    pages(
+                    lambda: pages(
                         "logs",
                         base + "/telemetry/logs",
                         {"limit": _PAGE_SIZE, **window},
                         retained_base + "/telemetry/logs" if analytics else None,
                     ),
-                    pages(
+                    lambda: pages(
                         "traces",
                         base + "/telemetry/traces",
                         {"limit": _PAGE_SIZE, **window},
                         retained_base + "/telemetry/traces" if analytics else None,
                     ),
-                    get("metrics", retained_base + "/telemetry/metrics", window),
+                    lambda: get("metrics", retained_base + "/telemetry/metrics", window),
+                    # State and errorReason: the audit log has no system stops.
+                    lambda: get("sandbox", base),
                 )
+                for request in requests:
+                    await request()
                 record["status"] = (
                     "finished"
                     if all(

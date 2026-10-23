@@ -6,7 +6,6 @@
 
 import asyncio
 import json
-from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -16,11 +15,6 @@ from aiohttp import web
 from torchtitan.experiments.rl.harness.agents import claude_code
 from torchtitan.experiments.rl.harness.sandbox import daytona_diagnostics as diagnostics
 from torchtitan.experiments.rl.harness.sandbox.daytona import DaytonaSandbox
-
-
-@dataclass
-class _Metrics:
-    disk_used: int = 42
 
 
 @pytest.mark.parametrize(
@@ -89,6 +83,10 @@ def test_provider_capture_preserves_results_and_excludes_discovery_secrets(
                 return web.json_response([])
             if request.path.endswith("/metrics"):
                 return web.json_response({"message": "unavailable"}, status=503)
+            if request.path == "/api/sandbox/sb":
+                return web.json_response(
+                    {"state": "error", "env": {"TOKEN": "sandbox-secret"}}
+                )
             assert request.query["targetId[eq]"] == "sb"
             return web.json_response({"items": [{"action": "create"}]})
 
@@ -114,9 +112,7 @@ def test_provider_capture_preserves_results_and_excludes_discovery_secrets(
         try:
             await diagnostics.collect_failure_diagnostics(
                 client,
-                SimpleNamespace(
-                    id="sb", get_metrics_latest=AsyncMock(return_value=_Metrics())
-                ),
+                SimpleNamespace(id="sb"),
                 tmp_path,
                 "2026-09-10T08:00:00Z",
                 ValueError("failed"),
@@ -125,13 +121,16 @@ def test_provider_capture_preserves_results_and_excludes_discovery_secrets(
             await runner.cleanup()
         raw = (tmp_path / "sb.json").read_text()
         assert "private-key" not in raw and "config-secret" not in raw
+        assert "sandbox-secret" not in raw
         record = json.loads(raw)
-        assert record["requests"]["metrics_latest"]["payload"]["disk_used"] == 42
         assert record["status"] == (
             "timeout" if mode in ("timeout", "page_timeout") else "partial"
         )
         assert record["requests"]["audit"]["payload"]["items"] == [{"action": "create"}]
-        assert record["requests"]["metrics"]["http_status"] == 503
+        if mode not in ("timeout", "page_timeout"):
+            # Requests run one at a time, so a timeout stops the later ones.
+            assert record["requests"]["metrics"]["http_status"] == 503
+            assert record["requests"]["sandbox"]["payload"]["state"] == "error"
         if mode == "large":
             assert record["requests"]["logs"]["status"] == "response_too_large"
         else:
