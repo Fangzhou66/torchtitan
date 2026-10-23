@@ -276,3 +276,16 @@ def test_della_style_goes_after_the_observation(tmp_path: Path, monkeypatch):
         "Current Terminal Screen:\nprompt$\n\n"
         "[Context: 60% used, about 4,000 tokens remain]\n"
     )
+
+
+def test_status_lines_off_keeps_only_the_della_warning(monkeypatch):
+    from torchtitan.experiments.rl.harness.agents import terminus
+
+    monkeypatch.setattr(terminus, "_CONTEXT_NOTICE_STYLE", "della")
+    monkeypatch.setattr(terminus, "_CONTEXT_STATUS_LINES", False)
+    llm = _llm(warn_frac=0.5)
+    llm.context_tokens = 5000
+    assert llm.context_notice().startswith("WARNING: You have used 50%")
+    for used in (7600, 9100):
+        llm.context_tokens = used
+        assert llm.context_notice() == ""

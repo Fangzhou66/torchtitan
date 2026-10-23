@@ -119,6 +119,9 @@ _CONFIRMATION_PROMPT = "Are you sure you want to mark the task as complete?"
 # _CONTEXT_REPEAT_WARN_FRACS.
 _CONTEXT_NOTICE_STYLE = os.environ.get("TMAX_CONTEXT_NOTICE_STYLE", "checked")
 _APPENDED_NOTICE_STYLES = ("della", "checked")
+# 0 drops the "[Context: N% used, ...]" line the appended styles add on every
+# turn between warnings, keeping only the warnings themselves.
+_CONTEXT_STATUS_LINES = os.environ.get("TMAX_CONTEXT_STATUS_LINES", "1") == "1"
 # "checked" triggers on tokens remaining rather than a fraction, so a 160K
 # validation context warns at the same "about N tokens remain" as the 80K
 # training one (0.7 and 0.9 of it) instead of at 82K, already past anything the
@@ -323,6 +326,8 @@ class _AdapterLLM:
                     "submit and the task counts as failed. Avoid commands that print "
                     f"large output{advice}"
                 )
+            if not _CONTEXT_STATUS_LINES:
+                return ""
             return f"[Context: {pct}% used, about {left:,} tokens remain]"
         first = round(100 * self._context_warn_frac)
         repeats = {
