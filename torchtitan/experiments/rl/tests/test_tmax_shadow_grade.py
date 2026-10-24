@@ -26,6 +26,7 @@ from torchtitan.experiments.rl.examples.tmax.data import TMaxSample
 from torchtitan.experiments.rl.examples.tmax.rollouter import (
     _RolloutIssueGate,
     _shadow_grade_metrics,
+    _strict_reward_metric,
     TMaxRollouter,
 )
 from torchtitan.experiments.rl.harness.adapters.anthropic import CapturedTurn
@@ -49,6 +50,7 @@ def _rollouter(*, shadow: bool) -> TMaxRollouter:
     r._read_ctrf = False
     r._shadow_grade_unsubmitted = shadow
     r._eval_shadow_grade_timeouts = True
+    r._eval_grade_unsubmitted = False
     r._rollout_gate = _RolloutIssueGate(1)
     return r
 
@@ -155,6 +157,7 @@ def test_validation_timeouts_skip_the_shadow_grade_when_off(
 ):
     rollouter = _rollouter(shadow=True)
     rollouter._eval_shadow_grade_timeouts = eval_timeouts
+    rollouter._eval_grade_unsubmitted = False
     calls = []
     _run(
         rollouter,
@@ -225,9 +228,40 @@ def test_group_metrics():
         for metric in _shadow_grade_metrics(rollouts)
     }
     assert got["rollout/shadow_unsubmitted_pass_frac"] == pytest.approx(0.5)
-    # submitted 1, 0 + shadow 1, 0 -> 0.5; the failed shadow and the infra failure
-    # are out of the denominator.
-    assert got["rollout/shadow_reward_mean"] == pytest.approx(0.5)
+    # submitted 1, 0 + shadow 1, 0 + no verdict 0 -> 0.4; only the infra failure
+    # is out of the denominator.
+    assert got["rollout/shadow_reward_mean"] == pytest.approx(0.4)
+
+
+@pytest.mark.parametrize(
+    "group_id,finish_reason,reward,graded",
+    [
+        (-1, "hit_time_budget", 1.0, True),
+        (-1, "hit_context_limit", 1.0, True),
+        (-1, "hit_max_turns", 1.0, True),
+        (-1, "format_error", 0.0, False),  # rule-terminated: still 0, ungraded
+        (0, "hit_time_budget", 0.0, False),  # training is unchanged
+    ],
+)
+def test_validation_scores_unsubmitted_at_the_verdict(
+    monkeypatch, group_id, finish_reason, reward, graded
+):
+    rollouter = _rollouter(shadow=False)
+    rollouter._eval_shadow_grade_timeouts = False
+    rollouter._eval_grade_unsubmitted = True
+    calls: list = []
+    rollout = _run(
+        rollouter,
+        monkeypatch,
+        submitted=False,
+        grade=_grade(1.0, calls),
+        finish_reason=finish_reason,
+        group_id=group_id,
+    )
+    assert len(calls) == (1 if graded else 0)
+    assert rollout.turns[-1].env_rewards == {"tmax_reward": reward}
+    assert rollout.diagnostics["submitted"] is False
+    assert rollout.diagnostics["shadow_reward"] == (1.0 if graded else None)
 
 
 
@@ -280,3 +314,15 @@ def test_a_separate_verifier_grades_in_its_own_sandbox_from_the_artifacts(monkey
     assert calls == [("sb-1", False)]
     assert rollout.turns[-1].env_rewards == {"tmax_reward": 1.0}
     assert rollout.diagnostics["infra_failed"] is False
+
+
+def test_strict_reward_counts_only_submitted_verdicts():
+    rollouts = [
+        _r(submitted=True, sparse=1.0),
+        _r(submitted=False, sparse=1.0, shadow=1.0),  # graded unsubmitted
+        _r(submitted=False, infra=True),
+        _r(submitted=True, sparse=0.0),
+    ]
+    metric = _strict_reward_metric(rollouts)
+    assert metric.key == "rollout/strict_reward_mean"
+    assert type(metric.value).reduce([metric.value])["mean"] == pytest.approx(0.25)

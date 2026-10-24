@@ -264,6 +264,13 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         eval_shadow_grade_timeouts=(
             os.environ.get("SWE_EVAL_SHADOW_GRADE_TIMEOUTS", "0") == "1"
         ),
+        # Validation scores every trial at its verifier verdict, submitted or not,
+        # as Harbor / TB-2.x do (their trial verifies after an agent timeout too).
+        # SWE_EVAL_GRADE_UNSUBMITTED=0 restores submit-only validation, which
+        # validation/strict_reward_mean reports either way.
+        eval_grade_unsubmitted=(
+            os.environ.get("SWE_EVAL_GRADE_UNSUBMITTED", "1") == "1"
+        ),
         # MiMo-style in-group length penalty on solves (TMaxRollouter.Config.
         # length_penalty*), off unless SWE_LENGTH_PENALTY=1. Defaults are MiMo's
         # general recipe. Over a 150-step agentpick run the median turns per rollout

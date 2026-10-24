@@ -503,6 +503,7 @@ def _run_group_with_one_infra_failure(
     rollouter._read_ctrf = False
     rollouter._shadow_grade_unsubmitted = False
     rollouter._eval_shadow_grade_timeouts = True
+    rollouter._eval_grade_unsubmitted = False
     rollouter._reward_mode = "sparse"
 
     async def run_sibling(**kwargs):

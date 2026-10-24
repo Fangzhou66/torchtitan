@@ -423,14 +423,31 @@ def _sandbox_issue_metrics(
     ]
 
 
+def _strict_reward_metric(rollouts: list[Rollout]) -> m.Metric:
+    """The submit-only score (unsubmitted and infra-failed rollouts count 0): the
+    validation reward before ``eval_grade_unsubmitted``."""
+    return m.Metric(
+        "rollout/strict_reward_mean",
+        m.Mean.from_list(
+            [
+                (d.get("sparse_reward") or 0.0)
+                if d["submitted"] and not d["infra_failed"]
+                else 0.0
+                for d in (rollout.diagnostics for rollout in rollouts)
+            ]
+        ),
+    )
+
+
 def _shadow_grade_metrics(rollouts: list[Rollout]) -> list[m.Metric]:
     """The group's solve rate if unsubmitted rollouts were graded too.
 
     ``shadow_unsubmitted_pass_frac``: of the unsubmitted rollouts whose shadow
     verifier ran, the fraction that passed -- the zeros that were real solves.
-    ``shadow_reward_mean``: every scored rollout at its verdict under the
+    ``shadow_reward_mean``: every non-infra rollout at its verdict under the
     grade-everything rule (submitted -> its binary reward, unsubmitted -> its
-    shadow verdict). Infra failures carry no verdict and are left out of both.
+    shadow verdict, or 0 where none ran, e.g. a skipped validation timeout).
+    Infra failures carry no verdict and are left out of both.
     """
     shadow, graded = [], []
     for rollout in rollouts:
@@ -442,6 +459,8 @@ def _shadow_grade_metrics(rollouts: list[Rollout]) -> list[m.Metric]:
         elif d["shadow_reward"] is not None:
             shadow.append(1.0 if d["shadow_reward"] > 0 else 0.0)
             graded.append(d["shadow_reward"])
+        else:
+            graded.append(0.0)
     return [
         m.Metric("rollout/shadow_unsubmitted_pass_frac", m.Mean.from_list(shadow)),
         m.Metric("rollout/shadow_reward_mean", m.Mean.from_list(graded)),
@@ -1189,6 +1208,14 @@ class TMaxRollouter(Rollouter):
         time budget. Those finish last, so their shadow grade sits on the pass's
         critical path; off skips it (they almost never pass)."""
 
+        eval_grade_unsubmitted: bool = False
+        """Score a validation rollout that ended without submitting (context, time
+        or turn limit, exited terminal) at its verifier verdict, as Harbor / TB-2.x
+        do: their trial runs the verifier after an agent timeout as well. Training
+        rollouts and rule-terminated endings are unchanged.
+        ``rollout/strict_reward_mean`` keeps the submit-only score, comparable with
+        validation before this option."""
+
         evolution_harder_ratio: float = 1.0
         """Minimum solved fraction for sparse-reward hardening; dense keeps its
         existing zero-variance rule. Must be in (0, 1]. Mixed groups still train.
@@ -1410,6 +1437,7 @@ class TMaxRollouter(Rollouter):
         )
         self._shadow_grade_unsubmitted = config.shadow_grade_unsubmitted
         self._eval_shadow_grade_timeouts = config.eval_shadow_grade_timeouts
+        self._eval_grade_unsubmitted = config.eval_grade_unsubmitted
         # Whole-rollout wall-clock guard: agent budget + eval + boot buffer.
         # Fallback guard; a rollout whose task declares its own budget derives its
         # own (see _agent_budget_sec / _guard_for).
@@ -1558,6 +1586,8 @@ class TMaxRollouter(Rollouter):
         ]
         if self._shadow_grade_unsubmitted:
             group_metrics += _shadow_grade_metrics(rollouts)
+        if self._eval_grade_unsubmitted and group_id < 0:
+            group_metrics.append(_strict_reward_metric(rollouts))
         if self._read_ctrf:
             group_metrics += _ctrf_metrics(
                 [rollout.diagnostics.get("ctrf") for rollout in rollouts]
@@ -2286,7 +2316,14 @@ class TMaxRollouter(Rollouter):
                     # git_diff: grade the agent's OWN sandbox in place. ``None`` means
                     # the harness has no submit signal -- grade anyway rather than
                     # scoring every rollout 0 (see AgentRun.submitted).
-                    if submitted:
+                    # eval_grade_unsubmitted: validation grades it anyway, as Harbor.
+                    grade_unsubmitted = (
+                        not submitted
+                        and group_id < 0
+                        and self._eval_grade_unsubmitted
+                        and finish_reason not in _RULE_TERMINATED_REASONS
+                    )
+                    if submitted or grade_unsubmitted:
                         failure_stage = "verifier"
                         grade_at = time.monotonic()
                         separate = sample.tmax.get("separate_verifier")
@@ -2328,6 +2365,9 @@ class TMaxRollouter(Rollouter):
                             ctrf = await self._read_ctrf_quietly(sandbox, rollout_id)
                         timing["grade_secs"] = time.monotonic() - grade_at
                         sparse_reward = reward
+                        if grade_unsubmitted:
+                            shadow_reward = reward
+                            verifier["graded_unsubmitted"] = True
                         # Training only. Validation groups carry negative ids (see
                         # Controller) and MUST stay on the binary verdict: TB-2.0
                         # avg@k / pass@k are defined on all-tests-pass, so a dense
