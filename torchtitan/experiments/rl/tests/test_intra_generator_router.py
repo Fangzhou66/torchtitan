@@ -230,6 +230,8 @@ def test_tmax_fallback_preserves_sticky_protection(monkeypatch, fallback):
         rl_grpo_qwen3_5_9b_tmax,
     )
 
+    # Routing only: no validation set to build alongside the recipe.
+    monkeypatch.setenv("SWE_VAL_SAMPLES", "0")
     monkeypatch.setenv("SWE_DP_FALLBACK_ROUTER", fallback)
     monkeypatch.setenv("SWE_DP_STICKY_REBALANCE", "2.0")
     monkeypatch.setenv("SWE_DP_STICKY_MAX_SESSIONS", "16384")
@@ -246,6 +248,7 @@ def test_tmax_rebalance_is_off_by_default(monkeypatch):
         rl_grpo_qwen3_5_9b_tmax,
     )
 
+    monkeypatch.setenv("SWE_VAL_SAMPLES", "0")
     monkeypatch.delenv("SWE_DP_STICKY_REBALANCE", raising=False)
     cfg = rl_grpo_qwen3_5_9b_tmax().generator.intra_generator_router.strategy
     assert cfg.rebalance_load_ratio == 0.0

@@ -5,9 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import random
+from types import SimpleNamespace
 
 import pytest
 
+from torchtitan.experiments.rl.routing import strategies
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     _GeneratorState,
     InterGeneratorRouter,
@@ -18,6 +21,18 @@ from torchtitan.experiments.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.experiments.rl.routing.types import RoutingContext
+
+
+class _FirstTieRandom(random.Random):
+    def choice(self, seq):
+        return seq[0]
+
+
+@pytest.fixture(autouse=True)
+def _lowest_index_ties(monkeypatch):
+    """Least-loaded breaks exact ties randomly; pin them to the lowest index so
+    tests can name which generator a cold route lands on."""
+    monkeypatch.setattr(strategies, "random", SimpleNamespace(Random=_FirstTieRandom))
 
 
 class _Endpoint:
