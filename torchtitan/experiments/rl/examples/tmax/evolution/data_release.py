@@ -87,13 +87,14 @@ def check_config(config):
             "archives",
             "count",
         }
-        optional = {"skip_unsolved"}
+        optional = {"skip_unsolved", "skip_unpackable"}
         if not required <= set(source) <= required | optional:
             raise ValueError(
                 f"source keys must be {sorted(required)}, optionally {sorted(optional)}"
             )
-        if type(source.get("skip_unsolved", False)) is not bool:
-            raise ValueError("skip_unsolved must be a boolean")
+        for flag in optional:
+            if type(source.get(flag, False)) is not bool:
+                raise ValueError(f"{flag} must be a boolean")
         if not re.fullmatch(r"[a-z0-9_-]+", source["name"]) or source["name"] in names:
             raise ValueError("source names must be unique path components")
         names.add(source["name"])
@@ -292,12 +293,26 @@ def prepare_source(source, files, stage, checkpoints, log):
                 protected = pack.Protected.from_cells(
                     record.get("protected_paths"), record.get("protected_cmds")
                 )
-            row = pack.to_row(
-                str(task),
-                inject_agent_runtime=True,
-                pretest=pretest,
-                protected=protected,
-            )
+            try:
+                row = pack.to_row(
+                    str(task),
+                    inject_agent_runtime=True,
+                    pretest=pretest,
+                    protected=protected,
+                )
+            except ValueError as e:
+                # skip_unpackable: a package the row builder refuses (e.g. a
+                # binary test fixture) is left out by id instead of failing.
+                if not source.get("skip_unpackable"):
+                    raise
+                shutil.rmtree(task)
+                log(
+                    source=source["name"],
+                    task=tid,
+                    status="skipped",
+                    reason=f"unpackable: {str(e).rsplit(': ', 1)[-1]}",
+                )
+                continue
             md = row["metadata"]
             md.update(resources(source, record))
             md["corpus"] = source["name"]

@@ -10,7 +10,8 @@
       "archives": [
         "data/tasks-clean_fast.tar"
       ],
-      "count": null
+      "count": null,
+      "skip_unpackable": true
     },
     {
       "name": "agentpick-repair",
@@ -21,7 +22,8 @@
       "archives": [
         "data/tasks-repair.tar"
       ],
-      "count": null
+      "count": null,
+      "skip_unpackable": true
     },
     {
       "name": "agentpick-calibforge-clean-fast",
@@ -32,7 +34,8 @@
       "archives": [
         "data/tasks-calibforge_clean_fast.tar"
       ],
-      "count": null
+      "count": null,
+      "skip_unpackable": true
     },
     {
       "name": "agentpick-calibforge-repair",
@@ -43,7 +46,8 @@
       "archives": [
         "data/tasks-calibforge_repair.tar"
       ],
-      "count": null
+      "count": null,
+      "skip_unpackable": true
     }
   ]
 }
