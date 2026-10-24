@@ -403,3 +403,37 @@ def test_eval_context_notice_reaches_the_agent(
         agent=agent,
     )
     assert seen == [shown]
+
+
+@pytest.mark.parametrize(
+    "readout_eval_budget, group_id, max_turns, budget",
+    [
+        (False, -1, 60, 0),
+        (True, -1, None, 3600),
+        (True, 0, 60, 0),
+    ],
+)
+def test_bench_readout_eval_budget_keeps_the_eval_budget_for_validation_only(
+    monkeypatch, readout_eval_budget, group_id, max_turns, budget
+):
+    rollouter = _rollouter(shadow=False)
+    rollouter._bench = rollouter_mod._BenchMode(
+        max_turns=60, readout_eval_budget=readout_eval_budget
+    )
+    seen = []
+
+    async def recording_agent(task):
+        seen.append(task)
+        return AgentRun(turns=1, submitted=True, finish_reason="submit")
+
+    monkeypatch.setattr(rollouter, "_agent_budget_sec", lambda sample: 3600)
+    _run(
+        rollouter,
+        monkeypatch,
+        submitted=True,
+        grade=_grade(1.0, []),
+        group_id=group_id,
+        agent=recording_agent,
+    )
+    assert seen and seen[0].max_turns == max_turns
+    assert seen[0].time_budget_sec == budget

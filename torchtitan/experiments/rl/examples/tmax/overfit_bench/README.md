@@ -35,8 +35,13 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
   unless the rewriter seeds the pool before training starts (see Running a job).
 - **Readout**: the original task row, held in `data/evalsets/original.jsonl`
   and never served from the mix, 16 attempts every 5 steps. A readout attempt
-  has the same budget as a training attempt (60 turns, no wall-clock
-  deadline), so the original is read under the conditions the policy trains in.
+  has the TB2.1 eval's budget, not training's (`SWE_BENCH_READOUT_EVAL_BUDGET`):
+  120 turns, the task's agent timeout raised to 7200 s, a 63488-token context,
+  as `runbook/rebench_*.env` evaluates. An attempt that ends without submitting
+  is graded and scored at the verifier's verdict, as Harbor does
+  (`SWE_EVAL_GRADE_UNSUBMITTED`); `validation/strict_reward_mean` keeps the
+  submit-only score. Jobs before 2026-10-25 read the original under the
+  training budget (60 turns, submit-only).
   Reported as
   pass@5 per validation, the first step with any pass, and the first step from
   which pass@5 stays at or above 0.5 for three validations in a row.
