@@ -1497,7 +1497,7 @@ def test_traces_spec_follows_the_attempts_harness(tmp_path):
     attempt = tmp_path / "attempt-01.jsonl"
     attempt.write_text(json.dumps({"agent": "miniswe"}) + "\n")
     spec = evolve_codex._traces_spec(tmp_path)
-    assert "mini-swe-agent" in spec and "keystrokes" not in spec
+    assert "mini-swe-agent" in spec and "keystrokes (a list" not in spec
     for header in ({"agent": "terminus"}, {"task": "t"}):
         attempt.write_text(json.dumps(header) + "\n")
         assert evolve_codex._traces_spec(tmp_path) == evolve_codex._TRACES_SPEC

@@ -1393,7 +1393,13 @@ terminal, a 120 s limit per command). Every later line is one turn, in order:
 turn, raw (the agent's reply: reasoning, then the bash block), output (the
 command's <returncode> and <output>; empty on the last turn), think. A reply
 without exactly one bash block ran nothing and got a format error back. The
-episode ends when a command prints COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT.""",
+episode ends when a command prints COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT.
+The student meets the rewritten task the same way, so keep it solvable like
+that: nothing that only an interactive terminal can do (an editor, a REPL, a
+prompt waiting for an answer) and no single step that must run in the
+foreground for more than 120 s; long work has to be able to run in the
+background and be checked later. The reference solution may still be replayed
+as keystrokes in a terminal; that does not change what the student can do.""",
     )
     .replace("(.keystrokes // [.raw])", "[.raw]")
     .replace("joined keystrokes", "joined replies")
