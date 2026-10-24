@@ -80,7 +80,9 @@ def test_disabled_pending_tracking_preserves_generic_lineage_contract(tmp_path):
 def test_controller_heartbeat_closes_on_success_or_interruption(tmp_path, crash):
     async def run():
         controller = object.__new__(Controller)
-        controller.config = SimpleNamespace(training_heartbeat_interval_sec=0.01)
+        controller.config = SimpleNamespace(
+            training_heartbeat_interval_sec=0.01, rollout_worker_ping_interval_sec=0
+        )
         controller.training_lineage = TrainingLineageRecorder(dump_dir=str(tmp_path))
         controller._training_activity_phase = "starting"
         controller._trainer_policy_version = 3

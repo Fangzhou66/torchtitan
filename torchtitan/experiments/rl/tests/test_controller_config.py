@@ -19,6 +19,8 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(
         **{
             "training_heartbeat_interval_sec": 0,
+            "rollout_worker_ping_interval_sec": 60.0,
+            "rollout_worker_ping_timeout_sec": 120.0,
             "num_generators": 1,
             "num_eval_generators": 0,
             "num_eval_rollout_workers": 0,

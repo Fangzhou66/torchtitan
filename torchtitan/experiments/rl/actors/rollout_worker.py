@@ -29,8 +29,10 @@ Only two payloads cross the Monarch RPC boundary: the raw ``sample`` in, and the
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -140,6 +142,52 @@ class RolloutWorker(Actor):
             )
         self._rollouter: Rollouter = rollouter_config.build()
         self._generator_router: InterGeneratorRouter | None = None
+        self._stall_dump_path = ""
+        self._stall_watch: asyncio.Task | None = None
+
+    def _start_stall_dump(self) -> None:
+        """Write every thread's stack to a local file if this loop stalls.
+
+        faulthandler's timer runs on its own C thread, so the dump lands even
+        when the event loop or the GIL is stuck; the loop re-arms it while
+        healthy. The file sits on the controller host (workers are spawned
+        there), where the controller reads it when a ping goes unanswered --
+        nothing goes through log forwarding, which may be what is stuck.
+        """
+        stall_dir = os.path.join(tempfile.gettempdir(), "torchtitan_worker_stalls")
+        os.makedirs(stall_dir, exist_ok=True)
+        self._stall_dump_path = os.path.join(stall_dir, f"{os.getpid()}.txt")
+        # Unbuffered: faulthandler writes the fd directly from its own thread.
+        dump_file = open(self._stall_dump_path, "w+b", buffering=0)  # noqa: SIM115
+        fd = dump_file.fileno()
+        # Dump before the controller's ping deadline, so the stacks are there to read.
+        dump_after = 0.75 * self.config.rollout_worker_ping_timeout_sec
+        rearm_every = min(30.0, dump_after / 3)
+        log = logging.getLogger("torchtitan")
+
+        async def rearm() -> None:
+            while True:
+                faulthandler.dump_traceback_later(
+                    dump_after, repeat=True, file=dump_file
+                )
+                await asyncio.sleep(rearm_every)
+                size = os.fstat(fd).st_size
+                if size:
+                    # A stall that ended: report it and start the file over.
+                    stacks = os.pread(fd, min(size, 64 * 1024), max(0, size - 64 * 1024))
+                    log.warning(
+                        f"[rollout_worker] event loop stalled over {dump_after:.0f}s; "
+                        f"stacks:\n{stacks.decode('utf-8', errors='replace')}"
+                    )
+                    os.ftruncate(fd, 0)
+                    os.lseek(fd, 0, os.SEEK_SET)
+
+        self._stall_watch = asyncio.create_task(rearm())
+
+    @endpoint
+    async def ping(self) -> str:
+        """Answer the controller's liveness check with this worker's stall-dump path."""
+        return self._stall_dump_path
 
     @endpoint
     async def setup(self, generators: list) -> None:
@@ -176,6 +224,7 @@ class RolloutWorker(Actor):
         self._generator_router = self.config.generator_router.build(
             generators=generators
         )
+        self._start_stall_dump()
 
     @endpoint
     async def run_group(

@@ -149,11 +149,12 @@ class InterGeneratorRouter(Configurable):
         if now - self._load_log_at < 30:
             return
         self._load_log_at = now
+        # Loads only: every replica's actor repr was ~70% of a run's console
+        # bytes, forwarded from every rollout worker every 30 s.
         logger.info(
-            "[routing] controller replicas=%d reserved_load=%s actors=%s",
+            "[routing] controller replicas=%d reserved_load=%s",
             len(self._generators),
             [h.reserved_load for h in self._generators],
-            [str(h.actor) for h in self._generators],
         )
 
     async def route(

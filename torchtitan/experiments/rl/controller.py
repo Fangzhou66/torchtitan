@@ -154,6 +154,20 @@ from torchtitan.protocols.model_spec import ModelSpec
 logger = logging.getLogger(__name__)
 
 
+def _read_tail(path: str | None, max_bytes: int = 64 * 1024) -> str:
+    """The end of a local text file, or a note saying why there is none."""
+    if not path:
+        return "(no dump path: the worker never answered a ping)"
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - max_bytes))
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError as e:
+        return f"(could not read {path}: {e})"
+    return text or f"({path} is empty: no stall dump written yet)"
+
+
 def _split_rollout_concurrency(
     global_concurrency: int,
     num_workers: int,
@@ -616,6 +630,17 @@ class Controller(Configurable):
         worker assignment. The global rollout concurrency is split across workers.
         """
 
+        rollout_worker_ping_interval_sec: float = 60.0
+        """How often the controller pings every RolloutWorker; 0 turns it off.
+
+        A worker that misses a ping is reported with the thread stacks its own
+        stall dump wrote, long before Monarch's supervision watchdog gives up on
+        it. Reporting only: the worker is left running.
+        """
+
+        rollout_worker_ping_timeout_sec: float = 120.0
+        """How long a ping may go unanswered before the worker is reported."""
+
         torchstore_reset_interval: int = 0
         """Compatibility field. Runtime TorchStore recycling is unsupported."""
 
@@ -635,6 +660,10 @@ class Controller(Configurable):
         def __post_init__(self):
             if self.training_heartbeat_interval_sec < 0:
                 raise ValueError("training_heartbeat_interval_sec must be nonnegative")
+            if self.rollout_worker_ping_interval_sec < 0:
+                raise ValueError("rollout_worker_ping_interval_sec must be nonnegative")
+            if self.rollout_worker_ping_timeout_sec <= 0:
+                raise ValueError("rollout_worker_ping_timeout_sec must be positive")
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
@@ -1785,7 +1814,73 @@ class Controller(Configurable):
             )
             await asyncio.sleep(self.config.training_heartbeat_interval_sec)
 
+    async def _ping_rollout_worker(self, worker) -> str | None:
+        """The worker's stall-dump path, or None if it did not answer in time."""
+        try:
+            return await asyncio.wait_for(
+                worker.ping.call_one(),
+                timeout=self.config.rollout_worker_ping_timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            return None
+        except Exception as e:  # noqa: BLE001 - a failed ping is itself the report
+            logger.warning(f"[worker_watch] ping failed: {type(e).__name__}: {e}")
+            return None
+
+    async def _watch_rollout_workers(self) -> None:
+        """Report a RolloutWorker that stops answering, with its thread stacks.
+
+        Workers run on this host, so their stall dumps are local files that can
+        be read here even while the worker (or its log forwarding) is stuck.
+        """
+        workers = [
+            (f"rollout_worker_{i}", w) for i, w in enumerate(self._rollout_workers)
+        ] + [
+            (f"eval_rollout_worker_{i}", w)
+            for i, w in enumerate(self._eval_rollout_workers)
+        ]
+        if not workers:
+            return
+        dump_paths: dict[str, str] = {}
+        silent_since: dict[str, float] = {}
+        while True:
+            await asyncio.sleep(self.config.rollout_worker_ping_interval_sec)
+            answers = await asyncio.gather(
+                *(self._ping_rollout_worker(w) for _, w in workers)
+            )
+            now = time.time()
+            for (name, _), answer in zip(workers, answers):
+                if answer is not None:
+                    dump_paths[name] = answer
+                    if name in silent_since:
+                        logger.warning(
+                            f"[worker_watch] {name} answers again after "
+                            f"{now - silent_since.pop(name):.0f}s"
+                        )
+                    continue
+                if name in silent_since:
+                    continue
+                silent_since[name] = now
+                logger.warning(
+                    f"[worker_watch] {name} did not answer a ping within "
+                    f"{self.config.rollout_worker_ping_timeout_sec:.0f}s; "
+                    f"its stall dump:\n{_read_tail(dump_paths.get(name))}"
+                )
+
     async def run(self) -> None:
+        watch = (
+            asyncio.create_task(self._watch_rollout_workers())
+            if self.config.rollout_worker_ping_interval_sec > 0
+            else None
+        )
+        try:
+            await self._run_with_heartbeat()
+        finally:
+            if watch is not None:
+                watch.cancel()
+                await asyncio.gather(watch, return_exceptions=True)
+
+    async def _run_with_heartbeat(self) -> None:
         if self.config.training_heartbeat_interval_sec == 0:
             await self._run()
             return

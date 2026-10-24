@@ -36,7 +36,8 @@ def test_setup_installs_a_working_pool_on_the_worker_loop(
 
     supplied_generators = generators
     worker = SimpleNamespace(
-        config=SimpleNamespace(generator_router=SimpleNamespace(build=build))
+        config=SimpleNamespace(generator_router=SimpleNamespace(build=build)),
+        _start_stall_dump=lambda: None,
     )
 
     async def exercise():
@@ -69,7 +70,8 @@ def test_worker_setup_leaves_the_controller_loop_pool_unchanged(monkeypatch):
     worker = SimpleNamespace(
         config=SimpleNamespace(
             generator_router=SimpleNamespace(build=lambda **kwargs: object())
-        )
+        ),
+        _start_stall_dump=lambda: None,
     )
     try:
         worker_loop.run_until_complete(

@@ -269,6 +269,7 @@ def test_zero_step_run_only_validates_once(run_async: bool) -> None:
         controller = object.__new__(Controller)
         controller.config = SimpleNamespace(
             training_heartbeat_interval_sec=0,
+            rollout_worker_ping_interval_sec=0,
             async_loop=SimpleNamespace(
                 num_training_steps=0,
                 validation=ValidationConfig(run_async=run_async),
