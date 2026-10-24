@@ -209,3 +209,26 @@ def test_dash_key_reaches_a_real_tmux():
         assert "-EOF" in pane
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session])
+
+
+def test_control_command_runs_again_when_its_status_never_arrived(tmp_path):
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [TimeoutError("status unavailable"), (0, "1|2|s\n", "")]
+    sandbox.last_exec_stats = {}
+    env = _SandboxEnvironment(sandbox, agent_dir=tmp_path / "agent")
+    result = asyncio.run(env._terminal_exec("tmux display-message -p x"))
+    assert (result.return_code, result.stdout) == (0, "1|2|s\n")
+    assert sandbox.exec.await_count == 2
+
+
+def test_control_command_is_not_rerun_after_other_sandbox_errors(tmp_path):
+    from torchtitan.experiments.rl.harness.agents.terminus import (
+        _SandboxExecutionError,
+    )
+
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [RuntimeError("sandbox gone"), (0, "", "")]
+    env = _SandboxEnvironment(sandbox, agent_dir=tmp_path / "agent")
+    with pytest.raises(_SandboxExecutionError):
+        asyncio.run(env._terminal_exec("tmux display-message -p x"))
+    assert sandbox.exec.await_count == 1

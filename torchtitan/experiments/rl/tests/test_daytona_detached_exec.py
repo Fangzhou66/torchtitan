@@ -204,3 +204,64 @@ def test_launch_only_reply_falls_back_to_the_files(monkeypatch):
     rc, out, _ = _run(sandbox)
     assert (rc, out) == (0, "from-file\n")
     assert sandbox.last_exec_stats["inline"] is False
+
+
+class _ClaimFS(_FakeFS):
+    """No status file until ``reveal``; the claim exists only if ``claimed``."""
+
+    def __init__(self, *, claimed: bool):
+        super().__init__(b"0\n", b"relaunched\n", appear_after=10**6)
+        self.claimed = claimed
+        self.claim_lookups = 0
+
+    async def get_file_info(self, path):
+        if path.startswith(daytona_mod._EXEC_CLAIM_DIR):
+            self.claim_lookups += 1
+            if not self.claimed:
+                raise FileNotFoundError(path)
+            return object()
+        return await super().get_file_info(path)
+
+    def reveal(self):
+        self.appear_after = 0
+        self.polls = 0
+
+
+def test_launch_that_never_started_is_sent_again(monkeypatch):
+    fs = _ClaimFS(claimed=False)
+    launches: list[str] = []
+
+    async def exec_(command, timeout=None):
+        launches.append(command)
+        if len(launches) == 2:
+            fs.reveal()
+        return None
+
+    sandbox = _sandbox(monkeypatch, exec_side_effects=exec_, fs=fs)
+    monkeypatch.setattr(daytona_mod, "_CLAIM_CHECK_AFTER_SEC", (0.0, 0.0))
+    rc, out, _ = _run(sandbox, timeout=5)
+    assert (rc, out) == (0, "relaunched\n")
+    assert len(launches) == 2 and launches[0] == launches[1]
+    assert sandbox.issue_tracker.counts.get("command_launch_lost") == 1
+    assert "command_status_timeout" not in sandbox.issue_tracker.counts
+
+
+def test_started_wrapper_without_status_is_never_relaunched(monkeypatch):
+    fs = _ClaimFS(claimed=True)
+    sandbox = _sandbox(monkeypatch, exec_side_effects=[None], fs=fs)
+    monkeypatch.setattr(daytona_mod, "_CLAIM_CHECK_AFTER_SEC", (0.0, 0.0))
+    with pytest.raises(TimeoutError, match="claim=present relaunches=0"):
+        _run(sandbox, timeout=1)
+    assert sandbox._sb.process.exec.await_count == 1
+    assert fs.claim_lookups == 1
+    assert sandbox.issue_tracker.counts.get("command_status_timeout") == 1
+
+
+def test_relaunches_are_bounded(monkeypatch):
+    fs = _ClaimFS(claimed=False)
+    sandbox = _sandbox(monkeypatch, exec_side_effects=lambda *a, **k: None, fs=fs)
+    monkeypatch.setattr(daytona_mod, "_CLAIM_CHECK_AFTER_SEC", (0.0, 0.0))
+    with pytest.raises(TimeoutError, match="claim=absent relaunches=2"):
+        _run(sandbox, timeout=1)
+    assert sandbox._sb.process.exec.await_count == 3
+    assert sandbox.issue_tracker.counts.get("command_launch_lost") == 2

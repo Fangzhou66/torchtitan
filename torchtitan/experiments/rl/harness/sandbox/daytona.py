@@ -80,6 +80,10 @@ _FINAL_RESULT_PROBE_TIMEOUT_SEC = 5.0
 # in ~400 ms and a long one costs a poll every 2 s.
 _RESULT_POLL_DELAYS_SEC = (0.1, 0.2, 0.4, 0.8, 1.6)
 _RESULT_POLL_INTERVAL_SEC = 2.0
+# Seconds after a launch with no status file at which the command's claim is
+# looked up; a missing claim means the wrapper never started, and the same
+# launch is sent again (the claim keeps that from running the body twice).
+_CLAIM_CHECK_AFTER_SEC = (10.0, 30.0)
 # The launch request waits in the sandbox up to this long for the status file
 # and, when the output is at most this many bytes, returns both in its own
 # response (base64, so bytes survive the daemon's JSON encoding). Most of what
@@ -1369,10 +1373,20 @@ class DaytonaSandbox:
         )
 
         launched = False
+        launched_at = 0.0
+        launch_reply = ""
+        # "absent" / "present" once looked up after a launch; "" before that.
+        claim_state = ""
+        relaunches = 0
         submission_error: Exception | None = None
         inline: tuple[int, bytes] | None = None
         stats: dict[str, Any] = {"inline": False, "launch_s": 0.0, "wait_s": 0.0, "read_s": 0.0}
         started = loop.time()
+        claim_path = f"{_EXEC_CLAIM_DIR}/{command_key}"
+
+        def _launch_reply(response: Any) -> str:
+            text = str(getattr(response, "result", None) or "")
+            return f"exit={getattr(response, 'exit_code', None)} result={text[-80:]!r}"
 
         def _parse_inline(response: Any) -> tuple[int, bytes] | None:
             text = getattr(response, "result", None) or ""
@@ -1451,6 +1465,23 @@ class DaytonaSandbox:
                     f"daytona command wrote invalid status {status_text!r}"
                 ) from e
 
+        async def claim_exists() -> bool | None:
+            """Whether the wrapper took its claim; None when the lookup failed."""
+            self._raise_if_sandbox_lost()
+            try:
+                await asyncio.wait_for(
+                    self._sb.fs.get_file_info(claim_path),
+                    timeout=float(_SESSION_RPC_TIMEOUT_SEC),
+                )
+            except Exception as e:
+                if _is_missing_file_error(e):
+                    return False
+                if _is_sandbox_gone_error(e):
+                    self._mark_sandbox_lost(e, phase="command_poll")
+                    raise
+                return None
+            return True
+
         exit_code = None
         for attempt, delay in enumerate(_COMMAND_SUBMIT_DELAYS_SEC):
             if attempt:
@@ -1480,6 +1511,8 @@ class DaytonaSandbox:
                 )
                 stats["launch_s"] += loop.time() - t_launch
                 launched = True
+                launched_at = loop.time()
+                launch_reply = _launch_reply(response)
                 inline = _parse_inline(response)
                 break
             except Exception as e:
@@ -1521,17 +1554,79 @@ class DaytonaSandbox:
                         command_id=command_key,
                     )
                     raise submission_error
+                if launched and not claim_state:
+                    found = await claim_exists()
+                    if found is not None:
+                        claim_state = "present" if found else "absent"
+                detail = (
+                    f"claim={claim_state or 'unknown'} relaunches={relaunches} "
+                    f"launch {launch_reply or 'unconfirmed'}"
+                )
                 self._record_issue(
                     "command_status_timeout",
                     phase="command_poll",
-                    error="command status remained unavailable until the deadline",
+                    error=(
+                        "command status remained unavailable until the deadline; "
+                        + detail
+                    ),
                     command_id=command_key,
                 )
                 raise TimeoutError(
                     "daytona exec status unavailable after "
-                    f"{command_timeout + _COMMAND_KILL_GRACE_SEC + _SESSION_POLL_GRACE_SEC:.0f}s "
-                    f"without replaying the command body; cmd={full[:80]}"
+                    f"{loop.time() - started:.0f}s "
+                    f"without replaying the command body ({detail}); cmd={full[:80]}"
                 )
+            if (
+                launched
+                and claim_state != "present"
+                and relaunches < len(_CLAIM_CHECK_AFTER_SEC)
+                and loop.time() - launched_at >= _CLAIM_CHECK_AFTER_SEC[relaunches]
+            ):
+                found = await claim_exists()
+                if found:
+                    claim_state = "present"
+                elif found is False:
+                    # The wrapper never started; the claim makes a resend safe
+                    # even if the first launch is still on its way.
+                    claim_state = "absent"
+                    relaunches += 1
+                    self._record_issue(
+                        "command_launch_lost",
+                        phase="command_poll",
+                        error=f"no claim after the launch ({launch_reply}); relaunching",
+                        recovered=True,
+                        command_id=command_key,
+                        attempt=relaunches,
+                        max_attempts=len(_CLAIM_CHECK_AFTER_SEC),
+                    )
+                    try:
+                        response = await asyncio.wait_for(
+                            self._sb.process.exec(launch, timeout=_LAUNCH_RPC_TIMEOUT_SEC),
+                            timeout=float(_LAUNCH_RPC_TIMEOUT_SEC) + 5.0,
+                        )
+                    except Exception as e:
+                        if _is_sandbox_gone_error(e):
+                            self._mark_sandbox_lost(e, phase="execute_submit")
+                            raise
+                        if not _is_transient_rpc_error(e) and not isinstance(
+                            e, asyncio.TimeoutError
+                        ):
+                            raise
+                    else:
+                        launch_reply = _launch_reply(response)
+                        inline = _parse_inline(response)
+                        if inline is not None:
+                            exit_code, output = inline
+                            stats["inline"] = True
+                            break
+                    launched_at = loop.time()
+                    deadline = max(
+                        deadline,
+                        launched_at
+                        + command_timeout
+                        + _COMMAND_KILL_GRACE_SEC
+                        + _SESSION_POLL_GRACE_SEC,
+                    )
             delay = (
                 _RESULT_POLL_DELAYS_SEC[polls]
                 if polls < len(_RESULT_POLL_DELAYS_SEC)

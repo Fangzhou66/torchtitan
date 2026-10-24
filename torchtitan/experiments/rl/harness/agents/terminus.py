@@ -646,7 +646,16 @@ class _SandboxEnvironment:
     async def _terminal_exec(self, command: str):
         # Control commands share the sandbox CPU with the agent's processes.
         # The enclosing agent deadline still bounds this wait.
-        return await self._exec_raw(command, timeout_sec=60)
+        try:
+            return await self._exec_raw(command, timeout_sec=60)
+        except _SandboxExecutionError as e:
+            # Every control command here is a query or an idempotent setting,
+            # so one more run (a fresh command key) is safe when the first
+            # one's status never arrived.
+            if not isinstance(e.__cause__, TimeoutError):
+                raise
+            logger.warning(f"[terminus] retrying control command after {e}")
+            return await self._exec_raw(command, timeout_sec=60)
 
     async def exec(
         self,
