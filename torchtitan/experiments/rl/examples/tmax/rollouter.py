@@ -943,6 +943,7 @@ def _write_rollout_record(
     exec_trace: list[dict],
     secs: float,
     budget_sec: int,
+    agent: str = "",
     started: str,
     verifier: dict | None = None,
     ctrf: dict | None = None,
@@ -1021,6 +1022,8 @@ def _write_rollout_record(
             "exec": list(exec_trace),
             "verifier": verifier,
             "ctrf": ctrf,
+            # The harness that produced the turns (TMAX_AGENT).
+            "agent": agent,
         }
         rollout_record.write_record(path, header, turns)
     except Exception as e:  # noqa: BLE001 -- a lost record must not fail a graded rollout
@@ -2660,6 +2663,7 @@ class TMaxRollouter(Rollouter):
                 exec_trace=exec_trace,
                 secs=time.monotonic() - started_at,
                 budget_sec=budget_sec,
+                agent=self._agent_name,
                 started=layout.stamp(started_wall),
                 verifier=verifier,
                 ctrf=ctrf,

@@ -1376,9 +1376,49 @@ these are enough:
 A line number from grep -n over the joined keystrokes is not a turn number."""
 
 
+# The same paragraph for attempts the mini-swe-agent harness produced: no
+# keystrokes, every turn a THOUGHT plus one ```bash block run as its own
+# non-interactive process. The record header's "agent" says which harness ran.
+_MINISWE_TRACES_SPEC = (
+    _TRACES_SPEC.replace(
+        """Every later line is one turn, in order: turn, keystrokes (a list:
+what the agent typed; empty on a closing turn), task_complete, output (the
+terminal after it; empty on the last turn, where the episode ended),
+analysis, plan, think. A turn with no parseable response has raw instead of
+keystrokes.""",
+        """These attempts ran under mini-swe-agent: each turn
+the agent wrote its reasoning and exactly one ```bash block, which ran as its
+own non-interactive bash process (no shell state carried between turns, no
+terminal, a 120 s limit per command). Every later line is one turn, in order:
+turn, raw (the agent's reply: reasoning, then the bash block), output (the
+command's <returncode> and <output>; empty on the last turn), think. A reply
+without exactly one bash block ran nothing and got a format error back. The
+episode ends when a command prints COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT.""",
+    )
+    .replace("(.keystrokes // [.raw])", "[.raw]")
+    .replace("joined keystrokes", "joined replies")
+)
+assert _MINISWE_TRACES_SPEC.count("mini-swe-agent") == 1
+
+
+def _attempts_agent(traces: Path) -> str:
+    """The harness named in the first attempt record's header ("" if none)."""
+    for path in sorted(traces.glob("attempt-*.jsonl")):
+        try:
+            with path.open() as f:
+                return str(json.loads(f.readline()).get("agent") or "")
+        except (OSError, ValueError, AttributeError):
+            return ""
+    return ""
+
+
 def _traces_spec(traces: Path) -> str:
     """The format paragraph, only when the package carries attempt records."""
-    return _TRACES_SPEC if any(traces.glob("attempt-*.jsonl")) else ""
+    if not any(traces.glob("attempt-*.jsonl")):
+        return ""
+    if _attempts_agent(traces) == "miniswe":
+        return _MINISWE_TRACES_SPEC
+    return _TRACES_SPEC
 
 
 # --------------------------------------------------------------------------

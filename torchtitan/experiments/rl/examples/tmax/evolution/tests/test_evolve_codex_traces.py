@@ -1486,3 +1486,18 @@ def test_hardening_bisects_after_an_underpredicted_withdrawal():
     for g in (ec._STUDENT_HARDER_GUIDANCE, ec._CALIBRATION_GUIDANCE):
         assert "withdraws at least half of the help that still separates" in g
         assert "including help the\nattempts still use" in g
+
+
+def test_traces_spec_follows_the_attempts_harness(tmp_path):
+    import json
+
+    import evolve_codex
+
+    assert evolve_codex._traces_spec(tmp_path) == ""
+    attempt = tmp_path / "attempt-01.jsonl"
+    attempt.write_text(json.dumps({"agent": "miniswe"}) + "\n")
+    spec = evolve_codex._traces_spec(tmp_path)
+    assert "mini-swe-agent" in spec and "keystrokes" not in spec
+    for header in ({"agent": "terminus"}, {"task": "t"}):
+        attempt.write_text(json.dumps(header) + "\n")
+        assert evolve_codex._traces_spec(tmp_path) == evolve_codex._TRACES_SPEC
