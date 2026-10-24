@@ -51,6 +51,10 @@ Controller (one asyncio loop)
            one `bash` tool only; persistent shell (cd/export stick)
            each action -> sb.exec in the sandbox; observation head/tail-truncated
            agent submits by `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+        miniswe            -> harness/agents/miniswe.py, mini-swe-agent v1.17.5's
+           text loop: THOUGHT + one ```bash block per turn, each run as its own
+           non-interactive bash process (no tmux, no shell state between turns);
+           submits by `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
       grade_tmax(...)  upload fixtures -> `bash /tests/test.sh` -> /logs/verifier/reward.txt
   RewardTMax -> advantage (group-centered) -> one packed TITO episode -> DPPO backward
 ```
@@ -314,10 +318,10 @@ Everything below is read from the environment in `config_registry.py` /
 | `SWE_GROUP_SIZE` / `SWE_NUM_GROUPS_PER_TRAIN_STEP` / `SWE_OFFPOLICY_STEPS` | 32 / 8 / 4 | The async/GRPO shape |
 | `SWE_LOSS` | `dppo` | `dapo` or `grpo` for an A/B |
 | `SWE_DPPO_RATIO_CAP` | 0 (off) | Truncated-IS cap; 2 tames a residual GDN train/infer logprob tail |
-| `TMAX_AGENT` | `terminus` | Agent scaffold. `terminus` is harbor's Terminus-2 (README_TERMINALWORLD.md); `vanillux` is the one-command loop |
+| `TMAX_AGENT` | `terminus` | Agent scaffold. `terminus` is harbor's Terminus-2 (README_TERMINALWORLD.md); `vanillux` is the one-command loop; `miniswe` is mini-swe-agent's text loop (`harness/agents/miniswe.py`) |
 | `TMAX_TERMINUS_MAX_TURNS` | 64 | Max agent turns per episode under `terminus` |
 | `TMAX_CALL_LIMIT` | 64 | Max bash actions per episode (the reference run's `--max_steps`). Read by `vanillux_loop.py` only -- inert under the default agent |
-| `TMAX_EXEC_TIMEOUT_SEC` | 120 | Per-command timeout; a foreground server can otherwise burn the budget |
+| `TMAX_EXEC_TIMEOUT_SEC` | 120 | Per-command timeout under `vanillux` and `miniswe`; a foreground server can otherwise burn the budget |
 | `TMAX_FORMAT_ERROR_FEEDBACK` | 0 | 0 = break on the first turn with no `bash` call (reference behavior) |
 | `SWE_VAL_SAMPLES` / `SWE_VAL_INTERVAL` | 32 / 20 | Held-out validation size and cadence; `SWE_VAL_SAMPLES=0` turns it off |
 | `SWE_HOLDOUT_N` | 0 | Training rows reserved as the validation slice. At 0 the recipe needs `SWE_TB2_VAL_DATA` or `SWE_VAL_SAMPLES=0`; see Run |
