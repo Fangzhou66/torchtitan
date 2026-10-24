@@ -36,8 +36,9 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
 - **Readout**: the original task row, held in `data/evalsets/original.jsonl`
   and never served from the mix, 16 attempts every 5 steps. A readout attempt
   has the TB2.1 eval's budget, not training's (`SWE_BENCH_READOUT_EVAL_BUDGET`):
-  120 turns, the task's agent timeout raised to 7200 s, a 63488-token context,
-  as `runbook/rebench_*.env` evaluates. An attempt that ends without submitting
+  300 turns, the task's agent timeout raised to 7200 s, a 160K context and no
+  context notice, as the current TB2.1 eval runs (run 1022's 160K validation
+  context; the RUNBOOK's 300-turn cap for a 160K eval). An attempt that ends without submitting
   is graded and scored at the verifier's verdict, as Harbor does
   (`SWE_EVAL_GRADE_UNSUBMITTED`); `validation/strict_reward_mean` keeps the
   submit-only score. Jobs before 2026-10-25 read the original under the
