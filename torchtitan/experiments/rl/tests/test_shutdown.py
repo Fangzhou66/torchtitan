@@ -106,6 +106,7 @@ def _make_stub_rl_trainer():
     class _StubConfig:
         async_loop = AsyncLoopConfig()
         isolate_rollout_artifacts = False
+        async_bookkeeping = False
         metrics = m.MetricsProcessor.Config()
         trainer = SimpleNamespace(checkpoint_training_data=False)
         dump_folder = "/tmp/test_rl"
