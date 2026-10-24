@@ -1381,9 +1381,11 @@ class TMaxRollouter(Rollouter):
         # Training and evaluation share Terminus unless a run explicitly selects
         # another scaffold with its corresponding action format.
         self._agent_name = os.environ.get("TMAX_AGENT", "terminus")
-        if self._agent_name != "vanillux":
-            # Import for the side effect of registering; only vanillux is wired
-            # in by the tmax module itself.
+        # Import for the side effect of registering; only vanillux is wired in by
+        # the tmax module itself.
+        if self._agent_name == "miniswe":
+            import torchtitan.experiments.rl.harness.agents.miniswe  # noqa: F401
+        elif self._agent_name != "vanillux":
             import torchtitan.experiments.rl.harness.agents.terminus  # noqa: F401
         self._time_budget_sec = config.time_budget_sec
         self._agent_budget_floor_sec = config.agent_budget_floor_sec
@@ -2238,16 +2240,19 @@ class TMaxRollouter(Rollouter):
                         workdir=sample.workdir,
                         timeout=verifier_sec or 120,
                     )
-                    try:
-                        _rc, _o, _e = await root_sb.exec(
-                            "command -v tmux >/dev/null 2>&1", check=False
-                        )
-                        if _rc != 0:
-                            _note_image_without_tmux(
-                                sample, group_id=group_id, rollout_idx=rollout_idx
+                    # mini-swe-agent never uses tmux, so an image without it is
+                    # no finding there.
+                    if self._agent_name != "miniswe":
+                        try:
+                            _rc, _o, _e = await root_sb.exec(
+                                "command -v tmux >/dev/null 2>&1", check=False
                             )
-                    except Exception:  # noqa: BLE001 -- never fail a rollout on this
-                        pass
+                            if _rc != 0:
+                                _note_image_without_tmux(
+                                    sample, group_id=group_id, rollout_idx=rollout_idx
+                                )
+                        except Exception:  # noqa: BLE001 -- never fail a rollout on this
+                            pass
                     # A TB4 image that declares its own user: the agent runs as
                     # that user, the harness (root_sb) stays root, as in Harbor.
                     agent_user = getattr(sample, "agent_user", "")
