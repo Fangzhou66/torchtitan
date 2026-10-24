@@ -1,0 +1,49 @@
+{
+  "seed": 20260928,
+  "sources": [
+    {
+      "name": "agentpick-clean-fast",
+      "repo": "Fzz1/tb-training-mix-agentpick",
+      "revision": "7dee55fe37cf5d2119539a7996d04c9fd558ca09",
+      "adapter": "tmax_reaudit",
+      "metadata": "data/clean_fast.parquet",
+      "archives": [
+        "data/tasks-clean_fast.tar"
+      ],
+      "count": null
+    },
+    {
+      "name": "agentpick-repair",
+      "repo": "Fzz1/tb-training-mix-agentpick",
+      "revision": "7dee55fe37cf5d2119539a7996d04c9fd558ca09",
+      "adapter": "tmax_reaudit",
+      "metadata": "data/repair.parquet",
+      "archives": [
+        "data/tasks-repair.tar"
+      ],
+      "count": null
+    },
+    {
+      "name": "agentpick-calibforge-clean-fast",
+      "repo": "Fzz1/tb-training-mix-agentpick",
+      "revision": "7dee55fe37cf5d2119539a7996d04c9fd558ca09",
+      "adapter": "tmax_reaudit",
+      "metadata": "data/calibforge_clean_fast.parquet",
+      "archives": [
+        "data/tasks-calibforge_clean_fast.tar"
+      ],
+      "count": null
+    },
+    {
+      "name": "agentpick-calibforge-repair",
+      "repo": "Fzz1/tb-training-mix-agentpick",
+      "revision": "7dee55fe37cf5d2119539a7996d04c9fd558ca09",
+      "adapter": "tmax_reaudit",
+      "metadata": "data/calibforge_repair.parquet",
+      "archives": [
+        "data/tasks-calibforge_repair.tar"
+      ],
+      "count": null
+    }
+  ]
+}
