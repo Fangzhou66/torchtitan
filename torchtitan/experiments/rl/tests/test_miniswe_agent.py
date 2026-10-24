@@ -316,6 +316,29 @@ def test_a_sandbox_failure_is_raised_not_scored():
         _run(_Adapter([]), sandbox)
 
 
+def test_a_command_whose_status_never_arrives_reads_as_a_timeout(monkeypatch):
+    monkeypatch.setattr(miniswe, "_EXEC_TIMEOUT", 0)
+    sandbox = _Sandbox([(0, "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n")])
+    real_exec = sandbox.exec
+    calls = {"n": 0}
+
+    async def flaky(cmd, **kwargs):
+        if cmd != miniswe._UNAME and calls["n"] == 0:
+            calls["n"] += 1
+            raise TimeoutError(
+                "daytona exec status unavailable after 251s without replaying "
+                "the command body (claim=present)"
+            )
+        return await real_exec(cmd, **kwargs)
+
+    sandbox.exec = flaky
+    adapter = _Adapter([_reply("```bash\nstrings /bin/ls\n```"), _reply(_SUBMIT)])
+    run = _run(adapter, sandbox)
+    assert (run.submitted, run.finish_reason) == (True, "submit")
+    shown = adapter.requests[1]["messages"][-1]["content"]
+    assert "timed out" in shown.lower()
+
+
 # ---- what the rollouter reads ------------------------------------------------
 
 

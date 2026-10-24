@@ -88,6 +88,10 @@ _TIMEOUT_EXIT_CODES = (124, 137, 143)
 # the budget, give or take a rendering token.
 _CONTEXT_TAIL_MARGIN = 64
 _UNAME = "uname -s; uname -r; uname -v; uname -m"
+# A launched command whose exit status never appeared before its deadline (see
+# daytona._detached_exec): the command outlived its timeout, typically in a
+# stalled sandbox. To the agent that is a command that timed out.
+_STATUS_UNAVAILABLE = "daytona exec status unavailable"
 
 
 @functools.cache
@@ -144,6 +148,8 @@ class _Episode:
         self.turns = 0
         self.finish_reason = "stopped_early"
         self.exec_trace: list[dict] = []
+        # Commands whose exit status never arrived, answered as timeouts.
+        self.status_timeouts = 0
         # AgentRun.format_breakdown, in the shape the tmax format metrics read.
         # A turn without exactly one block counts as "truncated" when it hit the
         # generation cap, "no_commands" with zero blocks, "other" with several.
@@ -175,9 +181,18 @@ class _Episode:
         """Run one command; trace it in the shape the rollout record's ``exec``
         holds (see AgentRun.exec_trace)."""
         started_at = time.time()
-        exit_code, stdout, _stderr = await self._task.sandbox.exec(
-            command, env=ENV, timeout=timeout, check=False
-        )
+        try:
+            exit_code, stdout, _stderr = await self._task.sandbox.exec(
+                command, env=ENV, timeout=timeout, check=False
+            )
+        except TimeoutError as e:
+            if command == _UNAME or not str(e).startswith(_STATUS_UNAVAILABLE):
+                raise
+            # Shown as TIMEOUT_TEMPLATE: the wait already exceeded the timeout.
+            # A sandbox that is really gone fails the next command instead.
+            logger.warning(f"[miniswe] {self._task.session_id}: {e}")
+            self.status_timeouts += 1
+            exit_code, stdout = 124, ""
         secs = time.time() - started_at
         stats = getattr(self._task.sandbox, "last_exec_stats", None) or {}
         self.exec_trace.append(
