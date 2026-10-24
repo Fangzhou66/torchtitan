@@ -47,7 +47,11 @@ file longlongcheck packages carry, because evolution reads the solution from the
 package only. The training row does not change. A source with
 `"skip_unsolved": true` leaves out every task that ends up with no reference
 solution, and `"skip_unpackable": true` every package the row builder refuses
-(for example a binary test fixture); both are logged by id in the build log. `data_agentpick.json` does not set it: its 104 unsolved repair rows
+(for example a binary test fixture); both are logged by id in the build log.
+`"exclude": [<task id>, ...]` leaves out listed tasks by id (logged the same
+way). `data_agentpick_fast_audited.json` is `data_agentpick_fast.json` minus the
+107 rows a 2026-10-24 audit found broken (wrong hardcoded answers, impossible
+tasks, rewards without the work, live third-party repos, agent-plantable tests). `data_agentpick.json` does not set it: its 104 unsolved repair rows
 are imported without one, and the evolution loop's first easier rewrite of each
 writes it (`EVOLVE_LOOP.md`, step 2).
 
