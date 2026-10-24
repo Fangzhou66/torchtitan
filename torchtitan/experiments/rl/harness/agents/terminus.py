@@ -691,18 +691,16 @@ class _SandboxEnvironment:
     def _end_send_keys_options(command: str) -> str:
         """Harbor sends keys as ``tmux send-keys -t <session> <keys>``, so a key
         that starts with ``-`` (a heredoc line like ``-EOF``) reads as a flag and
-        tmux rejects the whole delivery. ``--`` ends the options."""
+        tmux rejects the whole delivery. ``--`` ends the options. Harbor never
+        writes ``--`` itself, so a leading ``--`` is the model's key and still
+        needs one in front of it."""
         try:
             tokens = shlex.split(command)
         except ValueError:
             return command
         offset = 2 if tokens[:1] == ["timeout"] else 0
         head = tokens[offset : offset + 4]
-        if (
-            len(tokens) < offset + 5
-            or head[:3] != ["tmux", "send-keys", "-t"]
-            or tokens[offset + 4] == "--"
-        ):
+        if len(tokens) < offset + 5 or head[:3] != ["tmux", "send-keys", "-t"]:
             return command
         prefix = f"tmux send-keys -t {shlex.quote(head[3])} "
         if prefix not in command:
@@ -860,6 +858,10 @@ class _SandboxEnvironment:
                 (stdout or "")[-400:],
                 (stderr or "")[-400:],
             )
+            # Daytona folds stderr into stdout; harbor's error messages quote
+            # stderr only, so hand it the text that holds tmux's complaint.
+            if not stderr:
+                stderr = stdout
         return ExecResult(stdout=stdout, stderr=stderr, return_code=exit_code)
 
     _PANE_PIPE = re.compile(r"pipe-pane\s+(?:-\w+\s+\S+\s+)*'cat > (?P<path>[^']+)'")

@@ -183,9 +183,12 @@ def test_keys_that_start_with_a_dash_are_not_read_as_flags():
     assert end("timeout 5s tmux send-keys -t terminus-1 ls Enter") == (
         "timeout 5s tmux send-keys -t terminus-1 -- ls Enter"
     )
-    # Already ended, other tmux commands and compound wrappers stay as they are.
+    # Harbor never writes ``--``, so a leading one is a key the model typed.
+    assert end("tmux send-keys -t terminus-1 -- Enter") == (
+        "tmux send-keys -t terminus-1 -- -- Enter"
+    )
+    # Other tmux commands and compound wrappers stay as they are.
     for cmd in (
-        "tmux send-keys -t terminus-1 -- '-EOF'",
         "tmux capture-pane -p -t terminus-1",
         "cd /app && tmux send-keys -t terminus-1 ls",
     ):
