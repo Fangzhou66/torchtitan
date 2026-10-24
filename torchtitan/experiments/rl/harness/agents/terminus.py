@@ -1054,7 +1054,7 @@ async def terminus_agent(
                 max_context=task.max_context_tokens or _MAX_CONTEXT,
                 turn_max_tokens=_TURN_MAX_TOKENS,
                 deadline=deadline,
-                context_warn_frac=_CONTEXT_WARN_FRAC,
+                context_warn_frac=_CONTEXT_WARN_FRAC if task.context_notice else 0.0,
                 strict_truncation=task.strict_truncation,
             )
             agent._llm = llm
