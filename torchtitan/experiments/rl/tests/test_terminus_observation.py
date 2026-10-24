@@ -211,9 +211,10 @@ def test_dash_key_reaches_a_real_tmux():
         time.sleep(0.3)
         pane = subprocess.run(["tmux", "capture-pane", "-p", "-t", session], capture_output=True, text=True).stdout
         assert "-EOF" in pane
-        # Harbor's own shape: the command arrives without a stray ``--``.
+        # Harbor's own shape (Enter first ends the line above): the command
+        # arrives without a stray ``--``.
         cmd = _SandboxEnvironment._end_send_keys_options(
-            f"tmux send-keys -t {session} -- 'echo dash_ok_$((40+2))' Enter"
+            f"tmux send-keys -t {session} -- Enter 'echo dash_ok_$((40+2))' Enter"
         )
         subprocess.run(["bash", "-c", cmd], check=True)
         time.sleep(0.3)
