@@ -274,9 +274,12 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         grade_unsubmitted=(
             os.environ.get("TMAX_GRADE_UNSUBMITTED_TRAIN", "0") == "1"
         ),
-        # SWE_EVAL_CONTEXT_NOTICE=0 hides terminus's context warnings and status
-        # lines from validation only (eval-only A/B of the notice).
-        eval_context_notice=os.environ.get("SWE_EVAL_CONTEXT_NOTICE", "1") == "1",
+        # Validation shows no terminus context warning or status line: it grades
+        # unsubmitted trials, so the wall no longer costs a 0, and on run 1022 the
+        # notice turned 188 of 445 trials to wrapping up with 65-80K tokens left.
+        # Training keeps the notice. SWE_EVAL_CONTEXT_NOTICE=1 shows it in
+        # validation as well.
+        eval_context_notice=os.environ.get("SWE_EVAL_CONTEXT_NOTICE", "0") == "1",
         eval_grade_unsubmitted=(
             os.environ.get("SWE_EVAL_GRADE_UNSUBMITTED", "1") == "1"
         ),
