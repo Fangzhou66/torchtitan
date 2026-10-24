@@ -308,6 +308,9 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         # sandbox (training, readout, separate verifier) at a fixed size.
         bench_scheduler=_bench_scheduler(),
         bench_max_turns=int(os.environ.get("SWE_BENCH_MAX_TURNS", "0")),
+        bench_readout_eval_budget=(
+            os.environ.get("SWE_BENCH_READOUT_EVAL_BUDGET", "0") == "1"
+        ),
         bench_sandbox_cpu=int(os.environ.get("SWE_BENCH_SANDBOX_CPU", "0")),
         bench_sandbox_mem_gb=int(os.environ.get("SWE_BENCH_SANDBOX_MEM_GB", "0")),
         bench_sandbox_disk_gb=int(os.environ.get("SWE_BENCH_SANDBOX_DISK_GB", "0")),

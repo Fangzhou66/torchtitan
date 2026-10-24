@@ -837,6 +837,7 @@ class _BenchMode:
     scheduler: bool = False
     max_turns: int = 0
     sandbox: tuple[tuple[str, int], ...] = ()
+    readout_eval_budget: bool = False
 
 
 # A turn-capped training rollout has no wall clock of its own; this only bounds
@@ -1365,7 +1366,14 @@ class TMaxRollouter(Rollouter):
         """Overfit bench: > 0 caps a training attempt at this many turns and
         nothing else -- no wall clock (the agent gets no deadline, no floor
         applies, and the outer guard is only ``SWE_BENCH_TURN_CAP_GUARD_SEC``).
-        Terminus only. Validation keeps its own budget and turn cap."""
+        Terminus only. The readout gets the same cap unless
+        ``bench_readout_eval_budget``."""
+
+        bench_readout_eval_budget: bool = False
+        """Overfit bench: the readout (validation) keeps the eval budget -- the
+        task's agent timeout raised to ``SWE_AGENT_TIMEOUT_FLOOR_SEC``, the eval
+        turn cap and context -- instead of ``bench_max_turns``: training is short,
+        and the original task is read the way the TB2.1 eval reads it."""
 
         bench_sandbox_cpu: int = 0
         """Overfit bench: > 0 boots every training and validation sandbox, and a
@@ -1504,6 +1512,7 @@ class TMaxRollouter(Rollouter):
             scheduler=config.bench_scheduler,
             max_turns=config.bench_max_turns,
             sandbox=sandbox,
+            readout_eval_budget=config.bench_readout_eval_budget,
         )
         if config.bench_scheduler and os.environ.get("SWE_DATA_HOT_RELOAD", "0") == "1":
             logger.warning(
@@ -2127,11 +2136,13 @@ class TMaxRollouter(Rollouter):
         if group_id < 0 and self._eval_max_turns:
             max_turns = _UNCAPPED_TURNS if self._eval_max_turns < 0 else self._eval_max_turns
         # Overfit bench turn-cap mode: the turn cap is the whole budget, for the
-        # readout too, so the original task is read under the attempt budget the
-        # policy trains with. Terminus reads time_budget_sec=0 as no deadline, and
-        # the outer guard keeps only a sanity bound, so no attempt is cut by a clock.
+        # readout too unless it keeps the eval budget (bench_readout_eval_budget).
+        # Terminus reads time_budget_sec=0 as no deadline, and the outer guard
+        # keeps only a sanity bound, so no attempt is cut by a clock.
         guard_budget_sec = budget_sec
-        if self._bench.max_turns:
+        if self._bench.max_turns and not (
+            group_id < 0 and self._bench.readout_eval_budget
+        ):
             budget_sec = 0
             max_turns = self._bench.max_turns
             guard_budget_sec = _TURN_CAP_GUARD_SEC
