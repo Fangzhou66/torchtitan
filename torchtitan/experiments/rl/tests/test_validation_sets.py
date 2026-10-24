@@ -857,6 +857,7 @@ def test_the_eval_only_pass_leaves_its_reports_to_close():
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         training_heartbeat_interval_sec=0,
+        rollout_worker_ping_interval_sec=0,
         async_loop=SimpleNamespace(
             num_training_steps=0, validation=ValidationConfig(run_async=False)
         ),
