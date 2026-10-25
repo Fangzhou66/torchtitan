@@ -40,7 +40,8 @@ litellm on the task's machine:
     loop's default and what the eval scripts set) instead of upstream's 30 s.
   - Upstream's step and cost limits are replaced by the rollout's own bounds:
     ``AgentTask.time_budget_sec`` (0 = no deadline, as for Terminus) and
-    ``AgentTask.max_turns`` (None = no cap, as mini.yaml's ``step_limit: 0``).
+    ``AgentTask.max_turns`` (None = TMAX_MINISWE_MAX_TURNS, whose default 0 is
+    no cap, as mini.yaml's ``step_limit: 0``).
     A turn that ends at the context budget ends the episode as
     ``hit_context_limit``, as it does under Terminus.
 """
@@ -77,6 +78,8 @@ logger = logging.getLogger(__name__)
 
 # Per-command wall clock, the knob the vanillux loop reads too.
 _EXEC_TIMEOUT = int(os.environ.get("TMAX_EXEC_TIMEOUT_SEC", "120"))
+# Turn cap when the rollout sets none (training); 0 = uncapped, as upstream.
+_DEFAULT_MAX_TURNS = int(os.environ.get("TMAX_MINISWE_MAX_TURNS", "0"))
 # DefaultAgent.has_finished accepts either marker on the output's first line.
 _SUBMIT_MARKERS = ("MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
 # The sandbox wraps every command in `timeout -s TERM -k <grace> <N>s`: GNU
@@ -283,7 +286,8 @@ class _Episode:
             }
         ]
         system_prompt = render(SYSTEM_TEMPLATE)
-        while not task.max_turns or self.turns < task.max_turns:
+        max_turns = task.max_turns or _DEFAULT_MAX_TURNS
+        while not max_turns or self.turns < max_turns:
             reply = await task.adapter.complete(
                 task.session_id,
                 {"system": system_prompt, "messages": messages, "stream": False},

@@ -312,6 +312,12 @@ def test_turn_cap():
     assert len(adapter.requests) == 3
 
 
+def test_default_turn_cap_applies_when_the_rollout_sets_none(monkeypatch):
+    monkeypatch.setattr(miniswe, "_DEFAULT_MAX_TURNS", 2)
+    run = _run(_Adapter([_reply("```bash\nls\n```")] * 5), _Sandbox([(0, "f\n")] * 5))
+    assert (run.turns, run.finish_reason) == (2, "hit_max_turns")
+
+
 def test_time_budget_interrupts_a_pending_generation():
     adapter = _Adapter([_reply(_SUBMIT)], delay=5)
     run = _run(adapter, _Sandbox(), time_budget_sec=1)
