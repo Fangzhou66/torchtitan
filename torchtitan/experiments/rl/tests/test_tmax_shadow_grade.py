@@ -54,6 +54,7 @@ def _rollouter(*, shadow: bool) -> TMaxRollouter:
     r._eval_grade_unsubmitted = False
     r._grade_unsubmitted = False
     r._eval_context_notice = True
+    r._format_streak_limit = 0
     r._rollout_gate = _RolloutIssueGate(1)
     return r
 
@@ -164,6 +165,7 @@ def test_validation_timeouts_skip_the_shadow_grade_when_off(
     rollouter._eval_grade_unsubmitted = False
     rollouter._grade_unsubmitted = False
     rollouter._eval_context_notice = True
+    rollouter._format_streak_limit = 0
     calls = []
     _run(
         rollouter,
