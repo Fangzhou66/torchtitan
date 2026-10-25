@@ -55,8 +55,9 @@ $TRL_BASE/
 │       ├── stdout.log
 │       ├── inputs/mix.jsonl      hardlink to the history version loaded at boot
 │       ├── trainer/              structured logs, metrics, profiling
-│       │   └── mix_versions.jsonl   one line per boot or hot reload: stamp, event, version, sha256, replaced, appended, retired
-│       │                              (which step ran on which version: join the stamp with the structured logs' step times)
+│       │   ├── mix_versions.jsonl   one line per boot or hot reload: stamp, event, version, sha256, replaced, appended, retired
+│       │   │                          (which step ran on which version: join the stamp with the structured logs' step times)
+│       │   └── evolution_flow.jsonl one line per training step: the evolution flow counts, all signals and per direction; read back on resume
 │       ├── checkpoints -> <local disk>/ckpt/tmax-9b--<stamp>   rolled by SWE_CKPT_KEEP
 │       ├── checkpoints-held/step-<N>/   hardlinks of a step kept past the rotation (cp -al from checkpoints/)
 │       ├── checkpoints-staged/step-<N>/ a GPFS copy for eval nodes, made and pruned by eval_watcher.sh

@@ -215,8 +215,14 @@ class RewardObserverTest(unittest.TestCase):
                     namespace["_evolution_metrics"](owner, step=2)
                     self.assertEqual(
                         sorted(logged[0]),
-                        ["evolution/flow/chart_easier", "evolution/flow/chart_harder"],
+                        [
+                            "evolution/flow/chart_both",
+                            "evolution/flow/chart_easier",
+                            "evolution/flow/chart_harder",
+                        ],
                     )
+                    xs, ys, _ = logged[0]["evolution/flow/chart_both"]
+                    self.assertEqual(len(ys), 8)
                     # The rewrite reaches the rewrite report.
                     columns, rows = logged[1]["evolution/rewrites/report"]
                     self.assertEqual(rows[0][:4], [None, "a", "harder", "accepted"])
@@ -474,6 +480,64 @@ class RewardObserverTest(unittest.TestCase):
             self.assertEqual(last["evolution/flow/signals_consumed"], 2)
             self.assertEqual(last["evolution/flow/rewrites_accepted"], 2)
             self.assertEqual(last["evolution/signals/junk"], 0)
+
+    def test_flow_chart_keeps_its_steps_across_a_resume(self):
+        # A crash at step 3 resumed from the step-1 checkpoint: the new process
+        # charts step 1 from the old lifetime, logs steps 2 and 3 again, and an
+        # outcome accepted before it started enters no latency.
+        with tempfile.TemporaryDirectory() as directory:
+            root = observer.layout.Root(Path(directory))
+            stable = root.run("training")
+            first = stable.for_attempt("20261011-000000Z--sa")
+            second = stable.for_attempt("20261011-010000Z--sb")
+
+            def issue(attempt, session, task, group, origin):
+                observer.layout.append_jsonl(
+                    stable.trainer / "training_lineage/events.jsonl",
+                    {
+                        "event": "claimed",
+                        "session_id": session,
+                        "group_id": group,
+                        "generator_policy_version": origin,
+                        "task_id": task,
+                    },
+                )
+                observer.layout.write_json_atomic(
+                    attempt.signal(task, group),
+                    {"task": task, "group": group, "direction": "harder"},
+                )
+                return observer.layout.signal_id(attempt.name, task, group)
+
+            before = outcome_metrics.EvolutionMetrics(first, root)
+            a = issue(first, "sa", "a", 0, origin=0)
+            for step in (1, 2, 3):
+                before.poll(step=step)
+            self.assertEqual(before.flow_series("harder")[0], [1, 2, 3])
+            self._record_outcome(root, a, "a", "accepted", name="a")
+
+            after = outcome_metrics.EvolutionMetrics(second, root)
+            values = after.poll(step=2)
+            self.assertEqual(values["evolution/flow/rewrites_accepted"], 1)
+            self.assertNotIn("evolution/flow/accept_latency_steps", values)
+            self.assertEqual(after.report_rows()[0][0], None)
+            xs, ys, _ = after.flow_series("harder")
+            self.assertEqual(xs, [1, 2])
+            self.assertEqual(ys[2], [0, 1])
+
+            b = issue(second, "sb", "b", 0, origin=2)
+            observer.layout.append_jsonl(
+                root.evolution.ledger, {"signal": b, "outcome": "handled"}
+            )
+            after.poll(step=3)
+            self._record_outcome(root, b, "b", "accepted", name="b")
+            values = after.poll(step=4)
+            self.assertEqual(values["evolution/flow/accept_latency_steps"], 2)
+            self.assertEqual(after.report_rows()[1][0], 4)
+
+            # A third lifetime sees every step the second one logged.
+            again = outcome_metrics.EvolutionMetrics(second, root)
+            self.assertEqual(sorted(again.history), [1, 2, 3, 4])
+            self.assertEqual(again.history[4]["harder"][0], 2)
 
     def test_stale_counts_original_draws_while_a_rewrite_is_pending(self):
         stamp = observer.layout.stamp
