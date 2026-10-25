@@ -147,7 +147,9 @@ def test_format_error_says_how_many_actions_were_found():
     assert rendered.startswith(
         "Please always provide EXACTLY ONE action in triple backticks, found 2 actions."
     )
-    assert "`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`" in rendered
+    # The re-ask no longer suggests submitting (see miniswe_prompts).
+    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in rendered
+    assert "Please format your response exactly as follows:" in rendered
 
 
 @pytest.mark.parametrize(
