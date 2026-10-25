@@ -40,7 +40,7 @@ litellm on the task's machine:
     loop's default and what the eval scripts set) instead of upstream's 30 s.
   - Upstream's step and cost limits are replaced by the rollout's own bounds:
     ``AgentTask.time_budget_sec`` (0 = no deadline, as for Terminus) and
-    ``AgentTask.max_turns`` (None = TMAX_MINISWE_MAX_TURNS, whose default 0 is
+    ``AgentTask.max_turns`` (None = TMAX_MINISWE_MAX_TURNS, default 150; 0 is
     no cap, as mini.yaml's ``step_limit: 0``).
     A turn that ends at the context budget ends the episode as
     ``hit_context_limit``, as it does under Terminus.
@@ -79,7 +79,8 @@ logger = logging.getLogger(__name__)
 # Per-command wall clock, the knob the vanillux loop reads too.
 _EXEC_TIMEOUT = int(os.environ.get("TMAX_EXEC_TIMEOUT_SEC", "120"))
 # Turn cap when the rollout sets none (training); 0 = uncapped, as upstream.
-_DEFAULT_MAX_TURNS = int(os.environ.get("TMAX_MINISWE_MAX_TURNS", "0"))
+# 150 stops a format-error loop before the 80K context wall.
+_DEFAULT_MAX_TURNS = int(os.environ.get("TMAX_MINISWE_MAX_TURNS", "150"))
 # DefaultAgent.has_finished accepts either marker on the output's first line.
 _SUBMIT_MARKERS = ("MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
 # The sandbox wraps every command in `timeout -s TERM -k <grace> <N>s`: GNU
@@ -117,7 +118,7 @@ def parse_actions(text: str) -> list[str]:
 # most common shapes seen in the 1024 run's eval (pv50: about 250 replies with a
 # lone ```python block, about 230 with two or more ```bash blocks). Off keeps
 # upstream's exactly-one-block rule.
-_LENIENT_PARSE = os.environ.get("TMAX_MINISWE_LENIENT_PARSE", "0") == "1"
+_LENIENT_PARSE = os.environ.get("TMAX_MINISWE_LENIENT_PARSE", "1") == "1"
 _PYTHON_REGEX = r"```python[ \t]*\n(.*?)\n```"
 _PY_HEREDOC = "__MINISWE_PYTHON__"
 

@@ -31,6 +31,14 @@ _UNAME = "Linux\n6.8.0\n#1 SMP PREEMPT_DYNAMIC\nx86_64\n"
 _SUBMIT = "THOUGHT: done.\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
 
 
+@pytest.fixture(autouse=True)
+def _upstream_defaults(monkeypatch):
+    """Tests describe upstream's loop; the lenient parse and turn cap that tmax
+    turns on by default are opted into per test."""
+    monkeypatch.setattr(miniswe, "_LENIENT_PARSE", False)
+    monkeypatch.setattr(miniswe, "_DEFAULT_MAX_TURNS", 0)
+
+
 def _reply(text: str, *, stop: str = "end_turn", tokens: tuple[int, int] = (100, 20)):
     return {
         "content": [{"type": "thinking", "thinking": "hm"}, {"type": "text", "text": text}],
