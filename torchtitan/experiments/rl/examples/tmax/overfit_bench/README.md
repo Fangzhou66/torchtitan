@@ -15,17 +15,12 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
 - **Policy and recipe**: `recipe.env` (group size 12, LR 3e-6, 200 steps of
   one group each, 8 groups in flight, groups up to 8 steps old still trained).
   Hardware placement is the runner's.
-- **A training attempt** is 60 Terminus turns and nothing else
-  (`SWE_BENCH_MAX_TURNS`): the agent has no wall-clock deadline, no budget
-  floor applies, and the rollout's outer guard is only a 12 h sanity bound
-  (`SWE_BENCH_TURN_CAP_GUARD_SEC`). Grading keeps the task's own verifier
-  timeout. The recipe used to say "2400 s per attempt on every task"; that was
-  never what ran. `SWE_TIME_BUDGET_SEC` applies only to a row that declares no
-  agent timeout, and every benchmark row declares one, so an attempt got
-  max(declared, `SWE_AGENT_TIMEOUT_FLOOR_SEC`) -- with the 7200 s floor of
-  `runbook/rltrain.env`, 7200 s for 88 of the 89 TB2.1 tasks, 12000 s for the
-  other, 28800 s for every TB4 task -- and `TMAX_TERMINUS_MAX_TURNS` (120)
-  turns.
+- **A training attempt** has the main training run's caps: 120 Terminus turns
+  (`SWE_BENCH_MAX_TURNS`), 2 h of wall clock (`SWE_BENCH_TRAIN_BUDGET_SEC`)
+  and an 80K context (`SWE_TMAX_CONTEXT=81920`, agent budget 79872), the same
+  for every task whatever it declares; no budget floor applies. Grading keeps
+  the task's own verifier timeout. Jobs before 2026-10-25 trained at 60 turns
+  with no wall clock and the 63488-token context `runbook/rltrain.env` fills in.
 - **Sandbox**: every sandbox, training and readout, and a separate verifier's,
   gets 4 vCPU (`SWE_BENCH_SANDBOX_CPU`), whatever the row declares; memory and
   disk are the row's, clamped to Daytona's per-sandbox caps (8 GiB, 10 GiB;
@@ -36,7 +31,8 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
 - **Readout**: the original task row, held in `data/evalsets/original.jsonl`
   and never served from the mix, 16 attempts every 5 steps. A readout attempt
   has the TB2.1 eval's budget, not training's (`SWE_BENCH_READOUT_EVAL_BUDGET`):
-  300 turns, the task's agent timeout raised to 7200 s, a 160K context and no
+  300 turns, 5400 s whatever the task declares (`SWE_AGENT_TIMEOUT_FLOOR_SEC`
+  and `SWE_EVAL_AGENT_BUDGET_CAP_SEC` both 5400), a 160K context and no
   context notice, as the current TB2.1 eval runs (run 1022's 160K validation
   context; the RUNBOOK's 300-turn cap for a 160K eval). An attempt that ends without submitting
   is graded and scored at the verifier's verdict, as Harbor does

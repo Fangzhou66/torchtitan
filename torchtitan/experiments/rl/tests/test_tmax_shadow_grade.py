@@ -437,3 +437,37 @@ def test_bench_readout_eval_budget_keeps_the_eval_budget_for_validation_only(
     )
     assert seen and seen[0].max_turns == max_turns
     assert seen[0].time_budget_sec == budget
+
+
+@pytest.mark.parametrize(
+    "train_budget_sec, group_id, max_turns, budget",
+    [
+        (7200, 0, 120, 7200),
+        (0, 0, 120, 0),
+        (7200, -1, None, 3600),
+    ],
+)
+def test_bench_train_budget_clocks_training_attempts_only(
+    monkeypatch, train_budget_sec, group_id, max_turns, budget
+):
+    rollouter = _rollouter(shadow=False)
+    rollouter._bench = rollouter_mod._BenchMode(
+        max_turns=120, train_budget_sec=train_budget_sec, readout_eval_budget=True
+    )
+    seen = []
+
+    async def recording_agent(task):
+        seen.append(task)
+        return AgentRun(turns=1, submitted=True, finish_reason="submit")
+
+    monkeypatch.setattr(rollouter, "_agent_budget_sec", lambda sample: 3600)
+    _run(
+        rollouter,
+        monkeypatch,
+        submitted=True,
+        grade=_grade(1.0, []),
+        group_id=group_id,
+        agent=recording_agent,
+    )
+    assert seen and seen[0].max_turns == max_turns
+    assert seen[0].time_budget_sec == budget

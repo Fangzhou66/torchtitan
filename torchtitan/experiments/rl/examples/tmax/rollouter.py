@@ -841,6 +841,7 @@ class _BenchMode:
 
     scheduler: bool = False
     max_turns: int = 0
+    train_budget_sec: int = 0
     sandbox: tuple[tuple[str, int], ...] = ()
     readout_eval_budget: bool = False
 
@@ -1368,11 +1369,16 @@ class TMaxRollouter(Rollouter):
         rollout_done / group_done for training groups. Needs BenchController."""
 
         bench_max_turns: int = 0
-        """Overfit bench: > 0 caps a training attempt at this many turns and
-        nothing else -- no wall clock (the agent gets no deadline, no floor
-        applies, and the outer guard is only ``SWE_BENCH_TURN_CAP_GUARD_SEC``).
-        Terminus only. The readout gets the same cap unless
-        ``bench_readout_eval_budget``."""
+        """Overfit bench: > 0 caps a training attempt at this many turns, plus
+        ``bench_train_budget_sec`` of wall clock when that is set; no floor
+        applies. With no wall clock the agent gets no deadline and the outer
+        guard is only ``SWE_BENCH_TURN_CAP_GUARD_SEC``. Terminus only. The
+        readout gets the same caps unless ``bench_readout_eval_budget``."""
+
+        bench_train_budget_sec: int = 0
+        """Overfit bench: > 0 gives a turn-capped training attempt this many
+        seconds of wall clock as well, the same for every task whatever it
+        declares. 0 keeps the turn cap as the only limit."""
 
         bench_readout_eval_budget: bool = False
         """Overfit bench: the readout (validation) keeps the eval budget -- the
@@ -1499,6 +1505,8 @@ class TMaxRollouter(Rollouter):
             )
         if config.bench_max_turns < 0:
             raise ValueError("bench_max_turns must be >= 0")
+        if config.bench_train_budget_sec < 0:
+            raise ValueError("bench_train_budget_sec must be >= 0")
         if config.bench_max_turns and self._agent_name != "terminus":
             raise ValueError(
                 f"bench_max_turns (SWE_BENCH_MAX_TURNS) needs the terminus agent, "
@@ -1516,6 +1524,7 @@ class TMaxRollouter(Rollouter):
         self._bench = _BenchMode(
             scheduler=config.bench_scheduler,
             max_turns=config.bench_max_turns,
+            train_budget_sec=config.bench_train_budget_sec,
             sandbox=sandbox,
             readout_eval_budget=config.bench_readout_eval_budget,
         )
@@ -2140,17 +2149,18 @@ class TMaxRollouter(Rollouter):
         max_turns = None
         if group_id < 0 and self._eval_max_turns:
             max_turns = _UNCAPPED_TURNS if self._eval_max_turns < 0 else self._eval_max_turns
-        # Overfit bench turn-cap mode: the turn cap is the whole budget, for the
-        # readout too unless it keeps the eval budget (bench_readout_eval_budget).
-        # Terminus reads time_budget_sec=0 as no deadline, and the outer guard
-        # keeps only a sanity bound, so no attempt is cut by a clock.
+        # Overfit bench turn-cap mode: the turn cap, plus bench_train_budget_sec
+        # of wall clock when set, is the whole budget, for the readout too unless
+        # it keeps the eval budget (bench_readout_eval_budget). Without a clock,
+        # Terminus reads time_budget_sec=0 as no deadline and the outer guard
+        # keeps only a sanity bound.
         guard_budget_sec = budget_sec
         if self._bench.max_turns and not (
             group_id < 0 and self._bench.readout_eval_budget
         ):
-            budget_sec = 0
+            budget_sec = self._bench.train_budget_sec
             max_turns = self._bench.max_turns
-            guard_budget_sec = _TURN_CAP_GUARD_SEC
+            guard_budget_sec = budget_sec or _TURN_CAP_GUARD_SEC
         strict_format, strict_opening, strict_truncation = (
             (
                 self._eval_strict_format,
