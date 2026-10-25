@@ -119,12 +119,16 @@ _CONFIRMATION_PROMPT = "Are you sure you want to mark the task as complete?"
 # _CONTEXT_REPEAT_WARN_FRACS. "urge" is della without "the task counts as
 # failed", for training that grades unsubmitted rollouts at the verifier: there
 # running out is not a failure, but with no notice at all run 1025's policy
-# stopped submitting and ran into the context wall.
+# stopped submitting and ran into the context wall. Once no more than
+# _CONTEXT_URGE_LEFT_FRAC of the window is left, its status line also asks the
+# policy to wrap up, every turn (the ApexAgents SkyRL recipe's training nudge:
+# 0.2, no failure stakes, none in evaluation).
 _CONTEXT_NOTICE_STYLE = os.environ.get("TMAX_CONTEXT_NOTICE_STYLE", "checked")
 _APPENDED_NOTICE_STYLES = ("della", "checked", "urge")
 # 0 drops the "[Context: N% used, ...]" line the appended styles add on every
 # turn between warnings, keeping only the warnings themselves.
 _CONTEXT_STATUS_LINES = os.environ.get("TMAX_CONTEXT_STATUS_LINES", "1") == "1"
+_CONTEXT_URGE_LEFT_FRAC = float(os.environ.get("TMAX_CONTEXT_URGE_LEFT_FRAC", "0.2"))
 # "checked" triggers on tokens remaining rather than a fraction, so a 160K
 # validation context warns at the same "about N tokens remain" as the 80K
 # training one (0.7 and 0.9 of it) instead of at 82K, already past anything the
@@ -336,6 +340,15 @@ class _AdapterLLM:
                 )
             if not _CONTEXT_STATUS_LINES:
                 return ""
+            if (
+                _CONTEXT_NOTICE_STYLE == "urge"
+                and left <= _CONTEXT_URGE_LEFT_FRAC * self._max_context
+            ):
+                return (
+                    f"[Context: {pct}% used, about {left:,} tokens remain. You are "
+                    "almost out of context: run as few commands as you can and mark "
+                    "the task complete soon.]"
+                )
             return f"[Context: {pct}% used, about {left:,} tokens remain]"
         first = round(100 * self._context_warn_frac)
         repeats = {

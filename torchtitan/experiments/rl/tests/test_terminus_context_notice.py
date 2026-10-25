@@ -219,6 +219,11 @@ def test_urge_style_is_della_without_the_failure_stakes(monkeypatch):
     )
     llm.context_tokens = 7600
     assert llm.context_notice() == "[Context: 76% used, about 2,400 tokens remain]"
+    llm.context_tokens = 8100
+    assert llm.context_notice() == (
+        "[Context: 81% used, about 1,900 tokens remain. You are almost out of "
+        "context: run as few commands as you can and mark the task complete soon.]"
+    )
 
 
 def test_checked_style_drops_the_call_to_mark_complete(monkeypatch):
