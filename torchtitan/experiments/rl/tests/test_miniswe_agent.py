@@ -237,6 +237,19 @@ def test_format_errors_are_answered_and_counted():
     assert "found 2 actions." in feedback[1]
 
 
+def test_format_streak_limit_ends_the_episode_on_the_nth_rejected_turn():
+    replies = [_reply("Okay"), _reply("```bash\nls\n```")] + [_reply("Okay")] * 5
+    run = _run(_Adapter(replies), _Sandbox([(0, "f\n")]), format_streak_limit=3)
+    assert (run.turns, run.finish_reason, run.submitted) == (5, "format_error", False)
+    assert (run.violation_category, run.violation_turn) == ("no_commands", 5)
+    assert run.format_errors == 4
+
+
+def test_no_format_streak_limit_keeps_answering_rejected_turns():
+    run = _run(_Adapter([_reply("Okay")] * 5), _Sandbox())
+    assert (run.turns, run.finish_reason, run.violation_turn) == (5, "stopped_early", 0)
+
+
 def test_a_capped_turn_without_an_action_counts_as_truncated():
     adapter = _Adapter([_reply("THOUGHT: let me think at length", stop="max_tokens")])
     run = _run(adapter, _Sandbox(), max_context_tokens=80_000)

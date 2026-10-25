@@ -229,6 +229,7 @@ def _tmax_rollouter(*, validation_from_caller: bool = False) -> TMaxRollouter.Co
         strict_format=os.environ.get("SWE_STRICT_FORMAT", "0") == "1",
         strict_opening=os.environ.get("SWE_STRICT_OPENING", "1") == "1",
         strict_truncation=os.environ.get("SWE_STRICT_TRUNCATION", "0") == "1",
+        format_streak_limit=int(os.environ.get("TMAX_FORMAT_STREAK_LIMIT", "0")),
         eval_strict_format=os.environ.get("SWE_EVAL_STRICT_FORMAT", "0") == "1",
         eval_strict_opening=os.environ.get("SWE_EVAL_STRICT_OPENING", "0") == "1",
         eval_strict_truncation=(

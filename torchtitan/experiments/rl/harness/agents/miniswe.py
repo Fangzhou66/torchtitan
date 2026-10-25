@@ -187,6 +187,8 @@ class _Episode:
         self._streak = 0
         self._acted = False
         self._prev_text: str | None = None
+        self.violation_category: str | None = None
+        self.violation_turn = 0
 
     @property
     def format_errors(self) -> int:
@@ -255,6 +257,10 @@ class _Episode:
         self.max_streak = max(self.max_streak, self._streak)
         if not self._acted:
             self.opening_streak += 1
+        limit = self._task.format_streak_limit
+        if limit and self._streak >= limit:
+            self.violation_category = category
+            self.violation_turn = self.turns
 
     async def run(self) -> None:
         task = self._task
@@ -308,6 +314,9 @@ class _Episode:
                 self.lenient_parses += 1
                 actions = [lenient]
             self._count_reply(text, capped, len(actions))
+            if self.violation_turn:
+                self.finish_reason = "format_error"
+                return
             if len(actions) != 1:
                 messages.append(
                     {"role": "user", "content": render(FORMAT_ERROR_TEMPLATE, actions=actions)}
@@ -358,6 +367,8 @@ async def miniswe_agent(task: AgentTask) -> AgentRun:
         format_errors=episode.format_errors,
         format_breakdown=episode.breakdown(),
         finish_reason=episode.finish_reason,
+        violation_category=episode.violation_category,
+        violation_turn=episode.violation_turn,
         exec_trace=episode.exec_trace,
     )
 

@@ -1315,6 +1315,12 @@ class TMaxRollouter(Rollouter):
         per-turn generation cap ends the episode the same way, instead of
         Terminus-2 salvaging or re-asking. Running out of context is unchanged."""
 
+        format_streak_limit: int = 0
+        """Training rollouts end as a strict ``format_error`` after this many
+        consecutive rejected turns (0 = off); validation never applies it. Cuts
+        the collapse where the policy answers "Okay" to the format-error message
+        for hundreds of turns. Only the miniswe harness honors it."""
+
         eval_strict_format: bool = False
         """``strict_format`` for validation groups. Off by default so validation
         scores stay comparable with upstream Terminus-2 numbers."""
@@ -1452,6 +1458,7 @@ class TMaxRollouter(Rollouter):
         self._strict_opening = config.strict_opening
         self._strict_truncation = config.strict_truncation
         self._eval_strict_format = config.eval_strict_format
+        self._format_streak_limit = config.format_streak_limit
         self._eval_strict_opening = config.eval_strict_opening
         self._eval_strict_truncation = config.eval_strict_truncation
         self._eval_context_notice = config.eval_context_notice
@@ -2338,6 +2345,9 @@ class TMaxRollouter(Rollouter):
                             strict_opening=strict_opening,
                             strict_truncation=strict_truncation,
                             context_notice=group_id >= 0 or self._eval_context_notice,
+                            format_streak_limit=(
+                                self._format_streak_limit if group_id >= 0 else 0
+                            ),
                         )
                     )
                     timing["agent_secs"] = time.monotonic() - agent_at
