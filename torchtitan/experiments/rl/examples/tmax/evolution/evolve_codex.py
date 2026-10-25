@@ -1900,6 +1900,33 @@ evidence does not support an intermediate task, write GIVE UP with the reason.
     + so.CALIBRATION_GUIDANCE
 )
 
+# EVOLVE_HARDER_FROM_PARTIAL=1 (default off): a harder signal from a simplified
+# version that only some attempts solved -- the trainer's
+# SWE_EVOLUTION_HARDER_RATIO below 1 -- is calibrated like an all-solved one,
+# restoring toward the original, instead of taking the add-a-difficulty
+# guidance. The overfit bench's ladder uses it so the next rung exists as soon
+# as a version gives a gradient, while that version keeps training.
+HARDER_FROM_PARTIAL = os.environ.get("EVOLVE_HARDER_FROM_PARTIAL", "0") == "1"
+_ALL_PASSING = "The previous simplification now has all attempts passing."
+_PARTIAL_PASSING = (
+    "The previous simplification is now solved in {solved} of {attempts} attempts:\n"
+    "the student has a foothold on it and has not mastered it, and that version\n"
+    "keeps training beside this one. Restore toward the original task one coherent\n"
+    "part of what the simplifications removed (`traces/history/since-original.diff`),\n"
+    "the part these attempts already handle best, and keep the help for what they\n"
+    "still fail. Aim for mixed success on the new version; a measurement short of\n"
+    "all-solved does not justify withdrawing more than that one part."
+)
+
+
+def _calibration_guidance(solved: int, attempts: int) -> str:
+    """The calibration text for a harder rewrite measured at solved/attempts."""
+    if solved >= attempts:
+        return _CALIBRATION_GUIDANCE
+    return _CALIBRATION_GUIDANCE.replace(
+        _ALL_PASSING, _PARTIAL_PASSING.format(solved=solved, attempts=attempts), 1
+    )
+
 
 _HARDER_JOB = """This task was solved {solved} of {attempts} attempts and met the
 hardening threshold.
@@ -3277,8 +3304,8 @@ def evolve_agentic(
     previous = rewrite.traces / "previous-simplify.json"
     calibration = (
         job == "harder"
-        and solved == attempts_n
         and attempts_n > 0
+        and (solved == attempts_n or (HARDER_FROM_PARTIAL and 0 < solved < attempts_n))
         and previous.exists()
         and bool(json.loads(previous.read_text()).get("simplify"))
     )
@@ -3303,7 +3330,7 @@ def evolve_agentic(
             "harder": (_HARDER_JOB_BLIND if blind else _HARDER_JOB).format(
                 solved=solved,
                 attempts=attempts_n,
-                guidance=_CALIBRATION_GUIDANCE
+                guidance=_calibration_guidance(solved, attempts_n)
                 if calibration
                 else _REAL_HARDER_GUIDANCE.replace(
                     "Your shell has network access",
