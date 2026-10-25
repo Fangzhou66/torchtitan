@@ -223,6 +223,14 @@ class RewardObserverTest(unittest.TestCase):
                     )
                     xs, ys, _ = logged[0]["evolution/flow/chart_both"]
                     self.assertEqual(len(ys), 8)
+                    # The glossary goes up once per process, after the charts.
+                    columns, rows = logged[2]["evolution/glossary"]
+                    self.assertEqual(columns, ["metric", "description"])
+                    self.assertIn("evolution/stale/groups", [r[0] for r in rows])
+                    namespace["_evolution_metrics"](owner, step=3)
+                    self.assertFalse(
+                        any("evolution/glossary" in payload for payload in logged[3:])
+                    )
                     # The rewrite reaches the rewrite report.
                     columns, rows = logged[1]["evolution/rewrites/report"]
                     self.assertEqual(rows[0][:4], [None, "a", "harder", "accepted"])
@@ -538,6 +546,30 @@ class RewardObserverTest(unittest.TestCase):
             again = outcome_metrics.EvolutionMetrics(second, root)
             self.assertEqual(sorted(again.history), [1, 2, 3, 4])
             self.assertEqual(again.history[4]["harder"][0], 2)
+
+    def test_glossary_describes_every_key_the_trainer_logs(self):
+        import re
+
+        patterns = []
+        for key, description in outcome_metrics.glossary_rows():
+            self.assertTrue(description)
+            first, *siblings = [k.strip() for k in key.split(",")]
+            parent = first.rsplit("/", 1)[0]
+            for name in [first, *(f"{parent}/{s}" for s in siblings)]:
+                regex = re.sub(r"<path>", ".+", re.escape(name).replace(r"\<", "<").replace(r"\>", ">"))
+                patterns.append(re.compile(re.sub(r"<[^>]+>", "[^/]+", regex) + "$"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = observer.layout.Root(Path(directory))
+            run = root.run("current")
+            self._record_outcome(root, self._issue(run, "a", 1, origin=0), "a", "accepted")
+            keys = list(outcome_metrics.EvolutionMetrics(run, root).poll(step=1))
+        keys += [f"evolution/flow/chart_{d}" for d in ("harder", "easier", "both")]
+        keys += ["evolution/glossary", "evolution/rewrites/report", "evolution/repairs/report"]
+        missing = [k for k in keys if not any(p.match(k) for p in patterns)]
+        self.assertEqual(missing, [])
+        self.assertIn(
+            "evolution/stale/groups", [row[0] for row in outcome_metrics.glossary_rows()]
+        )
 
     def test_stale_counts_original_draws_while_a_rewrite_is_pending(self):
         stamp = observer.layout.stamp

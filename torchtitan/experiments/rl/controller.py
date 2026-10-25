@@ -2404,6 +2404,31 @@ class Controller(Configurable):
                             self._evolution_rewrite_report = (step, report)
                 except Exception:
                     logger.exception("failed to log the evolution flow chart")
+                # What each evolution key means, once per process, read from
+                # the runbook so the two never disagree.
+                if not getattr(self, "_evolution_glossary", False):
+                    try:
+                        import wandb
+
+                        from torchtitan.experiments.rl.examples.tmax.evolution_metrics import (
+                            GLOSSARY_COLUMNS,
+                            glossary_rows,
+                        )
+
+                        if wandb.run is not None:
+                            self._evolution_glossary = True
+                            wandb.log(
+                                {
+                                    "evolution/glossary": wandb.Table(
+                                        columns=list(GLOSSARY_COLUMNS), data=glossary_rows()
+                                    )
+                                },
+                                step=step,
+                                commit=False,
+                            )
+                    except Exception:
+                        self._evolution_glossary = True
+                        logger.exception("failed to log the evolution glossary")
         if run is not None and self.config.metrics.enable_wandb:
             import wandb
 

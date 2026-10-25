@@ -1101,20 +1101,26 @@ is the wait for the task's next draw.
 
 | Key | Count |
 | --- | --- |
+| `evolution/flow/chart_harder`, `chart_easier`, `chart_both` | The cumulative flow charts: the four curves of one direction, or both directions' eight on one set of axes. |
 | `evolution/flow/signals_issued`, `signals_consumed`, `rewrites_accepted`, `rewrites_trained` | The four curves, summed over both directions. |
 | `evolution/flow/<key>_<direction>` | The same four counts for `harder` and `easier` signals: the curves of the two charts. `signals_issued_unknown` appears only if a signal carried no direction. |
 | `evolution/flow/accept_latency_steps`, `train_latency_steps` | Median steps from issue to acceptance, and to the first training step on the accepted revision, over the last 20. |
 | `evolution/signals/<outcome>` | Consumed signals by ledger decision: `handled`, `deferred`, `superseded`, `resolved`, `junk`. They sum to `signals_consumed`. |
-| `evolution/rewrites/<outcome>` | Rewrite attempts by verdict: `accepted_harder`, `accepted_easier`, `kept`, `rejected`, `failed` (interrupted attempts included). |
+| `evolution/rewrites/<outcome>` | Rewrite attempts by verdict: `accepted_harder`, `accepted_easier`, `accepted_repair_spec`, `kept`, `rejected`, `failed` (interrupted attempts included). |
 | `evolution/rewrites_by_stage/<status>/<stage>` | Rewrite attempts by verdict and the stage it was decided at (`none` when the loop recorded no stage), so a run of rejections names its cause. |
 | `evolution/flow/rewrite_secs` | Median wall seconds of the last 20 finished rewrite attempts. |
-| `evolution/<route>/attempted`, `accepted`, `kept`, `rejected`, `failed`, `acceptance_rate` | Per route: `evolve` (harder), `simplify` (easier), `invalid_signal`; repairs inside either route are listed in `evolution/repairs.jsonl`. |
+| `evolution/<route>/attempted`, `accepted`, `kept`, `rejected`, `failed`, `acceptance_rate` | Per route: `evolve` (harder), `simplify` (easier), `repair_spec`, `invalid_signal`; repairs inside either route are listed in `evolution/repairs.jsonl`. |
+| `evolution/repairs/rewrites`, `fixes`, `accepted_rewrites`, `harder`, `easier` | Rewrites that declared a repair of the task itself (run/repair.json), the fixes they declared, how many of those rewrites were accepted, and the rewrites by signal direction. |
+| `evolution/repairs/kind_<kind>` | Declared fixes by kind: `reward_hack`, `hidden_requirement`, `broken_setup`, `other`. |
+| `evolution/repairs/report` | A table of every declared fix with the rewriter's own defect, evidence and change; uploaded when a fix arrives. |
+| `evolution/rewrites/report` | A table with one row per rewrite: the group its signal measured, what the rewriter says it did, and for an accepted rewrite the groups trained since on the revision it produced; uploaded at most every 10 steps. |
 | `evolution/stale/groups` | Groups trained on a task's original while its rewrite was pending: claimed after one of this run's signals asked to rewrite that exact revision and before the loop handled the signal. Such a group most likely repeats the signal's all-pass or all-fail result, so this is training spent on a revision already known to carry no signal while the loop caught up. Signals the loop deferred, superseded or judged junk count nothing. Each signal is counted when it is handled. |
 | `evolution/queue/waiting_tasks` | Tasks a free worker could start now, one per task: pending signals after the loop's one-signal-per-task choice and its deferral rule, minus tasks already running. |
 | `evolution/queue/running` | Rewrites in progress. |
 | `evolution/mix_version` | The live mix version. |
 | `evolution/mix_version_served`, `mix_version_lag` | The version this run's dataset serves (last line of `trainer/mix_versions.jsonl`), and how far the live version is ahead of it. |
 | `evolution/status_age_sec` | Seconds since the loop last rebuilt `status.json`. Climbing well past `EVOLVE_STATUS_REFRESH_SEC` means the queue gauges are frozen, not idle. |
+| `evolution/glossary` | This table, uploaded once per trainer process. |
 | `evolution/root/<path>` | Every number in `status.json`, by its JSON path: `pending`, `rewrites_running`, the root-wide ledger counts, `rejected/<stage>`, `routes/<route>/<status>`, and any field the loop adds later. |
 
 Rewrite counts are per attempt: a signal retried after an interrupted attempt
