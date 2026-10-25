@@ -189,6 +189,8 @@ Verified against the reference run's log. These lines appear in this order:
 8. `Loading HF safetensors from --model.hf_assets_path: <your model dir>`
 9. Trainer: `Finished loading the checkpoint in 54.49 seconds.`
 10. Generators: `Initializing a V1 LLM engine ... max_seq_len=65536, data_parallel_size=3`
+   -- also from the reference boot; `rltrain.env` now sets `SWE_TMAX_CONTEXT=81920`,
+   so expect `max_seq_len=81920` here and 81,920 tokens per request in 12.
 11. `Loading safetensors checkpoint shards: 100% Completed | 4/4`
 12. vLLM memory report, then `Available KV cache memory: 204.61 GiB` and
     `Maximum concurrency for 65,536 tokens per request: 96.93x`
@@ -214,7 +216,7 @@ when prefix caching is enabled`.
 
 Note that step 1 does not arrive quickly. It needs
 `SWE_INITIAL_ACTIVE_GROUPS=64` groups of 16 rollouts to finish, each rollout up
-to a 2400-second agent budget. Minutes of `[buffer] complete` lines with no
+to the 7200-second agent budget `rltrain.env` sets. Minutes of `[buffer] complete` lines with no
 `[trainer_loop] step` line is the normal state, not a hang.
 
 ---
@@ -381,7 +383,7 @@ verified against the loader (`examples/tmax/data.py`) and against the live file:
 ```
 
 Training rows carry no `agent_timeout_sec`: the launcher's flat
-`SWE_TIME_BUDGET_SEC=2400` governs the rollout budget. `prepare_rts_data` emits
+`SWE_TIME_BUDGET_SEC` (7200 in `rltrain.env`) governs the rollout budget. `prepare_rts_data` emits
 a task's declared `[agent] timeout_sec` only under `SWE_EMIT_AGENT_TIMEOUT=1`,
 an eval-only opt-in -- declared budgets are sized for oracle solvers, and a
 backfill of them into training rows killed 75-85% of rollouts for the 9B policy
@@ -728,7 +730,7 @@ these are the variables that touch them.
 
 ### Correctness — these change what the run *is*
 
-<!-- `ours` is read off runs/tmax-9b--20260911-000700Z/launch.json, which records the env a run launched with. A root configured differently is its own launch.json, not this table. `unset` means the record does not carry the variable, which is not the same as setting it to the code default. -->
+<!-- `ours` is read off runs/tmax-9b--20260911-000700Z/launch.json, which records the env a run launched with, except the rows that say `rltrain.env` carries a training cap: those give the value it sets now and the reference run's beside it. A root configured differently is its own launch.json, not this table. `unset` means the record does not carry the variable, which is not the same as setting it to the code default. -->
 | variable | ours | code default | controls |
 |---|---|---|---|
 | `SWE_DP_SHARD` | `2` | `0` (keep base FSDP-8) | trainer FSDP width. Must match GPU count with `SWE_GEN_DP`. |
@@ -742,7 +744,8 @@ these are the variables that touch them.
 | `SWE_TRAIN_STEPS` | `150` | `100` | total optimizer steps. |
 | `SWE_LR` | `3e-6` | `0` (keep `1e-6`) | learning rate. |
 | `SWE_LOSS` | unset | `dppo` | `dppo` / `dapo` / `grpo`. |
-| `SWE_MAX_CONTEXT_LEN` | `63488` | tmax recipes: `SWE_TMAX_CONTEXT` − 2048 (63488 at the 65536 default); other entry points still differ (63488 / 22528 / 20480) | per-session context budget: total prompt + all turns, the per-turn generation is clamped to what is left, and context notices count against it. Keep it below `SWE_TMAX_CONTEXT`. |
+| `SWE_TMAX_CONTEXT` | `81920` | `65536` | model context (vLLM `max_model_len`) and the trainer's packing width, set together. Must divide by the loss chunk count (`SWE_LOSS_CHUNKS`, recipe base 32). `rltrain.env` carries the team's 80K training cap; the reference run had the 65536 default. |
+| `SWE_MAX_CONTEXT_LEN` | `79872` | tmax recipes: `SWE_TMAX_CONTEXT` − 2048 (63488 at the 65536 default); other entry points still differ (63488 / 22528 / 20480) | per-session context budget: total prompt + all turns, the per-turn generation is clamped to what is left, and context notices count against it. Keep it at `SWE_TMAX_CONTEXT` − 2048. `rltrain.env` carries the team's 80K training cap; the reference run had 63488. |
 | `TMAX_AGENT` | `terminus` | `terminus` | agent scaffold. Changes the action distribution. |
 | `SWE_AGENT_TIMEOUT_FLOOR_SEC` | `7200` | `7200` | floor on a task's declared budget, never a ceiling. 900 capped TB-2.0 tasks and caused ~60% eval timeouts. |
 | `SWE_WRONG_SUBMIT_PENALTY` | unset | `0` | reward penalty for submitting a wrong answer. No run has set it; the table said `0.3` here while `rltrain.env` said unset and no `launch.json` carried it. Setting it makes a failure score -0.3 rather than 0, which is why the evolution thresholds count solves instead of testing rewards against 0. |
@@ -773,7 +776,7 @@ these are the variables that touch them.
 
 ### Performance and capacity
 
-<!-- `ours` is read off runs/tmax-9b--20260911-000700Z/launch.json, which records the env a run launched with. A root configured differently is its own launch.json, not this table. `unset` means the record does not carry the variable, which is not the same as setting it to the code default. -->
+<!-- `ours` is read off runs/tmax-9b--20260911-000700Z/launch.json, which records the env a run launched with, except the rows that say `rltrain.env` carries a training cap: those give the value it sets now and the reference run's beside it. A root configured differently is its own launch.json, not this table. `unset` means the record does not carry the variable, which is not the same as setting it to the code default. -->
 | variable | ours | code default | controls |
 |---|---|---|---|
 | `SWE_ROLLOUT_CONCURRENCY` | `500` | `16` | global cap on live rollouts (and sandboxes). |
@@ -785,9 +788,9 @@ these are the variables that touch them.
 | `SWE_GEN_PREFIX_CACHE` | `1` | unset (vLLM's choice) | prefix caching. ~2x prefill on this hybrid, byte-identical outputs in a local smoke. |
 | `SWE_GEN_CUDAGRAPH` | unset | `1` in tmax, `0` in swe_r2e | ~3x GDN decode. Note the families disagree. |
 | `SWE_DISABLE_CUSTOM_ALL_REDUCE` | `1` | unset | falls back to NCCL. |
-| `SWE_TIME_BUDGET_SEC` | `2400` | `2400` | agent wall clock per rollout. |
+| `SWE_TIME_BUDGET_SEC` | `7200` | `2400` | agent wall clock per rollout for rows that declare no budget (all training rows). `rltrain.env` carries the team's 2 h training cap; the reference run had 2400. |
 | `TMAX_EXEC_TIMEOUT_SEC` | `120` | `120` | per-command timeout inside the sandbox. |
-| `TMAX_TERMINUS_MAX_TURNS` | `120` | `64` | turn ceiling. |
+| `TMAX_TERMINUS_MAX_TURNS` | `120` | `64` | turn ceiling; the team's 120-turn training cap. |
 | `TMAX_TURN_MAX_TOKENS` | `16384` | `16384` (terminus) | per-turn generation cap. 32768 lets one turn overrun the context warning into the wall. |
 | `SWE_CKPT_INTERVAL` | `5` | `20` | steps between saves. |
 | `SWE_CKPT_KEEP` | `3` | `3` | checkpoints retained, at ~98 GiB each. |
