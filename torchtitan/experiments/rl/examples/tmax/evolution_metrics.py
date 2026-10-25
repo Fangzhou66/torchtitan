@@ -86,6 +86,11 @@ AFTER_GROUPS = 6
 # Training steps between uploads of the rewrite report: its rows change as
 # groups finish, and every upload is the whole table.
 REWRITE_REPORT_EVERY = 10
+# The runbook's table of evolution keys is the one place each is described; the
+# trainer uploads it as the evolution/glossary table so W&B shows it too.
+RUNBOOK = Path(__file__).parent / "runbook/RUNBOOK.md"
+GLOSSARY_SECTION = "### Evolution charts in the training W&B run"
+GLOSSARY_COLUMNS = ("metric", "description")
 FLOW_KEYS = ("signals_issued", "signals_consumed", "rewrites_accepted", "rewrites_trained")
 DIRECTIONS = ("harder", "easier")
 # Merges the latency median looks back over: recent enough to move when the
@@ -541,6 +546,17 @@ class EvolutionMetrics:
             [[self.history[s][direction][i] for s in steps] for i in range(len(FLOW_KEYS))],
             list(FLOW_KEYS),
         )
+
+
+def glossary_rows(runbook: Path = RUNBOOK) -> list[list[str]]:
+    """One row per line of the runbook's evolution key table, backticks dropped."""
+    section = runbook.read_text().split(GLOSSARY_SECTION, 1)[1].split("\n## ", 1)[0]
+    rows = []
+    for line in section.splitlines():
+        if line.startswith("| `"):
+            key, description = line.strip().strip("|").split(" | ", 1)
+            rows.append([key.strip().replace("`", ""), description.strip().replace("`", "")])
+    return rows
 
 
 def _cut(text: object) -> str | None:
