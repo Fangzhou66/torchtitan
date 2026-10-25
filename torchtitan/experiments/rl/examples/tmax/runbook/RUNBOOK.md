@@ -1067,7 +1067,12 @@ opposite things -- `harder` comes from a group that all passed, `easier` from
 one that all failed -- and move opposite ways as the policy learns; summed,
 their gaps mix two queues and a flat total can hide both moving. A rewrite
 counts under the direction of the signal that asked for it, whichever route
-handled it:
+handled it. `evolution/flow/chart_both` puts both directions' eight lines on one
+set of axes, for comparing how large the two flows are. The charts' steps are
+kept in `runs/<run>/trainer/evolution_flow.jsonl`, so a resumed trainer charts
+the steps before the resume as well; a rewrite already accepted when a trainer
+process starts enters no `accept_latency_steps`, since its accept step is not
+known to that process.
 
 - `signals_issued`: signals this run wrote, counted once the group's claim is
   visible.

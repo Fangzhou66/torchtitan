@@ -2336,6 +2336,7 @@ class Controller(Configurable):
                         # lines are the point; summed across directions the
                         # gaps mix two queues that move opposite ways.
                         charts = {}
+                        both_ys, both_keys = [], []
                         for direction in ("harder", "easier"):
                             xs, ys, keys = self._evolution_flow.flow_series(direction)
                             charts[f"evolution/flow/chart_{direction}"] = (
@@ -2347,6 +2348,17 @@ class Controller(Configurable):
                                     xname="Training step",
                                 )
                             )
+                            both_ys += ys
+                            both_keys += [f"{key}_{direction}" for key in keys]
+                        # Both directions' eight lines on one set of axes, for
+                        # comparing their sizes; the gaps are read per direction.
+                        charts["evolution/flow/chart_both"] = wandb.plot.line_series(
+                            xs,
+                            both_ys,
+                            keys=both_keys,
+                            title="Evolution flow, harder and easier signals (cumulative)",
+                            xname="Training step",
+                        )
                         wandb.log(charts, step=step, commit=False)
                         # Each repair with the rewriter's own report, so a
                         # reward hack is read in W&B, not only counted. Logged

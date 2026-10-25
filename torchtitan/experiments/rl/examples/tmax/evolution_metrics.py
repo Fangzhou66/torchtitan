@@ -23,7 +23,11 @@ reaches training only when the epoch order next reaches its task.
 The two signal directions mean opposite things -- `harder` comes from a group
 that all passed, `easier` from one that all failed -- and move opposite ways as
 the policy learns, so each direction also gets its own four curves
-(`<key>_<direction>`, one overlay chart per direction). A signal's direction
+(`<key>_<direction>`, one overlay chart per direction). The counts at each
+step are appended to the run's `trainer/evolution_flow.jsonl` and read back
+when a trainer resumes, so the charts keep the steps before the resume. A
+rewrite already accepted when this process first polls was accepted at a step
+it cannot know, and enters no `accept_latency_steps`. A signal's direction
 follows every stage, so a rewrite counts under the direction of the signal
 that asked for it whatever route handled it.
 
@@ -175,8 +179,14 @@ class EvolutionMetrics:
         # Why rewrites ended where they did, and how long each took.
         self.stages: Counter[tuple[str, str]] = Counter()
         self.rewrite_secs: list[float] = []
-        # Flow counts at each logged step: None for all signals, else by direction.
-        self.history: dict[int, dict[str | None, tuple[int, ...]]] = {}
+        # Flow counts at each logged step: None for all signals, else by
+        # direction. Read back from the run, so a resumed trainer charts the
+        # steps of the lifetimes before it too.
+        self.history: dict[int, dict[str | None, tuple[int, ...]]] = self._load_history()
+        # The first step this process logs. An outcome already on disk by then
+        # was accepted at a step this process cannot know (before the resume,
+        # or by an earlier attempt), so it enters no latency and no report step.
+        self.first_step: int | None = None
         # First training on an accepted revision: trained groups by task, and
         # accepted rewrites still waiting for one.
         self.trained: dict[str, list[tuple[float, str, int]]] = {}
@@ -200,6 +210,16 @@ class EvolutionMetrics:
         self.rewrite_events: list[tuple[int | None, dict]] = []
         self.signal_measured: dict[str, str] = {}
         self.finished_groups: dict[str, list[tuple[float, str, int, int]]] = {}
+
+    def _load_history(self) -> dict[int, dict[str | None, tuple[int, ...]]]:
+        history = {}
+        # A later line for the same step is the lifetime that logged it again.
+        for line in _new_lines(self.base.evolution_flow, 0)[0]:
+            history[line["step"]] = {
+                None if key == "all" else key: tuple(counts)
+                for key, counts in line["flow"].items()
+            }
+        return history
 
     def _poll_claims(self) -> None:
         events, self.claim_offset = _new_lines(
@@ -391,7 +411,13 @@ class EvolutionMetrics:
         self._poll_claims()
         self._poll_signals()
         self._poll_ledger()
-        self._poll_outcomes(step)
+        observed = step if self.first_step is not None else None
+        if step is not None and self.first_step is None:
+            self.first_step = step
+            # Steps from here on were logged by a lifetime whose checkpoint
+            # this one did not resume from; this one logs them again.
+            self.history = {s: h for s, h in self.history.items() if s < step}
+        self._poll_outcomes(observed)
         self._classify_stale()
         self._match_training()
         closed = Counter(o for s, o in self.closed.items() if s in self.issued)
@@ -412,6 +438,16 @@ class EvolutionMetrics:
         }
         if step is not None:
             self.history[step] = {None: flow, **by_direction}
+            layout.append_jsonl(
+                self.base.evolution_flow,
+                {
+                    "step": step,
+                    "flow": {
+                        "all" if key is None else key: list(counts)
+                        for key, counts in self.history[step].items()
+                    },
+                },
+            )
         values = {
             **{f"evolution/flow/{k}": float(v) for k, v in zip(FLOW_KEYS, flow, strict=True)},
             **{f"evolution/signals/{o}": float(closed[o]) for o in SIGNAL_OUTCOMES},
