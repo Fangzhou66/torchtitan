@@ -1976,12 +1976,13 @@ _PARTIAL_PASSING = (
 
 
 def _calibration_guidance(solved: int, attempts: int) -> str:
-    """The calibration text for a harder rewrite measured at solved/attempts."""
+    """The calibration text for a harder rewrite measured at solved/attempts,
+    with the deployment's extra rules (so.extra_guidance) after it."""
     if solved >= attempts:
-        return _CALIBRATION_GUIDANCE
+        return _CALIBRATION_GUIDANCE + so.extra_guidance()
     return _CALIBRATION_GUIDANCE.replace(
         _ALL_PASSING, _PARTIAL_PASSING.format(solved=solved, attempts=attempts), 1
-    )
+    ) + so.extra_guidance()
 
 
 _HARDER_JOB = """This task was solved {solved} of {attempts} attempts and met the

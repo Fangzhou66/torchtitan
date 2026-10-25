@@ -1614,3 +1614,14 @@ def test_partial_calibration_says_what_was_measured_and_restores_one_part():
     assert partial.startswith("The previous simplification is now solved in 4 of 12 attempts")
     assert "one coherent\npart of what the simplifications removed" in partial
     assert "since-original.diff" in partial
+
+
+def test_calibration_appends_the_deployment_extra_rules(monkeypatch, tmp_path):
+    extra = tmp_path / "extra.md"
+    extra.write_text("## Bench rule\n\nWithdraw the hints first.\n")
+    monkeypatch.setenv("EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE", str(extra))
+    for solved in (12, 4):
+        g = ec._calibration_guidance(solved, 12)
+        assert g.rstrip().endswith("Withdraw the hints first.")
+    monkeypatch.delenv("EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE")
+    assert ec._calibration_guidance(12, 12) == ec._CALIBRATION_GUIDANCE
