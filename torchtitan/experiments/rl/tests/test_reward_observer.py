@@ -570,9 +570,24 @@ class RewardObserverTest(unittest.TestCase):
             claim(3, "b", "b@0", 250)  # another task
             claim(4, "a", "a@0", 400)  # rewrite under way
             claim(5, "a", "a@1", 500)  # already the new revision
+            # A signal the loop deferred counts none of its wait.
+            claim(7, "c", "c@0", 0)
+            observer.layout.write_json_atomic(
+                run.signal("c", 7),
+                {"task": "c", "group": 7, "created": stamp(base + 100)},
+            )
+            claim(8, "c", "c@0", 200)
+            observer.layout.append_jsonl(
+                root.evolution.ledger,
+                {
+                    "signal": observer.layout.signal_id(run.name, "c", 7),
+                    "outcome": "deferred",
+                    "stamp": stamp(base + 300),
+                },
+            )
             metrics = outcome_metrics.EvolutionMetrics(run, root)
             open_values = metrics.poll(step=1)
-            self.assertEqual(open_values["evolution/stale/while_waiting"], 0)
+            self.assertEqual(open_values["evolution/stale/groups"], 0)
 
             outcome_metrics.record_outcome(
                 root,
@@ -591,8 +606,7 @@ class RewardObserverTest(unittest.TestCase):
             )
             claim(6, "a", "a@0", 700)  # after the signal closed
             values = metrics.poll(step=2)
-            self.assertEqual(values["evolution/stale/while_waiting"], 1)
-            self.assertEqual(values["evolution/stale/while_rewriting"], 1)
+            self.assertEqual(values["evolution/stale/groups"], 2)
             self.assertEqual(metrics.poll(step=3), values)
 
     def test_accepted_revision_counts_as_trained_at_its_first_training_step(self):

@@ -31,11 +31,14 @@ it cannot know, and enters no `accept_latency_steps`. A signal's direction
 follows every stage, so a rewrite counts under the direction of the signal
 that asked for it whatever route handled it.
 
-`stale/*` counts the groups trained on a task's original while its rewrite was
-pending: claimed after one of this run's signals asked to rewrite that exact
-revision and before the loop consumed the signal. A group claimed before the
-rewrite started counts as `while_waiting`, after it as `while_rewriting`.
-Each signal is classified when it is consumed, so the counts only grow.
+`stale/groups` counts the groups trained on a task's original while its
+rewrite was pending: claimed after one of this run's signals asked to rewrite
+that exact revision and before the loop handled the signal. Such a group most
+likely repeats the all-pass or all-fail result the signal reported, so this is
+training spent on a revision already known to carry no signal while the loop
+caught up. Only signals the loop handled count; one it deferred, superseded or
+judged junk was never going to be rewritten from that wait. Each signal is
+counted when it is handled, so the count only grows.
 
 `repairs/*` counts the defects harder and easier rewrites repaired on the way
 (declared in run/repair.json; one line each in evolution/repairs.jsonl):
@@ -198,10 +201,9 @@ class EvolutionMetrics:
         self.group_revision: dict[tuple[str | None, int], str] = {}
         self.signal_span: dict[str, tuple[str, str, float]] = {}
         self.closed_at: dict[str, float] = {}
-        self.rewrite_started: dict[str, float] = {}
         self.classified: set[str] = set()
         self.stale_claims: set[str] = set()
-        self.stale: Counter[str] = Counter()
+        self.stale_groups = 0
         self.repairs: Counter[str] = Counter()
         # One row per declared repair, for the report table beside the counts.
         self.repair_rows: list[list] = []
@@ -318,12 +320,6 @@ class EvolutionMetrics:
                 continue
             self.rewrites.add(event["rewrite"])
             self.rewrite_events.append((step, event))
-            if event.get("started") and event.get("signal"):
-                started = layout.parse_stamp(event["started"])
-                # A retried signal waited until its first attempt began.
-                self.rewrite_started[event["signal"]] = min(
-                    started, self.rewrite_started.get(event["signal"], started)
-                )
             status = event["status"]
             if fixes := int(event.get("repairs") or 0):
                 self.repairs["rewrites"] += 1
@@ -372,11 +368,14 @@ class EvolutionMetrics:
 
     def _classify_stale(self) -> None:
         for signal, closed_at in self.closed_at.items():
-            if signal in self.classified or signal not in self.signal_span:
+            if (
+                signal in self.classified
+                or signal not in self.signal_span
+                or self.closed.get(signal) != "handled"
+            ):
                 continue
             self.classified.add(signal)
             task, revision, created = self.signal_span[signal]
-            started = self.rewrite_started.get(signal, closed_at)
             for claimed_at, claim_revision, occurrence in self.claims.get(task, ()):
                 if (
                     claim_revision != revision
@@ -385,8 +384,7 @@ class EvolutionMetrics:
                 ):
                     continue
                 self.stale_claims.add(occurrence)
-                key = "while_waiting" if claimed_at < started else "while_rewriting"
-                self.stale[key] += 1
+                self.stale_groups += 1
 
     def _match_training(self) -> None:
         """An accepted rewrite reaches training at the first trained group of
@@ -457,10 +455,7 @@ class EvolutionMetrics:
             },
             **{f"evolution/repairs/{k}": float(self.repairs[k]) for k in REPAIR_KEYS},
             **{f"evolution/repairs/kind_{k}": float(self.repairs[f"kind_{k}"]) for k in REPAIR_KINDS},
-            **{
-                f"evolution/stale/{k}": float(self.stale[k])
-                for k in ("while_waiting", "while_rewriting")
-            },
+            "evolution/stale/groups": float(self.stale_groups),
             **{
                 f"evolution/{route}/{outcome}": float(counts[outcome])
                 for route, counts in self.routes.items()
