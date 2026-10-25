@@ -290,7 +290,14 @@ class _Episode:
         while not max_turns or self.turns < max_turns:
             reply = await task.adapter.complete(
                 task.session_id,
-                {"system": system_prompt, "messages": messages, "stream": False},
+                # plain_text: the reply as a text-only API returns it, so a
+                # stray <tool_call> token cannot hide the ```bash block after it.
+                {
+                    "system": system_prompt,
+                    "messages": messages,
+                    "stream": False,
+                    "plain_text": True,
+                },
             )
             if reply is None:
                 # The session is closed or the generator yielded nothing.
