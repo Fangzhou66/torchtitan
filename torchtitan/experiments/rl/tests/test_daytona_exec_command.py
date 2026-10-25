@@ -1,6 +1,8 @@
 """``_build_exec_command`` run through a local bash, as the Daytona session runs it."""
 
+import shutil
 import subprocess
+import uuid
 
 import pytest
 
@@ -27,7 +29,14 @@ def test_stdin_exit_code_and_heredoc_survive(tmp_path):
     assert (proc.returncode, proc.stdout) == (3, "$x stays literal\ngot=hi\n")
 
 
-@pytest.mark.parametrize("pad", [100, daytona._EXEC_INLINE_SCRIPT_MAX + 10])
-def test_a_script_past_the_inline_cap_still_runs_from_the_file(tmp_path, pad):
+@pytest.mark.parametrize("pad", [100, 200_000])
+def test_a_script_past_the_argv_limit_still_runs(tmp_path, pad):
     proc = _run(f"echo {'y' * pad} | wc -c", tmp_path)
     assert (proc.returncode, proc.stdout.strip()) == (0, str(pad + 1))
+
+
+@pytest.mark.skipif(shutil.which("pkill") is None, reason="needs pkill")
+def test_pkill_f_in_the_command_does_not_kill_its_own_shell(tmp_path):
+    token = f"tt_self_match_{uuid.uuid4().hex}"
+    proc = _run(f"pkill -f {token}; echo survived", tmp_path)
+    assert (proc.returncode, proc.stdout) == (0, "survived\n")

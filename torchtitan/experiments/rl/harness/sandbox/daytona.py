@@ -59,8 +59,6 @@ _EXEC_CLAIM_DIR = "/dev/shm/.torchtitan_exec_claims"
 _EXEC_OUTPUT_DIR = "/dev/shm/.torchtitan_exec_out"
 _EXEC_RESULT_DIR = "/dev/shm/.torchtitan_exec"
 _EXEC_STAGING_DIR = "/dev/shm"
-# Under MAX_ARG_STRLEN (128 KiB), the cap on one argv string.
-_EXEC_INLINE_SCRIPT_MAX = 120_000
 # The launch is one short one-shot exec that backgrounds the wrapper and
 # returns; this bounds only that request, never the command.
 _LAUNCH_RPC_TIMEOUT_SEC = 30
@@ -240,13 +238,14 @@ def _build_exec_command(
         f"{timeout}s",
         *argv,
     ]
-    # Run the script's text with ``bash -c`` so errors read "bash: line N:" as
-    # in a plain shell, not the staging path; scripts past the argv limit still
-    # run from the file.
+    # eval the script's text inside a fixed ``bash -c`` so errors read
+    # "bash: line N:" as in a plain shell, not the staging path. The text must
+    # never be an argv string itself: a ``pkill -f`` in it would match and kill
+    # its own shell.
     runner = (
-        f'if [ "$(wc -c < "$_tt_script_path")" -le {_EXEC_INLINE_SCRIPT_MAX} ]; then '
-        f'{shlex.join(argv)} -c "$(cat "$_tt_script_path")" bash; '
-        f'else {shlex.join(argv)} "$_tt_script_path"; fi'
+        f"{shlex.join(argv)} -c "
+        + shlex.quote('_tt_s=$(cat "$1"); set --; eval "unset _tt_s; $_tt_s"')
+        + ' bash "$_tt_script_path"'
     )
     return (
         f"_tt_script_path={script_path_prefix}$$; "
