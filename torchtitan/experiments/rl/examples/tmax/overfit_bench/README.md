@@ -304,3 +304,13 @@ rewrite's author reads indexes training attempts only. It takes the evolve
 loop's lock, so it never runs beside the reference rewriter on one job. A
 seeded version it did not make has no package under `evolution/tasks/` past
 r0, so a signal about it is closed as junk.
+
+To start the next rung as soon as a version gives a gradient rather than once
+it is mastered, set `SWE_EVOLUTION_HARDER_RATIO=0.01` in the ladder job's
+`runner.env` (the trainer then sends a harder signal at a version's first
+partial solve) and `EVOLVE_HARDER_FROM_PARTIAL=1` in its `evolution/rewriter.env`
+(that rewrite restores one part toward the original instead of adding a new
+difficulty). The version keeps training beside its child, and the original is
+never hardened. Measured reason: on v7 (2026-10-23), r3 was learnable from step
+33 but never solved a whole group, so at the default ratio 1.0 the ladder never
+built the next rung; at 0.75 it would have done so only at step 177.
