@@ -116,9 +116,12 @@ _CONFIRMATION_PROMPT = "Are you sure you want to mark the task as complete?"
 # trained on it learned to submit unfinished work as soon as the warning showed,
 # so it says a failing submission scores like running out. "v2" remains an
 # opt-in labelled notice before the observation, repeated at
-# _CONTEXT_REPEAT_WARN_FRACS.
+# _CONTEXT_REPEAT_WARN_FRACS. "urge" is della without "the task counts as
+# failed", for training that grades unsubmitted rollouts at the verifier: there
+# running out is not a failure, but with no notice at all run 1025's policy
+# stopped submitting and ran into the context wall.
 _CONTEXT_NOTICE_STYLE = os.environ.get("TMAX_CONTEXT_NOTICE_STYLE", "checked")
-_APPENDED_NOTICE_STYLES = ("della", "checked")
+_APPENDED_NOTICE_STYLES = ("della", "checked", "urge")
 # 0 drops the "[Context: N% used, ...]" line the appended styles add on every
 # turn between warnings, keeping only the warnings themselves.
 _CONTEXT_STATUS_LINES = os.environ.get("TMAX_CONTEXT_STATUS_LINES", "1") == "1"
@@ -133,7 +136,7 @@ _CONTEXT_REPEAT_TOKENS_LEFT = int(
 )
 if _CONTEXT_NOTICE_STYLE not in ("v2", *_APPENDED_NOTICE_STYLES):
     raise ValueError(
-        "TMAX_CONTEXT_NOTICE_STYLE must be v2, della or checked, got "
+        "TMAX_CONTEXT_NOTICE_STYLE must be v2, della, checked or urge, got "
         f"{_CONTEXT_NOTICE_STYLE!r}"
     )
 
@@ -305,25 +308,30 @@ class _AdapterLLM:
             self._context_warned_at.update(due)
         elif used < self._context_warn_frac * self._max_context:
             return ""
-        elif _CONTEXT_NOTICE_STYLE == "della":
+        elif _CONTEXT_NOTICE_STYLE in ("della", "urge"):
             warn = not self._context_warned_at
             if warn:
                 self._context_warned_at.add(pct)
         if _CONTEXT_NOTICE_STYLE in _APPENDED_NOTICE_STYLES:
             if warn:
                 advice = (
-                    ", finish the essential work, verify it, and mark the task "
-                    "complete."
-                    if _CONTEXT_NOTICE_STYLE == "della"
-                    else " and keep working efficiently. A submission that fails the "
+                    " and keep working efficiently. A submission that fails the "
                     "tests scores the same as running out, so mark the task "
                     "complete only once your checks pass."
+                    if _CONTEXT_NOTICE_STYLE == "checked"
+                    else ", finish the essential work, verify it, and mark the task "
+                    "complete."
+                )
+                stakes = (
+                    ""
+                    if _CONTEXT_NOTICE_STYLE == "urge"
+                    else "If it runs out, the episode ends before you can submit "
+                    "and the task counts as failed. "
                 )
                 return (
                     f"WARNING: You have used {pct}% of your context window "
                     f"({used:,} of {self._max_context:,} tokens); about {left:,} "
-                    "tokens remain. If it runs out, the episode ends before you can "
-                    "submit and the task counts as failed. Avoid commands that print "
+                    f"tokens remain. {stakes}Avoid commands that print "
                     f"large output{advice}"
                 )
             if not _CONTEXT_STATUS_LINES:
