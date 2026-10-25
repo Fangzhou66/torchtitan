@@ -301,6 +301,11 @@ def _rollouter(admission):
     r._strict_format = r._strict_opening = r._strict_truncation = False
     r._eval_strict_format = r._eval_strict_opening = r._eval_strict_truncation = False
     r._eval_shadow_grade_timeouts = True
+    # Set in __init__, which this bypasses (as in test_tb4_harbor_env's fixture).
+    r._eval_grade_unsubmitted = False
+    r._grade_unsubmitted = False
+    r._eval_context_notice = True
+    r._format_streak_limit = 0
     r._reward_mode = "sparse"
     r._read_ctrf = False
     r._shadow_grade_unsubmitted = False
@@ -384,6 +389,9 @@ def test_the_rollouter_admits_gpu_rows_and_lets_the_rest_through(monkeypatch, tm
         asyncio.wait_for(_run_all(_rollouter(admission), gpu_rows + cpu_rows), timeout=30)
     )
     assert not [r for r in results if isinstance(r, BaseException)]
+    # Every trial ran its agent: none failed inside the rollout either, so the
+    # slots were held across real trials, not error exits.
+    assert not [r for r in results if r[-1].infra_failed]
     assert active["peak"] == 2
     held = [admission.try_acquire(), admission.try_acquire()]
     assert all(held)  # every slot came back
