@@ -339,6 +339,27 @@ def test_a_command_whose_status_never_arrives_reads_as_a_timeout(monkeypatch):
     assert "timed out" in shown.lower()
 
 
+def test_lenient_action_shapes():
+    assert miniswe.lenient_action("x", ["ls", " pwd\n"]) == "ls\npwd"
+    py = "Run it:\n```python\nprint(1)\n```"
+    assert miniswe.lenient_action(py, []) == (
+        "python3 - <<'__MINISWE_PYTHON__'\nprint(1)\n__MINISWE_PYTHON__"
+    )
+    assert miniswe.lenient_action("no block at all", []) is None
+    two_py = "```python\na\n```\n```python\nb\n```"
+    assert miniswe.lenient_action(two_py, []) is None
+
+
+def test_lenient_parse_runs_two_blocks_when_on(monkeypatch):
+    monkeypatch.setattr(miniswe, "_LENIENT_PARSE", True)
+    sandbox = _Sandbox([(0, "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n")])
+    adapter = _Adapter([_reply("```bash\ncd /app\n```\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```")])
+    run = _run(adapter, sandbox)
+    assert run.submitted and run.format_errors == 0
+    assert run.format_breakdown["lenient_parses"] == 1
+    assert sandbox.calls[-1]["cmd"] == "cd /app\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+
 # ---- what the rollouter reads ------------------------------------------------
 
 

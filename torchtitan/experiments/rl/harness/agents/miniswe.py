@@ -110,6 +110,29 @@ def parse_actions(text: str) -> list[str]:
     return re.findall(ACTION_REGEX, text, re.DOTALL)
 
 
+# TMAX_MINISWE_LENIENT_PARSE=1 runs replies upstream would reject, on the two
+# most common shapes seen in the 1024 run's eval (pv50: about 250 replies with a
+# lone ```python block, about 230 with two or more ```bash blocks). Off keeps
+# upstream's exactly-one-block rule.
+_LENIENT_PARSE = os.environ.get("TMAX_MINISWE_LENIENT_PARSE", "0") == "1"
+_PYTHON_REGEX = r"```python[ \t]*\n(.*?)\n```"
+_PY_HEREDOC = "__MINISWE_PYTHON__"
+
+
+def lenient_action(text: str, actions: list[str]) -> str | None:
+    """One command for a reply without exactly one ```bash block, or None.
+
+    Several ```bash blocks run in order as one script; a reply with none and a
+    single ```python block runs it with python3 from a heredoc."""
+    if len(actions) > 1:
+        return "\n".join(action.strip() for action in actions)
+    if not actions:
+        python = re.findall(_PYTHON_REGEX, text, re.DOTALL)
+        if len(python) == 1 and _PY_HEREDOC not in python[0]:
+            return f"python3 - <<'{_PY_HEREDOC}'\n{python[0]}\n{_PY_HEREDOC}"
+    return None
+
+
 def is_submission(output: str, returncode: int) -> bool:
     """DefaultAgent.has_finished: the marker alone on the first output line of a
     command that exited 0. A failed command leaves the agent to retry."""
@@ -150,6 +173,8 @@ class _Episode:
         self.exec_trace: list[dict] = []
         # Commands whose exit status never arrived, answered as timeouts.
         self.status_timeouts = 0
+        # Replies run under TMAX_MINISWE_LENIENT_PARSE that upstream rejects.
+        self.lenient_parses = 0
         # AgentRun.format_breakdown, in the shape the tmax format metrics read.
         # A turn without exactly one block counts as "truncated" when it hit the
         # generation cap, "no_commands" with zero blocks, "other" with several.
@@ -175,6 +200,7 @@ class _Episode:
             "repeat_turns": self.repeat_turns,
             "replies": self.replies,
             "truncated_turns": self.truncated_turns,
+            "lenient_parses": self.lenient_parses,
         }
 
     async def _exec(self, command: str, timeout: int) -> tuple[int, str, float]:
@@ -275,6 +301,12 @@ class _Episode:
             )
             capped = reply.get("stop_reason") in ("max_tokens", "length")
             actions = parse_actions(text)
+            lenient = None
+            if _LENIENT_PARSE and len(actions) != 1:
+                lenient = lenient_action(text, actions)
+            if lenient is not None:
+                self.lenient_parses += 1
+                actions = [lenient]
             self._count_reply(text, capped, len(actions))
             if len(actions) != 1:
                 messages.append(

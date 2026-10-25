@@ -618,6 +618,11 @@ def _format_breakdown_metrics(
             "rollout/confirm_asks_mean",
             mean(b.get("confirm_asks", 0) for b in present),
         ),
+        # miniswe under TMAX_MINISWE_LENIENT_PARSE: replies run that upstream rejects.
+        m.Metric(
+            "rollout/lenient_parses_mean",
+            mean(b.get("lenient_parses", 0) for b in present),
+        ),
     ]
     # Of the siblings Terminus-2 asked "Are you sure?", the share that declined
     # at least once (went back to work instead of confirming).
