@@ -1,0 +1,37 @@
+{
+  "seed": 20260928,
+  "sources": [
+    {
+      "name": "agentpick-clean-fast",
+      "repo": "Fzz1/tb-training-mix-agentpick",
+      "revision": "7dee55fe37cf5d2119539a7996d04c9fd558ca09",
+      "adapter": "tmax_reaudit",
+      "metadata": "data/clean_fast.parquet",
+      "archives": [
+        "data/tasks-clean_fast.tar"
+      ],
+      "count": null,
+      "skip_unpackable": true,
+      "exclude": [
+        "rts_task_d35d647825db9db40f37a95c",
+        "tw_14495"
+      ]
+    },
+    {
+      "name": "agentpick-calibforge-clean-fast",
+      "repo": "Fzz1/tb-training-mix-agentpick",
+      "revision": "7dee55fe37cf5d2119539a7996d04c9fd558ca09",
+      "adapter": "tmax_reaudit",
+      "metadata": "data/calibforge_clean_fast.parquet",
+      "archives": [
+        "data/tasks-calibforge_clean_fast.tar"
+      ],
+      "count": null,
+      "skip_unpackable": true,
+      "exclude": [
+        "software-engineering_20260419_065313_011",
+        "system-administration_20260606_153537_008"
+      ]
+    }
+  ]
+}
