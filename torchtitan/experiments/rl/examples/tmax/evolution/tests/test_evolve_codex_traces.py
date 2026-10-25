@@ -1501,3 +1501,15 @@ def test_traces_spec_follows_the_attempts_harness(tmp_path):
     for header in ({"agent": "terminus"}, {"task": "t"}):
         attempt.write_text(json.dumps(header) + "\n")
         assert evolve_codex._traces_spec(tmp_path) == evolve_codex._TRACES_SPEC
+
+
+def test_partial_calibration_says_what_was_measured_and_restores_one_part():
+    """A harder rewrite from a partly solved simplification (EVOLVE_HARDER_FROM_PARTIAL)
+    is not told every attempt passed."""
+    full = ec._calibration_guidance(12, 12)
+    assert full == ec._CALIBRATION_GUIDANCE
+    partial = ec._calibration_guidance(4, 12)
+    assert ec._ALL_PASSING not in partial
+    assert partial.startswith("The previous simplification is now solved in 4 of 12 attempts")
+    assert "one coherent\npart of what the simplifications removed" in partial
+    assert "since-original.diff" in partial
