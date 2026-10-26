@@ -18,7 +18,9 @@ Tasks: every Terminal-Bench 2.1 task (89) and every Terminal-Bench 4 task (66).
 - **A training attempt** has the main training run's caps: 120 Terminus turns
   (`SWE_BENCH_MAX_TURNS`), 2 h of wall clock (`SWE_BENCH_TRAIN_BUDGET_SEC`)
   and an 80K context (`SWE_TMAX_CONTEXT=81920`, agent budget 79872), the same
-  for every task whatever it declares; no budget floor applies. Grading keeps
+  for every task whatever it declares; no budget floor applies. An attempt
+  that ends without submitting is scored at its verifier verdict, as the
+  readout scores it (`TMAX_GRADE_UNSUBMITTED_TRAIN`, from 2026-10-26). Grading keeps
   the task's own verifier timeout. Jobs before 2026-10-25 trained at 60 turns
   with no wall clock and the 63488-token context `runbook/rltrain.env` fills in.
 - **Sandbox**: every sandbox, training and readout, and a separate verifier's,
