@@ -336,14 +336,29 @@ def _after_shebang(test_sh: str, block: str) -> str:
     return block + test_sh
 
 
+# Per-task Daytona sizes that replace the declared ones. extract-moves-from-video
+# declares 1 CPU / 2 GB for decoding a video frame by frame: in the 2026-10-25 eval
+# 3 of 5 trials showed OOM and a fourth lost its sandbox ("failed to resolve
+# container IP"), so it gets 2 CPU / 4 GB. Disk is unchanged.
+_RESOURCE_OVERRIDES: dict[str, dict[str, int]] = {
+    "extract-moves-from-video": {"daytona_cpu": 2, "daytona_mem_gb": 4},
+}
+
+
 def apply_env_patches(row: dict) -> dict:
     """Apply this task's ``_ENV_PATCHES`` entry to ``row`` in place.
 
-    This is a no-op for any task without an entry. It is idempotent: a ``test_sh``
+    ``_RESOURCE_OVERRIDES`` is applied here too and recorded in
+    ``metadata.resource_patch``. This is a no-op for any task without an entry in
+    either table. It is idempotent: a ``test_sh``
     that already carries the injected block is left alone. The patched row also
     records its upstream source in ``metadata.env_patch``.
     """
     md = row["metadata"]
+    resources = _RESOURCE_OVERRIDES.get(md.get("instance_id"))
+    if resources is not None:
+        md.update(resources)
+        md["resource_patch"] = dict(resources)
     patch = _ENV_PATCHES.get(md.get("instance_id"))
     if patch is None:
         return row
