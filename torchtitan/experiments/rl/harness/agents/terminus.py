@@ -518,6 +518,9 @@ class _CountingParser:
     Warning-only turns (empty commands, silent no-op) do not, and neither does
     re-parsing a capped turn's text, which the truncation rule owns. With
     ``strict_opening`` only a rejected turn before the first usable one does.
+    With ``format_streak_limit`` (0 = off) that many unusable turns in a row,
+    warning-only ones included, flag one too: a policy stuck answering without
+    commands otherwise loops until the context or turn cap.
     """
 
     def __init__(
@@ -526,11 +529,13 @@ class _CountingParser:
         llm: Any = None,
         strict_format: bool = False,
         strict_opening: bool = False,
+        format_streak_limit: int = 0,
     ) -> None:
         self._inner = inner
         self._llm = llm
         self._strict_format = strict_format
         self._strict_opening = strict_opening
+        self._format_streak_limit = format_streak_limit
         self.format_errors = 0
         self.completion_signals = 0
         self.categories = dict.fromkeys(FORMAT_ERROR_CATEGORIES, 0)
@@ -579,6 +584,12 @@ class _CountingParser:
             and self._llm is not None
             and getattr(result, "error", None)
             and content != self._llm.last_truncated_text
+        ):
+            self._llm.flag_violation("format", category)
+        if (
+            self._format_streak_limit
+            and self._streak >= self._format_streak_limit
+            and self._llm is not None
         ):
             self._llm.flag_violation("format", category)
         return result
@@ -1200,6 +1211,7 @@ async def terminus_agent(
                     llm=llm,
                     strict_format=task.strict_format,
                     strict_opening=task.strict_opening,
+                    format_streak_limit=task.format_streak_limit,
                 )
                 agent._parser = parser
             _count_subagent_calls(agent, llm)
