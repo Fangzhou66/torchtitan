@@ -1639,31 +1639,32 @@ def test_a_model_at_capacity_is_a_provider_failure() -> None:
     assert ec._agent_failure_type(out, "") == "provider_capacity"
 
 
-def test_an_author_cut_off_by_the_provider_continues_its_own_thread(tmp_path, monkeypatch) -> None:
+def test_a_session_cut_off_by_the_provider_continues_its_own_thread(tmp_path, monkeypatch) -> None:
     rw = _rewrite(tmp_path, monkeypatch, job="easier")
     monkeypatch.setattr(ec, "PROVIDER_RESUMES", 2)
     monkeypatch.setattr(ec, "PROVIDER_RESUME_SEC", 0)
-    _fake_popen(monkeypatch, returncode=1, out='{"type":"error","message":"Selected model is at capacity."}')
-    with pytest.raises(ec.AgentSessionError) as raised:
-        with ec.session(rw, "agent", timeout=5) as first:
-            jsonl = first.dir.codex_home / "sessions/2026/10/26/rollout-a.jsonl"
-            jsonl.parent.mkdir(parents=True)
-            jsonl.write_text('{"type":"session_meta","payload":{"id":"sid-a"}}\n')
-            ec._run_codex(first, rw.package, "simplify it")
-    assert raised.value.failure_type == "provider_capacity"
-    seen = _fake_popen(monkeypatch, out="done\n")
+    calls = []
 
-    class Deadline:
-        def timeout(self, stage, maximum_sec, reserve_final_validation):
-            return 60
+    def factory(command, **kwargs):
+        calls.append(command)
+        first = len(calls) == 1
+        if first:
+            home = Path(kwargs["env"]["CODEX_HOME"]) / "sessions/2026/10/26/rollout-a.jsonl"
+            home.parent.mkdir(parents=True)
+            home.write_text('{"type":"session_meta","payload":{"id":"sid-a"}}\n')
+        return _FakePopen(command, **kwargs, returncode=1 if first else 0,
+                          out="Selected model is at capacity." if first else "done\n")
 
-    run, result, error = ec._resume_after_provider_failure(
-        rw, first, rw.package, raised.value.result, raised.value, Deadline()
-    )
-    assert error is None and result.returncode == 0
-    assert seen["command"][1:4] == ["exec", "resume", "sid-a"]
+    monkeypatch.setattr(ec.subprocess, "Popen", factory)
+    monkeypatch.setattr(ec, "_codex_env", lambda sd: {"CODEX_HOME": str(sd.codex_home)})
+    monkeypatch.setattr(ec, "_codex_bin", lambda: Path("/opt/bin/codex"))
+    with ec.session(rw, "verifier", timeout=5) as run:
+        result = ec._run_codex(run, rw.package, "write the verifier")
+    assert result.returncode == 0 and len(calls) == 2
+    assert calls[1][1:4] == ["exec", "resume", "sid-a"]
     assert "cut your session off (provider_capacity)" in run.dir.prompt.read_text()
-    assert json.loads(run.dir.meta.read_text())["kind"] == "agent-resume"
+    assert "at capacity" in (run.dir.path / "stdout.0.txt").read_text()
+    assert json.loads(run.dir.meta.read_text())["status"] == "completed"
 
 
 def test_without_provider_resumes_the_failure_stands(tmp_path, monkeypatch) -> None:
@@ -1671,9 +1672,6 @@ def test_without_provider_resumes_the_failure_stands(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(ec, "PROVIDER_RESUMES", 0)
     _fake_popen(monkeypatch, returncode=1, out="Selected model is at capacity.")
     with pytest.raises(ec.AgentSessionError) as raised:
-        with ec.session(rw, "agent", timeout=5) as first:
-            ec._run_codex(first, rw.package, "simplify it")
-    run, result, error = ec._resume_after_provider_failure(
-        rw, first, rw.package, raised.value.result, raised.value, None
-    )
-    assert error is raised.value and run is first
+        with ec.session(rw, "agent", timeout=5) as run:
+            ec._run_codex(run, rw.package, "simplify it")
+    assert raised.value.failure_type == "provider_capacity"
