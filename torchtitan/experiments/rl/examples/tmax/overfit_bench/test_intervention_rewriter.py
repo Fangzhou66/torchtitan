@@ -215,3 +215,40 @@ def test_state_survives_a_restart_and_an_interrupted_build_is_rebuildable(job, m
     co2.start()
     assert co2.state["sets"]["i9"]["status"] == "interrupted" and co2._buildable("i9")
     layout.write_json_atomic(co2.dir / "state.json", co2.state)
+
+
+def test_a_provider_refusal_rebuilds_the_same_plan(job, monkeypatch):
+    root, run, sched, client = job
+    tries = []
+
+    def status(sig):
+        tries.append(sig.data["intervention_plan"])
+        return "failed" if len(tries) == 1 else "accepted"
+
+    co, evolve, diag = _start(job, monkeypatch, [_cand("A")], status=status)
+    monkeypatch.setattr(co, "policy", ir.Policy(provider_retry_sec=0))
+    real = evolve.ev.handle
+
+    def handle(root, sig, **kw):
+        h = real(root, sig, **kw)
+        if h["status"] == "failed":
+            h["meta"]["stage"] = "agent"
+            h["meta"]["reason"] = "AgentSessionError: codex session failed (provider_capacity, exit 1)"
+        return h
+
+    monkeypatch.setattr(evolve.ev, "handle", handle)
+    _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
+    _drain(co, 6, 0)
+    assert _until(lambda: (co.step(0.05), co.state["sets"]["i1"]["status"] == "accepted")[1])
+    assert len(tries) == 2 and tries[0] == tries[1] and co.state["sets"]["i1"]["retries"] == 1
+    assert len(diag.calls) == 1
+
+
+def test_a_plan_failure_is_not_retried(job, monkeypatch):
+    root, run, sched, client = job
+    co, evolve, diag = _start(job, monkeypatch, [_cand("A")], status=lambda sig: "rejected")
+    monkeypatch.setattr(co, "policy", ir.Policy(provider_retry_sec=0))
+    _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
+    _drain(co, 6, 0)
+    co.step(0.05)
+    assert co.state["sets"]["i1"]["status"] == "rejected" and len(evolve.calls) == 1
