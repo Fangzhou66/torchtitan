@@ -115,6 +115,8 @@ class Policy:
     diagnose_attempts: int = 24
     build_attempts: int = 8
     diagnose_timeout: int = 3600
+    provider_retries: int = 3
+    provider_retry_sec: int = 300
 
 
 def key(interventions) -> str:
@@ -297,7 +299,7 @@ class Coordinator:
         """A diagnosis of ``k`` or a build with ``k`` as base is running."""
         if (self.state["diagnoses"].get(k) or {}).get("status") == "running":
             return True
-        return any(s["status"] == "building" and s.get("base") == k for s in self.state["sets"].values())
+        return any(s["status"] in ("building", "retry") and s.get("base") == k for s in self.state["sets"].values())
 
     def _descendants_alive(self, k: str) -> bool:
         """A version whose set strictly contains ``k`` is active and learnable,
@@ -307,7 +309,7 @@ class Coordinator:
             members = set(sk.split(",")) if sk else set()
             if not (members > base):
                 continue
-            if s["status"] == "building":
+            if s["status"] in ("building", "retry"):
                 return True
             v = self.versions.get(s.get("version") or "")
             if v is None or v["status"] != "active":
@@ -321,6 +323,15 @@ class Coordinator:
 
     def plan(self) -> None:
         pol = self.policy
+        for k, s in list(self.state["sets"].items()):
+            if s["status"] == "retry" and s.get("retry_at", 0) <= time.time():
+                parent = self.versions.get(s["parent"])
+                if parent is None:
+                    s["status"] = "failed"
+                    continue
+                a = s["args"]
+                self.build(k.split(",") if k else [], base=s["base"], parent=parent, attempts=a["attempts"],
+                           solved=a["solved"], total=a["total"])
         for v in self.active():
             members = self.set_of(v["id"])
             if members is None:
@@ -452,8 +463,11 @@ class Coordinator:
         declared = {tid: {kk: md[rk] for kk, rk in ev.ROW_KEYS.items() if rk in md}}
         hook = ev.row_pretest(md)
         lists = ev.pack.Protected.from_tmax(md.get("tmax") or {})
+        prev = self.state["sets"].get(k) or {}
         self.state["sets"][k] = {"status": "building", "base": base, "parent": parent["id"],
-                                 "started": layout.stamp(), "signal": sig.sid, "version": None}
+                                 "started": layout.stamp(), "signal": sig.sid, "version": None,
+                                 "retries": prev.get("retries", 0),
+                                 "args": {"attempts": attempts, "solved": solved, "total": total}}
         self._save()
         if ev.rw_workspace.configured_root(root) is not None:
             ev.ec.rewrite_budget_sec(root, refresh=True)
@@ -485,6 +499,14 @@ class Coordinator:
             layout.write_json_atomic(h["rewrite"].meta, meta)
         s.update({"status": h["status"], "rewrite": h["rewrite"].path.name, "finished": layout.stamp(),
                   "reason": (meta.get("reason") or "")[:300]})
+        if (h["status"] == "failed" and "(provider_" in s["reason"]
+                and s.get("retries", 0) < self.policy.provider_retries):
+            # The provider refused the session (capacity, rate limit, a dropped
+            # stream): no verdict on the plan, so the same plan is built again.
+            s.update({"status": "retry", "retries": s.get("retries", 0) + 1,
+                      "retry_at": time.time() + self.policy.provider_retry_sec})
+            log.info("policy retry {%s} in %ds (attempt %d of %d): %s", k, self.policy.provider_retry_sec,
+                     s["retries"], self.policy.provider_retries, s["reason"][:120])
         self._save()
         log.info("policy built {%s} -> %s (%s%s)", k, h["status"], meta.get("stage") or "-",
                  f": {meta['reason'][:200]}" if meta.get("reason") else "")
@@ -704,6 +726,11 @@ Do this:
    instance of the same decision, supplying work outside the retained skill.
    Each is specified against the ORIGINAL so it can be built together with
    base_set's interventions, in a few sentences an author can apply exactly.
+   Each intervention is one kind of help, withdrawn as a whole: how to install
+   or set up the runtime is its own setup_hint, an instruction to run and check
+   the implementation its own check_hint, and neither rides along inside
+   another intervention, because a later version withdraws setup and checking
+   help first and must be able to do so without losing the rest.
    An intervention already in catalog.json that fits is proposed by its id
    (reuses) rather than written again; one that was built into a version that
    then failed on this same bottleneck is not proposed again unless you say

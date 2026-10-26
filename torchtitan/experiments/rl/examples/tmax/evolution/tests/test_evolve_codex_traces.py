@@ -1632,3 +1632,8 @@ def test_calibration_appends_the_deployment_extra_rules(monkeypatch, tmp_path):
         assert g.rstrip().endswith("Withdraw the hints first.")
     monkeypatch.delenv("EVOLVE_SIMPLIFY_EXTRA_GUIDANCE_FILE")
     assert ec._calibration_guidance(12, 12) == ec._CALIBRATION_GUIDANCE
+
+
+def test_a_model_at_capacity_is_a_provider_failure() -> None:
+    out = '{"type":"error","message":"Selected model is at capacity. Please try a different model."}'
+    assert ec._agent_failure_type(out, "") == "provider_capacity"

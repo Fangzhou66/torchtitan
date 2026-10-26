@@ -767,6 +767,8 @@ def _agent_failure_type(stdout: str, stderr: str) -> str:
     text = f"{stderr}\n{stdout}".lower()
     if "rate_limit_exceeded" in text or "rate limit exceeded" in text:
         return "provider_rate_limit"
+    if "selected model is at capacity" in text:
+        return "provider_capacity"
     if (
         "failed to retrieve response from third-party api after" in text
         and "polling attempts" in text
