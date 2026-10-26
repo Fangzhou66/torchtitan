@@ -108,6 +108,10 @@ from torchtitan.experiments.rl.examples.tmax.grading import (
 from torchtitan.experiments.rl.examples.tmax.integrity_baseline import capture_baseline
 from torchtitan.experiments.rl.examples.tmax.overfit_bench import events as bench_events
 from torchtitan.experiments.rl.examples.tmax.rubric import RewardTMax, TMAX_REWARD_KEY
+from torchtitan.experiments.rl.examples.tmax.self_destruct import (
+    last_turn_commands,
+    match_self_destruct,
+)
 from torchtitan.experiments.rl.examples.tmax.vanillux_loop import (  # noqa: F401 -- registers the default agent
     vanillux_agent,
 )
@@ -156,6 +160,8 @@ _FINISH_REASONS = (
     "error",
     # The agent filled its own sandbox disk (see _run_agent_rollout); scored 0.
     "disk_exhausted",
+    # The agent's last command killed its own sandbox (see self_destruct); scored 0.
+    "sandbox_destroyed",
     # A strict environment rule ended the episode on the offending turn, ungraded
     # (TMaxRollouter.Config.strict_format / strict_opening / strict_truncation).
     "format_error",
@@ -186,6 +192,13 @@ _DISK_ISSUE_KINDS = {
     "command_disk_exhausted",
     "session_disk_exhausted",
 }
+
+
+def _disk_events(issue_tracker: SandboxIssueTracker) -> int:
+    counts = issue_tracker.counts
+    return sum(counts.get(kind, 0) for kind in _DISK_ISSUE_KINDS)
+
+
 _TRANSPORT_ISSUE_KINDS = {
     "command_logs_failed",
     "command_logs_missing",
@@ -232,6 +245,9 @@ _TIMEOUT_ISSUE_KINDS = {
 # half-configured dpkg then breaks the verifier's own apt-get too (55 such installs,
 # 2 zeroed grades in the 2026-10-25 TB-2.1 eval). Images without debconf skip it.
 _NONINTERACTIVE_DEBCONF = os.environ.get("TMAX_NONINTERACTIVE_DEBCONF", "1") == "1"
+# Score a sandbox the agent's own last command destroyed as 0 instead of masking it
+# as infra (self_destruct.py); 0 restores the mask.
+_SCORE_SELF_DESTRUCT = os.environ.get("TMAX_SCORE_SELF_DESTRUCT", "1") == "1"
 _DEBCONF_NONINTERACTIVE_CMD = (
     "command -v debconf-set-selections >/dev/null 2>&1 && "
     "echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections"
@@ -2141,6 +2157,8 @@ class TMaxRollouter(Rollouter):
         failure: dict = {}
         terminal_events: list[dict] = []
         failure_stage = "setup"
+        # Disk-full events recorded before grading began (see the disk rule).
+        disk_events_before_grade = 0
         # Per-test verifier breakdown; stays None unless the rollout was graded with
         # the CTRF read enabled and the task wrote a parsable report.
         ctrf: dict | None = None
@@ -2427,6 +2445,7 @@ class TMaxRollouter(Rollouter):
                     )
                     if submitted or grade_unsubmitted:
                         failure_stage = "verifier"
+                        disk_events_before_grade = _disk_events(issue_tracker)
                         grade_at = time.monotonic()
                         separate = sample.tmax.get("separate_verifier")
                         if separate:
@@ -2531,8 +2550,13 @@ class TMaxRollouter(Rollouter):
             reward = 0.0
             error_msg = f"{type(e).__name__}: {e}"
             terminal_events = getattr(e, "terminal_events", terminal_events)
-            if failure_stage == "agent" and any(
-                kind in issue_tracker.counts for kind in _DISK_ISSUE_KINDS
+            if (failure_stage == "agent" and _disk_events(issue_tracker)) or (
+                # Full before the verifier script ran (`mkdir /tests: no space
+                # left on device` at upload): what filled it is the agent's.
+                failure_stage == "verifier"
+                and _disk_events(issue_tracker) > disk_events_before_grade
+                and "exit_code" not in verifier
+                and not sample.tmax.get("separate_verifier")
             ):
                 # The sandbox's own quota filled while the agent was driving it,
                 # and the harness then lost the sandbox (a session or command
@@ -2571,6 +2595,33 @@ class TMaxRollouter(Rollouter):
         finally:
             self._rollout_gate.release()
             captured = await adapter.finish_session(rollout_id)
+
+        # The sandbox died during the agent's run and its last turn ran a command
+        # that kills it: the agent's outcome, scored 0 and trained on, not masked.
+        # Timeouts keep the mask, as do failures with no completed turn.
+        if (
+            _SCORE_SELF_DESTRUCT
+            and infra_failed
+            and status == RolloutStatus.ERROR
+            and failure_stage == "agent"
+            and captured
+            and captured[-1].completion_token_ids
+        ):
+            matched = match_self_destruct(last_turn_commands(captured))
+            if matched is not None:
+                infra_failed = False
+                status = RolloutStatus.COMPLETED
+                finish_reason = "sandbox_destroyed"
+                logger.warning(
+                    f"[tmax] {rollout_id}: sandbox destroyed by the agent's "
+                    f"last command, scored 0 ({matched!r}; {error_msg})"
+                )
+                failure = {
+                    "origin": "agent",
+                    "reason": "sandbox_destroyed",
+                    "stage": failure_stage,
+                    "matched": matched,
+                }
 
         disk_gb = (
             sandbox.allocated_disk_gb
