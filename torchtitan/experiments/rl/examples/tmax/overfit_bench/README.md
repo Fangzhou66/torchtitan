@@ -69,6 +69,21 @@ Two things it may not do, whatever else it decides:
   attempts the bench already records, not by running the policy itself; the
   policy canary controller is refused in bench mode for this reason.
 
+Every run is the rewriter's first meeting with the policy on that task. It knows
+the task itself (instruction, environment, reference solution, tests) and what
+happens in this run, and nothing else about how the policy does on the task:
+no training records of earlier runs, no conclusions anyone drew from them, and
+no task-specific knowledge in its code or prompts. Two loops, kept apart:
+
+- **Inside a run** the rewriter teaches the policy, from what this run shows.
+- **Between runs** we improve the rewriter (its code and prompts) from
+  everything earlier runs showed, as a method that holds for any task. "Show
+  the rewriter each attempt's verifier output" is such an improvement; "tell
+  it which part of this task the policy gets wrong" is not.
+
+This keeps runs comparable across rewriters and tasks: a run measures the
+method, not what was learned about one task before it.
+
 Training never waits for the rewriter. A draw asks it at most 1 s for a
 version and otherwise draws from the pool; a rewrite in progress, a slow hook
 or a dead rewriter changes what is drawn, never when.
