@@ -326,7 +326,7 @@ async def grade_tmax(
             f"rm -f {shlex.quote(reward_json)}; {pre_grade}; "
             f"chmod 777 {q_dir}; chmod 666 {shlex.quote(reward_path)}"
         )
-    await sb.exec(
+    pre_grade_rc, _, _ = await sb.exec(
         pre_grade,
         user="root",
         check=False,
@@ -334,10 +334,18 @@ async def grade_tmax(
     )
     sentinel = (await sb.read_file(reward_path, user="root") or "").strip()
     if sentinel != nonce:
+        if pre_grade_rc == 124:
+            # The sandbox did not run the setup in time, so nothing is known
+            # about the reward path: unscored, not a 0 for the agent.
+            raise RuntimeError(
+                f"pre-grade setup timed out before writing {reward_path}"
+            )
         logger.warning(
             "[tmax] reward path %s is not writable pre-grade; scoring 0",
             reward_path,
         )
+        if diagnostics is not None:
+            diagnostics.update(stage="pre_grade", verifier_ran=False)
         return 0.0
 
     # PRE-VERIFY (reaudit decision-1): run the task's exported pre_test integrity check ONCE as root, here between

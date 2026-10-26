@@ -394,9 +394,11 @@ class _AdapterLLM:
         # No max_tokens: the adapter does not read it from the body (generation runs
         # on the session's SamplingConfig), and sending it reads as though it sets the
         # cap. See get_model_output_limit for where the real one comes from.
+        # plain_text, as in miniswe: a stray <tool_call> token in the reply would
+        # otherwise cut the text there and hide the <commands> after it.
         reply = await self._adapter.complete(
             self._session_id,
-            {"messages": messages, "stream": False},
+            {"messages": messages, "stream": False, "plain_text": True},
         )
         if reply is None:
             # The session is closed or the generator yielded nothing; ending the

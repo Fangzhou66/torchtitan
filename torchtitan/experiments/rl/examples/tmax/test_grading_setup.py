@@ -73,3 +73,24 @@ def test_bootstrap_failure_raises_without_a_test_verdict(
 )
 def test_other_grades_are_not_voided(output, script, reward):
     grading._check_verifier_python_download(script, output, reward)
+
+
+@pytest.mark.parametrize("pre_grade_rc,raises", [(124, True), (0, False)])
+def test_pre_grade_timeout_is_unscored_but_an_unwritable_reward_path_scores_0(
+    monkeypatch, pre_grade_rc, raises
+):
+    monkeypatch.setattr(grading, "_make_nonce", lambda: "nonce")
+    sandbox = AsyncMock()
+    # mkdir, then the pre-grade setup; the sentinel never lands.
+    sandbox.exec.side_effect = [(0, "", ""), (pre_grade_rc, "", "")]
+    sandbox.read_file.return_value = ""
+    diagnostics = {}
+    grade = grading.grade_tmax(
+        sandbox, {"test_sh": SCRIPT}, workdir="/app", diagnostics=diagnostics
+    )
+    if raises:
+        with pytest.raises(RuntimeError, match="pre-grade setup timed out"):
+            asyncio.run(grade)
+    else:
+        assert asyncio.run(grade) == 0.0
+        assert diagnostics == {"stage": "pre_grade", "verifier_ran": False}
