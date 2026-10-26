@@ -98,7 +98,8 @@ class _EngineStatsLogger(StatLoggerBase):
     ``engine_preempted_total``, each Mean and Max per step), and ``log`` writes one
     line per ``RL_VLLM_STATS_INTERVAL_SEC`` (default 60; 0 = off) for wherever the
     process's own output is kept. A rising preempted total is KV thrashing: each
-    preempted request is re-prefilled.
+    preempted request is re-prefilled. The line also carries the window's prefix
+    cache hit rate (hit tokens / queried tokens, preempted re-prefills included).
     """
 
     def __init__(self, vllm_config: Any, engine_index: int = 0) -> None:
@@ -108,6 +109,7 @@ class _EngineStatsLogger(StatLoggerBase):
         self._running = self._waiting = 0
         self._kv_peak = 0.0
         self._preempted = self._preempted_total = 0
+        self._prefix_queries = self._prefix_hits = 0
 
     def record(
         self,
@@ -125,6 +127,10 @@ class _EngineStatsLogger(StatLoggerBase):
             self._kv_peak = max(self._kv_peak, scheduler_stats.kv_cache_usage)
             _ENGINE_STATS["kv_cache_usage"] = scheduler_stats.kv_cache_usage
             _ENGINE_STATS["waiting_reqs"] = self._waiting
+            prefix = getattr(scheduler_stats, "prefix_cache_stats", None)
+            if prefix is not None:
+                self._prefix_queries += prefix.queries + prefix.preempted_queries
+                self._prefix_hits += prefix.hits + prefix.preempted_hits
         if iteration_stats is not None:
             self._preempted += iteration_stats.num_preempted_reqs
             _ENGINE_STATS["preempted_total"] = (
@@ -140,15 +146,21 @@ class _EngineStatsLogger(StatLoggerBase):
         if self._interval <= 0 or now - self._last < self._interval:
             return
         self._preempted_total += self._preempted
+        prefix_hit = (
+            f"{100 * self._prefix_hits / self._prefix_queries:.1f}%"
+            if self._prefix_queries
+            else "n/a"
+        )
         logger.info(
             f"[vllm_stats] engine={self._engine_index} running={self._running} "
             f"waiting={self._waiting} kv_peak={100 * self._kv_peak:.1f}% "
             f"preempted={self._preempted} preempted_total={self._preempted_total} "
-            f"window_s={now - self._last:.0f}"
+            f"prefix_hit={prefix_hit} window_s={now - self._last:.0f}"
         )
         self._last = now
         self._kv_peak = 0.0
         self._preempted = 0
+        self._prefix_queries = self._prefix_hits = 0
 
 
 def _flash_attention_kernels_available() -> bool:
@@ -357,6 +369,7 @@ class _RequestMetricsInputs:
 
     num_cached_tokens: int | None
     has_stats: bool
+    num_prompt_tokens: int = 0
     queued_ts: float = 0.0
     scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
@@ -370,13 +383,17 @@ def _extract_request_metrics_inputs(
 ) -> _RequestMetricsInputs:
     """Pull the raw metric inputs off a finished ``RequestOutput``."""
     stats = request_output.metrics
+    num_prompt_tokens = len(getattr(request_output, "prompt_token_ids", None) or ())
     if stats is None:
         return _RequestMetricsInputs(
-            num_cached_tokens=request_output.num_cached_tokens, has_stats=False
+            num_cached_tokens=request_output.num_cached_tokens,
+            has_stats=False,
+            num_prompt_tokens=num_prompt_tokens,
         )
     return _RequestMetricsInputs(
         num_cached_tokens=request_output.num_cached_tokens,
         has_stats=True,
+        num_prompt_tokens=num_prompt_tokens,
         queued_ts=stats.queued_ts,
         scheduled_ts=stats.scheduled_ts,
         first_token_ts=stats.first_token_ts,
@@ -411,6 +428,10 @@ def _prepare_generation_request_metrics(
     }
     if inputs.num_cached_tokens is not None:
         metric_values[f"{prefix}/num_cached_tokens"] = inputs.num_cached_tokens
+        if inputs.num_prompt_tokens > 0:
+            metric_values[f"{prefix}/prefix_cache_hit_rate"] = (
+                inputs.num_cached_tokens / inputs.num_prompt_tokens
+            )
 
     if inputs.has_stats:
         metric_values[f"{prefix}/queue_time_ms"] = (

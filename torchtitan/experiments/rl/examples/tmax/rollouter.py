@@ -277,6 +277,7 @@ def _captured_to_turns(
                 max_policy_version=ct.max_policy_version,
                 prompt_messages=prompt_messages,
                 completion_message=ct.completion_message,
+                metrics=ct.metrics,
             )
         )
         pending_env = []

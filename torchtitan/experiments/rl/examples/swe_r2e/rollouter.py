@@ -286,6 +286,7 @@ class SWER2ERollouter(Rollouter):
                 completion_logprobs=ct.completion_logprobs,
                 min_policy_version=ct.min_policy_version,
                 max_policy_version=ct.max_policy_version,
+                metrics=ct.metrics,
             )
             for turn_idx, ct in enumerate(
                 ct for ct in captured if ct.completion_token_ids

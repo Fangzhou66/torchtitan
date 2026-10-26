@@ -33,6 +33,7 @@ from aiohttp import web
 from renderers import Message, Renderer, ToolSpec
 from renderers.base import ToolCallParseStatus
 
+from torchtitan.experiments.rl.observability.metrics import Metric
 from torchtitan.experiments.rl.rollout.types import GenerateFn
 
 if TYPE_CHECKING:
@@ -58,6 +59,9 @@ class CapturedTurn:
     # (TITO-bridged). False marks a history rewrite (compaction) -> episode branch.
     extends_previous: bool
     stop_reason: int | str | None = None
+    # The generator's per-request metrics (queue time, prefix-cache hits, engine
+    # KV usage); the rollouter hands them on as RolloutTurn.metrics.
+    metrics: list[Metric] = field(default_factory=list)
     # The conversation itself, so a dump is readable without a tokenizer. Kept as
     # a delta wherever one exists rather than as the full history each turn: a
     # 40-turn tmax episode would otherwise carry the same growing context forty
@@ -580,6 +584,7 @@ class AnthropicAdapter:
                     finish_reason=completion.finish_reason,
                     extends_previous=extends_previous,
                     stop_reason=completion.stop_reason,
+                    metrics=list(completion.metrics),
                     messages=turn_messages,
                     messages_are_full_prompt=messages_are_full,
                     completion_message={"role": "assistant", "content": blocks},
