@@ -56,6 +56,7 @@ import collections
 import json
 import logging
 import os
+import re
 import shutil
 import signal as signals
 import subprocess
@@ -728,6 +729,15 @@ def stage_diagnosis(co: Coordinator, work: Path, base: dict, k: str) -> dict:
         ends = collections.Counter(a["finish_reason"] for a in co.attempts[v["id"]])
         if ends:
             lines.append("how its attempts ended: " + ", ".join(f"{k} {n}" for k, n in ends.most_common()) + "\n")
+        per_test, graded = collections.Counter(), 0
+        for a in co.attempts[v["id"]]:
+            results = test_results(verifier_output(_head(root.run(a["run"]).path / a["path"])))
+            if results:
+                graded += 1
+                per_test.update({t: 1 if ok else 0 for t, ok in results.items()})
+        if graded:
+            lines.append(f"per test, how many of its {graded} graded attempts passed it: "
+                         + ", ".join(f"{t} {n}/{graded}" for t, n in sorted(per_test.items())) + "\n")
         n = pol.diagnose_attempts if v is base else pol.diagnose_attempts // 4
         for a in list(reversed(co.attempts[v["id"]]))[:n]:
             rec = root.run(a["run"]).path / a["path"]
@@ -748,6 +758,24 @@ def stage_diagnosis(co: Coordinator, work: Path, base: dict, k: str) -> dict:
     })
     layout.write_json_atomic(work / "index.json", index)
     return index
+
+
+TEST_LINE = re.compile(r"^(PASSED|FAILED|ERROR)\s+(\S+)", re.M)
+
+
+def verifier_output(head: dict) -> str:
+    """The verifier's output for one training attempt: its grade, or for an attempt that did not
+    submit, the grade run for the record only (verifier.shadow; the reward stays 0)."""
+    v = head.get("verifier") or {}
+    return v.get("output_tail") or (v.get("shadow") or {}).get("output_tail") or ""
+
+
+def test_results(output: str) -> dict[str, bool]:
+    """test id -> passed, from the verifier's per-test summary lines (pytest -rA style)."""
+    out = {}
+    for verdict, test in TEST_LINE.findall(output):
+        out[test.split("::")[-1]] = verdict == "PASSED"
+    return out
 
 
 def training_budget() -> str:
@@ -784,8 +812,12 @@ learns to solve the original. A version is the original plus a set of named
 interventions, always built fresh from the original; catalog.json lists every
 intervention so far and every set built (base_set is the set of the version you
 diagnose; [] is the original). versions.md lists every version with its
-training groups' solve counts and its attempts in attempts/ (one JSON line of
-summary, then one line per turn).
+training groups' solve counts, how many of its graded attempts passed each
+test, and its attempts in attempts/ (one JSON line of summary, then one line
+per turn). An attempt's summary line holds the verifier's output for it
+(verifier.output_tail; for an attempt that did not submit, verifier.shadow,
+graded for the record while its reward stays 0): every test as PASSED or
+FAILED with the error, which shows how far each attempt got.
 
 Do this:
 1. Read every attempt of the base version (listed first in versions.md) and
