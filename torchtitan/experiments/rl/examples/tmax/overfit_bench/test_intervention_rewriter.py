@@ -206,15 +206,21 @@ def test_the_diagnosis_reads_training_attempts_only(job, monkeypatch):
     assert (work / "original" / "instruction.md").read_text() == "original"
 
 
-def test_state_survives_a_restart_and_an_interrupted_build_is_rebuildable(job, monkeypatch):
+def test_a_build_cut_by_a_restart_is_built_again(job, monkeypatch):
     root, run, sched, client = job
     co, evolve, diag = _start(job, monkeypatch, [_cand("A")])
+    _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
+    _drain(co, 6, 0)
+    co.state["sets"]["i1"]["status"] = "building"  # as a killed process left it
     co.state["sets"]["i9"] = {"status": "building", "base": "", "parent": V0, "version": None}
     co._save()
     co2 = ir.Coordinator(root, client, evolve.ev, diagnose=diag)
     co2.start()
+    # A build with its plan on record is rebuilt; one without stays rebuildable by a later proposal.
+    assert co2.state["sets"]["i1"]["status"] == "retry"
     assert co2.state["sets"]["i9"]["status"] == "interrupted" and co2._buildable("i9")
-    layout.write_json_atomic(co2.dir / "state.json", co2.state)
+    _drain(co2)
+    assert co2.state["sets"]["i1"]["status"] == "accepted" and len(evolve.calls) == 2
 
 
 def test_a_provider_refusal_rebuilds_the_same_plan(job, monkeypatch):

@@ -231,8 +231,9 @@ class Coordinator:
         self.sweeper.sweep(everything=True, why="left by an earlier rewriter process")
         for k, s in self.state["sets"].items():
             if s["status"] == "building":
-                s["status"] = "interrupted"
-                log.info("policy build {%s} was interrupted by a restart", k)
+                # The restart killed its session; the same plan is built again.
+                s.update({"status": "retry", "retry_at": 0} if s.get("args") else {"status": "interrupted"})
+                log.info("policy build {%s} was interrupted by a restart -> %s", k, s["status"])
         for b, d in self.state["diagnoses"].items():
             if d["status"] == "running":
                 d["status"] = "interrupted"
