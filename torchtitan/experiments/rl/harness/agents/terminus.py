@@ -468,6 +468,25 @@ class _AdapterLLM:
         return LLMResponse(content=text)
 
 
+def _return_salvage_as_response(agent: Any) -> None:
+    """Harbor's ``_query_llm`` returns the salvaged *str* when a truncated turn
+    still holds a complete action, and ``_handle_llm_interaction`` then reads
+    ``.content`` off it (AttributeError). Wrap it into the response it meant."""
+    query = getattr(agent, "_query_llm", None)
+    if query is None:
+        return
+
+    async def _query_llm(*args: Any, **kwargs: Any) -> Any:
+        response = await query(*args, **kwargs)
+        if not isinstance(response, str):
+            return response
+        from harbor.llms.base import LLMResponse  # type: ignore
+
+        return LLMResponse(content=response)
+
+    agent._query_llm = _query_llm
+
+
 _XML_TAG_RE = re.compile(
     r"<(response|analysis|plan|commands|keystrokes|task_complete)\b"
 )
@@ -630,6 +649,44 @@ class _SandboxExecutionError(RuntimeError):
     """The sandbox API failed without returning a command result."""
 
 
+def _status_unanswered(error: BaseException) -> bool:
+    """The command was launched but its exit status never arrived.
+
+    Daytona raises this when a sandbox stalls past the command's deadline and
+    then, nearly always, comes back (mini-swe-agent reads the same error as a
+    timed-out command and 94% of those rollouts complete).
+    """
+    return isinstance(error, _SandboxExecutionError) and isinstance(
+        error.__cause__, TimeoutError
+    )
+
+
+# Harbor's tmux clients by what a second run would do: a query is safe to run
+# again; keys are not, since the first delivery may still land when the
+# sandbox resumes.
+_TMUX_QUERIES = frozenset({"has-session", "capture-pane", "display-message", "-V"})
+_TMUX_KEYS = frozenset({"send-keys"})
+
+
+def _tmux_client_kind(command: str) -> str:
+    """"query", "keys", or "" for anything that is not one simple tmux client."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return ""
+    if tokens[:1] == ["timeout"]:
+        tokens = tokens[2:]
+    if len(tokens) < 2 or tokens[0] != "tmux":
+        return ""
+    if any(t in (";", "&&", "||", "|", "&") for t in tokens):
+        return ""
+    if tokens[1] in _TMUX_QUERIES:
+        return "query"
+    if tokens[1] in _TMUX_KEYS:
+        return "keys"
+    return ""
+
+
 class _SandboxEnvironment:
     """Our ``Sandbox`` in the shape Terminus-2 expects of a harbor environment."""
 
@@ -652,6 +709,9 @@ class _SandboxEnvironment:
         # AgentRun and written into the rollout record's ``exec`` (see
         # _trace_exec). A few hundred small dicts per rollout at most.
         self.exec_trace: list[dict] = []
+        # Harness tmux commands whose status never arrived and were absorbed
+        # (re-run query, or keys taken as delivered) instead of failing.
+        self.unanswered_execs = 0
         # Set when Terminus-2 starts its pane, so the transcript can be fetched
         # before the sandbox goes away. None until then.
         self.pane_path: str | None = None
@@ -690,13 +750,36 @@ class _SandboxEnvironment:
             command = f"cd {shlex.quote(cwd)} && {command}"
         command = self._bound_pane_pipe(command)
         command = self._end_send_keys_options(command)
+        # Classified before the turn-start prefix makes it a compound command.
+        kind = _tmux_client_kind(command)
         command = self._record_turn_start(command)
-        return await self.terminal.run(
-            command,
-            lambda cmd: self._exec_raw(
-                cmd, env=env, timeout_sec=timeout_sec, user=user
-            ),
-        )
+
+        async def run(cmd: str):
+            try:
+                return await self._exec_raw(
+                    cmd, env=env, timeout_sec=timeout_sec, user=user
+                )
+            except _SandboxExecutionError as e:
+                if not _status_unanswered(e):
+                    raise
+                if kind == "query":
+                    logger.warning(f"[terminus] re-running tmux query after {e}")
+                    self.unanswered_execs += 1
+                    return await self._exec_raw(
+                        cmd, env=env, timeout_sec=60, user=user
+                    )
+                if kind == "keys" and "claim=present" in str(e):
+                    # The wrapper took the command, so the keys were or will be
+                    # delivered; resending could type them twice. The next
+                    # observation shows what the terminal did with them.
+                    from harbor.environments.base import ExecResult  # type: ignore
+
+                    logger.warning(f"[terminus] keys sent, status lost: {e}")
+                    self.unanswered_execs += 1
+                    return ExecResult(stdout="", stderr="", return_code=0)
+                raise
+
+        return await self.terminal.run(command, run)
 
     # ---- the turn's observation: new output by tmux line offsets ----------
     #
@@ -796,7 +879,19 @@ class _SandboxEnvironment:
             f"printf '\n{sep}\n'; tmux capture-pane -p -t {target}"
         )
         started_at = time.time()
-        result = await self._exec_raw(script, timeout_sec=60)
+        stale = False
+        try:
+            result = await self._exec_raw(script, timeout_sec=60)
+        except _SandboxExecutionError as e:
+            if not _status_unanswered(e):
+                raise
+            # The first run may still have moved the offset file, so the new
+            # output can no longer be located: show the screen instead, as
+            # Terminus-2 does when its previous-buffer search fails.
+            logger.warning(f"[terminus] re-running observation after {e}")
+            self.unanswered_execs += 1
+            stale = True
+            result = await self._exec_raw(script, timeout_sec=60)
         if result.return_code == 97 or (
             result.return_code != 0 and not (result.stdout or "").strip()
         ):
@@ -830,6 +925,8 @@ class _SandboxEnvironment:
             # Terminus-2's first capture is always the screen.
             self._observed_once = True
             mode = "first"
+        elif stale:
+            mode = "screen"
         if mode == "new" and new_text.strip():
             observation = f"New Terminal Output:\n{new_text}"
         else:
@@ -1086,6 +1183,7 @@ async def terminus_agent(
             )
             agent._llm = llm
             env.context_notice = llm.context_notice
+            _return_salvage_as_response(agent)
             inner_parser = getattr(agent, "_parser", None)
             if inner_parser is None:
                 # Terminus-2 always builds one, so this only trips on an upstream
