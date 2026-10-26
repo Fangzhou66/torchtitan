@@ -226,6 +226,27 @@ _TIMEOUT_ISSUE_KINDS = {
 }
 
 
+# debconf's frontend set to Noninteractive before the agent starts, as Docker images
+# commonly do. Otherwise an apt install that pulls in tzdata waits on a "Geographic
+# area" prompt hidden behind the model's `| tail`; the model interrupts it, and the
+# half-configured dpkg then breaks the verifier's own apt-get too (55 such installs,
+# 2 zeroed grades in the 2026-10-25 TB-2.1 eval). Images without debconf skip it.
+_NONINTERACTIVE_DEBCONF = os.environ.get("TMAX_NONINTERACTIVE_DEBCONF", "1") == "1"
+_DEBCONF_NONINTERACTIVE_CMD = (
+    "command -v debconf-set-selections >/dev/null 2>&1 && "
+    "echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections"
+)
+
+
+async def _set_debconf_noninteractive(sandbox: _RootSandbox) -> None:
+    try:
+        await sandbox.exec(
+            _DEBCONF_NONINTERACTIVE_CMD, user="root", check=False, timeout=60
+        )
+    except Exception as e:  # noqa: BLE001 -- a convenience, never fail a rollout on it
+        logger.warning(f"[tmax] debconf noninteractive setup failed: {e}")
+
+
 def _captured_to_turns(
     captured: list[CapturedTurn], group_id: str, rollout_idx: int
 ) -> list[RolloutTurn]:
@@ -2285,6 +2306,8 @@ class TMaxRollouter(Rollouter):
                     # seed-bearing tasks are unsolvable (inputs absent during rollout).
                     # Grading fixtures (tests/*) are uploaded later by grade_tmax.
                     await seed_workspace(root_sb, sample.tmax)
+                    if _NONINTERACTIVE_DEBCONF:
+                        await _set_debconf_noninteractive(root_sb)
                     healthcheck = getattr(sample, "healthcheck", None)
                     if healthcheck:
                         # Harbor waits for [environment].healthcheck before the

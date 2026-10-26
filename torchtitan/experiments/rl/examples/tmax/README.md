@@ -161,8 +161,10 @@ python -m torchtitan.experiments.rl.examples.tmax.prepare_tb2_data \
 > mcmc-sampling-stan) get an environment-only patch that follows the upstream fix PR.
 > mcmc-sampling-stan's patch, and the qemu tasks' agent-side apt fix, are a
 > Dockerfile layer on the task image, so those rows carry `dockerfile`.
-> extract-moves-from-video is also resized from its declared 1 CPU / 2 GB to 2 CPU / 4 GB
-> (`_RESOURCE_OVERRIDES`): at 2 GB its trials ran out of memory decoding the video.
+> `_RESOURCE_OVERRIDES` resizes 12 tasks whose trials filled the declared 10 GB disk (which
+> Daytona enforces and Harbor's Modal/Docker backends do not) to 20 GB, and gives
+> extract-moves-from-video 2 CPU / 4 GB instead of 1 CPU / 2 GB; compile-compcert and
+> mteb-leaderboard get 4 GB more memory. All three were OOM-killed at their declared size.
 > `--no-env-patches` emits the published tree as is.
 > build-pov-ray stays unpatched: povray.org blocked its download for a period, the
 > download is part of the task, and it is reachable from Daytona again as of

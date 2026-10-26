@@ -484,9 +484,8 @@ def test_resource_override_resizes_only_its_task(tmp_path):
     }
 
     md = rows["extract-moves-from-video"]["metadata"]
-    assert (md["daytona_cpu"], md["daytona_mem_gb"]) == (2, 4)
-    assert md["daytona_disk_gb"] == plain["extract-moves-from-video"]["metadata"]["daytona_disk_gb"]
-    assert md["resource_patch"] == {"daytona_cpu": 2, "daytona_mem_gb": 4}
+    assert (md["daytona_cpu"], md["daytona_mem_gb"], md["daytona_disk_gb"]) == (2, 4, 20)
+    assert md["resource_patch"] == {"daytona_cpu": 2, "daytona_mem_gb": 4, "daytona_disk_gb": 20}
     assert md["tmax"] == plain["extract-moves-from-video"]["metadata"]["tmax"]
     assert "resource_patch" not in plain["extract-moves-from-video"]["metadata"]
     assert rows["fix-git"] == plain["fix-git"]

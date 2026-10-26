@@ -336,12 +336,36 @@ def _after_shebang(test_sh: str, block: str) -> str:
     return block + test_sh
 
 
-# Per-task Daytona sizes that replace the declared ones. extract-moves-from-video
-# declares 1 CPU / 2 GB for decoding a video frame by frame: in the 2026-10-25 eval
-# 3 of 5 trials showed OOM and a fourth lost its sandbox ("failed to resolve
-# container IP"), so it gets 2 CPU / 4 GB. Disk is unchanged.
+# Per-task Daytona sizes that replace the declared ones. Every task declares a 10 GB
+# disk, which Daytona enforces (Harbor's Modal and Docker backends do not); in the
+# 2026-10-25 eval the tasks below filled it in 33 trials (CUDA torch installs,
+# httpstan's fit cache), twice inside the verifier's own install. They get 20 GB.
+# extract-moves-from-video also declares 1 CPU / 2 GB for decoding a video frame by
+# frame: 3 of 5 trials showed OOM and a fourth lost its sandbox ("failed to resolve
+# container IP"), so it gets 2 CPU / 4 GB as well. compile-compcert (coq build at
+# 4 GB) and mteb-leaderboard (loading results at 8 GB) were OOM-killed in 3 of 5
+# trials each, so they get 4 GB more memory.
+_DISK_20GB = {"daytona_disk_gb": 20}
 _RESOURCE_OVERRIDES: dict[str, dict[str, int]] = {
-    "extract-moves-from-video": {"daytona_cpu": 2, "daytona_mem_gb": 4},
+    "extract-moves-from-video": {"daytona_cpu": 2, "daytona_mem_gb": 4, **_DISK_20GB},
+    "compile-compcert": {"daytona_mem_gb": 8},
+    "mteb-leaderboard": {"daytona_mem_gb": 12},
+    **{
+        task_id: _DISK_20GB
+        for task_id in (
+            "chess-best-move",
+            "code-from-image",
+            "count-dataset-tokens",
+            "gcode-to-text",
+            "gpt2-codegolf",
+            "pytorch-model-cli",
+            "pytorch-model-recovery",
+            "rstan-to-pystan",
+            "sam-cell-seg",
+            "torch-pipeline-parallelism",
+            "torch-tensor-parallelism",
+        )
+    },
 }
 
 
