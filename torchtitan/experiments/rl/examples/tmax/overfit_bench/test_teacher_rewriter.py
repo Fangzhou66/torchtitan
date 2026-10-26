@@ -54,7 +54,7 @@ def new_version(name, text, **plan):
     return write
 
 
-def check_ok(package, *, shortcut, timeout):
+def check_ok(package, *, shortcut, timeout, sandbox):
     return {"reward": 0.0 if shortcut else 1.0}
 
 
@@ -141,7 +141,8 @@ def test_the_directory_holds_every_version_and_compact_attempts(job, monkeypatch
 def test_a_version_that_fails_its_checks_stays_out_and_the_teacher_hears_why(job, monkeypatch):
     root, run, sched, client = job
 
-    def check(package, *, shortcut, timeout):
+    def check(package, *, shortcut, timeout, sandbox):
+        assert set(sandbox) == set(tr.SANDBOX.values())  # sized as the original's row sizes training
         return {"reward": 1.0}  # the untouched state passes too
 
     script = Script(new_version("free", "solve a, all given"), lambda w: {})

@@ -157,11 +157,19 @@ def check_plan(plan: dict, work: Path) -> dict:
             "draw_first": first}
 
 
-def daytona_check(package: Path, *, shortcut: str | None, timeout: int) -> dict:
+SANDBOX = {"cpu": "daytona_cpu", "mem-gb": "daytona_mem_gb", "disk-gb": "daytona_disk_gb"}
+
+
+def daytona_check(package: Path, *, shortcut: str | None, timeout: int, sandbox: dict) -> dict:
     """evolution/daytona_revalidate.py: the package's reference solution (shortcut None) or a command,
-    then its verifier, on a fresh Daytona sandbox; the verdict is its last stdout line."""
+    then its verifier, on a fresh Daytona sandbox sized as training sizes it (``sandbox``: the original
+    row's daytona_* fields; the harness default is too small to install the verifier's torch); the
+    verdict is its last stdout line."""
     tool = HERE.parent / "evolution" / "daytona_revalidate.py"
     cmd = [sys.executable, str(tool), str(package)] + (["--shortcut", shortcut] if shortcut else [])
+    for flag, key in SANDBOX.items():
+        if sandbox.get(key) is not None:
+            cmd += [f"--{flag}", str(sandbox[key])]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     try:
         return json.loads((p.stdout.strip().splitlines() or ["{}"])[-1])
@@ -178,7 +186,7 @@ def reward_of(verdict: dict) -> float | None:
 
 class Teacher:
     """``ask(teacher, prompt)`` runs one round of the codex thread (run_codex by default);
-    ``check(package, shortcut=, timeout=)`` one Daytona verdict."""
+    ``check(package, shortcut=, timeout=, sandbox=)`` one Daytona verdict."""
 
     def __init__(self, root: layout.Root, client: RewriterClient | None, ev, *, policy: Policy = Policy(),
                  ask=None, check=daytona_check) -> None:
@@ -433,11 +441,13 @@ class Teacher:
     # -- new versions ------------------------------------------------------------------
 
     def validate(self, package: Path) -> dict:
-        solved = self.check(package, shortcut=None, timeout=self.policy.check_timeout)
+        original = next(v for v in self.versions.values() if int(v["rev"]) == 0)
+        sandbox = {k: original["row"]["metadata"].get(k) for k in SANDBOX.values()}
+        solved = self.check(package, shortcut=None, timeout=self.policy.check_timeout, sandbox=sandbox)
         if reward_of(solved) != 1.0:
             return {"ok": False, "package": str(package),
                     "reason": f"its reference solution did not pass its tests: {json.dumps(solved)[:300]}"}
-        bare = self.check(package, shortcut="true", timeout=self.policy.check_timeout)
+        bare = self.check(package, shortcut="true", timeout=self.policy.check_timeout, sandbox=sandbox)
         if reward_of(bare) != 0.0:
             return {"ok": False, "package": str(package),
                     "reason": f"its untouched starting state did not fail its tests: {json.dumps(bare)[:300]}"}
