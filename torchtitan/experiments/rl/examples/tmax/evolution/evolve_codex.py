@@ -3212,6 +3212,66 @@ def _reconcile_blind(
     return False
 
 
+PROVIDER_RESUMES = int(os.environ.get("EVOLVE_PROVIDER_RESUMES", "0"))
+PROVIDER_RESUME_SEC = int(os.environ.get("EVOLVE_PROVIDER_RESUME_SEC", "120"))
+PROVIDER_RESUME_MAX_SEC = 900
+
+_PROVIDER_RESUME_JOB = """The model provider cut your session off ({failure}); nothing
+you did caused it. The package, run/ and your notes are as you left them.
+Continue the task from where you stopped: do not redo finished work. Finish it
+and confirm with `./sandbox check` before you stop."""
+
+
+def _resume_after_provider_failure(
+    rewrite: layout.RewriteDir,
+    run: SessionRun,
+    pkg: Path,
+    result: subprocess.CompletedProcess,
+    agent_error: AgentSessionError | None,
+    deadline: RewriteDeadline,
+) -> tuple[SessionRun, subprocess.CompletedProcess, AgentSessionError | None]:
+    """Continue the author's own thread after the provider refused or dropped
+    it (provider_* failure: model at capacity, rate limit, a broken stream),
+    up to EVOLVE_PROVIDER_RESUMES times, waiting EVOLVE_PROVIDER_RESUME_SEC
+    and doubling (at most 15 min) between tries. Off by default: the session's
+    failure then stands, as before. A thread that never started, or no time
+    left before final validation, leaves the failure as it is."""
+    for attempt in range(PROVIDER_RESUMES):
+        if agent_error is None or not agent_error.failure_type.startswith("provider_"):
+            break
+        try:
+            sid = _session_id(run.dir)
+        except RuntimeError:
+            break
+        wait = min(PROVIDER_RESUME_SEC * 2**attempt, PROVIDER_RESUME_MAX_SEC)
+        log.info(
+            "%s: %s; resuming the author's thread in %ds (%d of %d)",
+            rewrite.path.name, agent_error.failure_type, wait, attempt + 1, PROVIDER_RESUMES,
+        )
+        time.sleep(wait)
+        try:
+            timeout = _session_timeout(deadline, "author provider resume")
+        except Exception:  # noqa: BLE001 -- no time left: the failure stands
+            break
+        prior, failure = run.dir, agent_error.failure_type
+        agent_error = None
+        try:
+            with session(rewrite, "agent-resume", timeout=timeout, resumes=prior) as run:
+                try:
+                    result = _run_codex(
+                        run,
+                        pkg,
+                        _PROVIDER_RESUME_JOB.format(failure=failure) + _budget(timeout),
+                        resume=sid,
+                    )
+                finally:
+                    _sandbox_down(pkg)
+        except AgentSessionError as error:
+            assert error.result is not None
+            result, agent_error = error.result, error
+    return run, result, agent_error
+
+
 def _repair_agent_validation(
     rewrite: layout.RewriteDir,
     prior: layout.SessionDir,
@@ -3511,6 +3571,9 @@ def evolve_agentic(
             assert error.result is not None
             p, agent_error = error.result, error
         assert run is not None
+        run, p, agent_error = _resume_after_provider_failure(
+            rewrite, run, pkg, p, agent_error, deadline
+        )
         with _checked_output(agent_error):
             _check_verdict(pkg)
         if agent_error is not None and not _agent_checked(pkg):
