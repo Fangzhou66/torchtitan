@@ -69,6 +69,7 @@ from vllm.distributed import get_dp_group
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.metrics.loggers import StatLoggerBase
 
 
 # SWE_TS_REPLICA_DEDUP=1: read each replicated (HSDP) weight region from one
@@ -79,6 +80,75 @@ if os.environ.get("SWE_TS_REPLICA_DEDUP", "0") == "1":
     install()
 
 logger = logging.getLogger(__name__)
+
+
+# Latest engine-aggregate stats of this process's engine (one per generator
+# process), stamped onto every finished request's metrics so they reach W&B.
+_ENGINE_STATS: dict[str, float] = {}
+
+
+class _EngineStatsLogger(StatLoggerBase):
+    """Engine-aggregate vLLM stats (KV-cache usage, queue depth, preemptions).
+
+    vLLM's own LoggingStatLogger prints these every 10 s through the ``vllm``
+    logger, but remote generator processes do not forward their output to the
+    controller console (no run since at least 1018 has a vLLM line there). So
+    ``record`` keeps the latest values in ``_ENGINE_STATS`` for the per-request
+    metrics (``engine_kv_cache_usage``, ``engine_waiting_reqs``,
+    ``engine_preempted_total``, each Mean and Max per step), and ``log`` writes one
+    line per ``RL_VLLM_STATS_INTERVAL_SEC`` (default 60; 0 = off) for wherever the
+    process's own output is kept. A rising preempted total is KV thrashing: each
+    preempted request is re-prefilled.
+    """
+
+    def __init__(self, vllm_config: Any, engine_index: int = 0) -> None:
+        self._interval = float(os.environ.get("RL_VLLM_STATS_INTERVAL_SEC", "60"))
+        self._engine_index = engine_index
+        self._last = time.monotonic()
+        self._running = self._waiting = 0
+        self._kv_peak = 0.0
+        self._preempted = self._preempted_total = 0
+
+    def record(
+        self,
+        scheduler_stats: Any,
+        iteration_stats: Any,
+        mm_cache_stats: Any = None,
+        engine_idx: int = 0,
+    ) -> None:
+        if scheduler_stats is not None:
+            self._running = scheduler_stats.num_running_reqs
+            self._waiting = (
+                scheduler_stats.num_waiting_reqs
+                + scheduler_stats.num_skipped_waiting_reqs
+            )
+            self._kv_peak = max(self._kv_peak, scheduler_stats.kv_cache_usage)
+            _ENGINE_STATS["kv_cache_usage"] = scheduler_stats.kv_cache_usage
+            _ENGINE_STATS["waiting_reqs"] = self._waiting
+        if iteration_stats is not None:
+            self._preempted += iteration_stats.num_preempted_reqs
+            _ENGINE_STATS["preempted_total"] = (
+                _ENGINE_STATS.get("preempted_total", 0)
+                + iteration_stats.num_preempted_reqs
+            )
+
+    def log_engine_initialized(self) -> None:
+        pass
+
+    def log(self) -> None:
+        now = time.monotonic()
+        if self._interval <= 0 or now - self._last < self._interval:
+            return
+        self._preempted_total += self._preempted
+        logger.info(
+            f"[vllm_stats] engine={self._engine_index} running={self._running} "
+            f"waiting={self._waiting} kv_peak={100 * self._kv_peak:.1f}% "
+            f"preempted={self._preempted} preempted_total={self._preempted_total} "
+            f"window_s={now - self._last:.0f}"
+        )
+        self._last = now
+        self._kv_peak = 0.0
+        self._preempted = 0
 
 
 def _flash_attention_kernels_available() -> bool:
@@ -333,14 +403,12 @@ def _prepare_generation_request_metrics(
     vLLM at ``output_processor._finish_request``.
     """
 
-    # TODO: Per-request fields here come from RequestOutput.metrics
-    # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
-    # prefix-cache hit rate, preemptions, and batch occupancy, live in
-    # SchedulerStats / IterationStats and require registering a
-    # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]).
-
-    metric_values: dict[str, float] = {}
+    # Per-request fields come from RequestOutput.metrics (RequestStateStats);
+    # the engine_* values are the engine's state when the request finished
+    # (_EngineStatsLogger).
+    metric_values: dict[str, float] = {
+        f"{prefix}/engine_{key}": value for key, value in _ENGINE_STATS.items()
+    }
     if inputs.num_cached_tokens is not None:
         metric_values[f"{prefix}/num_cached_tokens"] = inputs.num_cached_tokens
 
@@ -1483,9 +1551,9 @@ class VLLMGenerator(Actor, Configurable):
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
-            # TODO(async-rl): capture engine-aggregate stats (KV-cache util, queue depth, preemptions,
-            #   prefix-cache hit rate) via a `StatLoggerBase` in `from_engine_args`;
-            self._engine = LLMEngine.from_engine_args(engine_args)
+            self._engine = LLMEngine.from_engine_args(
+                engine_args, stat_loggers=[_EngineStatsLogger]
+            )
             logger.info("vLLM rollout engine initialized")
 
         self.policy_version = 0
