@@ -2170,6 +2170,31 @@ _EASIER_JOB = """This task was solved {solved} of {attempts} attempts.
 Diagnose the attempts and reduce one obstacle while retaining a stated skill.
 {guidance}"""
 
+_PLAN_JOB = """This package is the original task, unchanged; the attempts in traces/
+solved {solved} of {attempts}.
+
+THE PLAN
+A coordinator read the student's training attempts on every version of this
+task and chose the version to build: the original plus the interventions in
+run/intervention_plan.json, all of them together. Read it first. Each
+intervention says what to change, its kind, and the bottleneck it targets.
+
+Build exactly that version from this package. Apply every intervention as
+specified and add no help the plan does not list. traces/history shows earlier
+rewrites of this task: they built other versions, and none of their help is in
+this one unless the plan lists it. Keep each intervention a separable part --
+hint sentences as their own sentences, supplied work as its own files -- so a
+later version can leave it out by building from the original without it. If an
+intervention cannot be applied without breaking an invariant below, apply the
+rest and say which one and why in change; if none can, write GIVE UP with the
+reason.
+
+Where the guidance below asks you to diagnose and choose the change, the plan
+has chosen it: write the plan's bottleneck as bottleneck, and use the attempts
+in traces/ to size the wording and as evidence. Every other rule below -- where
+help lives, the invariants, the declaration -- holds as written.
+{guidance}"""
+
 _UNSOLVED_NOTE = """
 
 This task has no reference solution: no model has solved it yet. Write
@@ -3410,7 +3435,7 @@ def evolve_agentic(
             )
             + _HARDER_REPAIR_NOTE
             + (_UNSOLVED_HARDER_NOTE if task.get("_unsolved") else ""),
-            "easier": _EASIER_JOB.format(
+            "easier": (_PLAN_JOB if task.get("_intervention_plan") else _EASIER_JOB).format(
                 solved=solved,
                 attempts=attempts_n,
                 guidance=so.prompt(task.get("_simplify_hint", "vague")),
@@ -3461,6 +3486,11 @@ def evolve_agentic(
             "change was too easy, too hard, or execution-heavy, and revise "
             "that mechanism. Do not add the feedback, scores, or evaluator "
             "details to the task instruction or environment.\n"
+        )
+
+    if job == "easier" and task.get("_intervention_plan"):
+        (pkg / "run" / "intervention_plan.json").write_text(
+            json.dumps(task["_intervention_plan"], indent=2) + "\n"
         )
 
     if task.get("_role_files"):

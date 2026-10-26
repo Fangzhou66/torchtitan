@@ -977,8 +977,9 @@ def _trace(rw: layout.RewriteDir, n: int = 1, reward: float = 0.0) -> None:
     )
 
 
+@pytest.mark.parametrize("plan", [None, {"version": [{"id": "i1", "spec": "say how to install"}]}])
 def test_simplify_codex_rewrites_in_place_and_keeps_the_session(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, plan
 ) -> None:
     rw = _rewrite(tmp_path, monkeypatch, job="easier")
     _trace(rw)
@@ -1025,9 +1026,10 @@ def test_simplify_codex_rewrites_in_place_and_keeps_the_session(
 
     seed = tmp_path / "seed"
     shutil.copytree(rw.package, seed)
-    result = ec.simplify_codex(
-        rw, {**TASK, "_seed_dir": str(seed)}, solved=0, attempts=16
-    )
+    task = {**TASK, "_seed_dir": str(seed)}
+    if plan is not None:
+        task["_intervention_plan"] = plan
+    result = ec.simplify_codex(rw, task, solved=0, attempts=16)
 
     assert (
         result["instruction"] == "rewritten instruction"
@@ -1047,6 +1049,11 @@ def test_simplify_codex_rewrites_in_place_and_keeps_the_session(
     assert "run/simplify.json" in agents
     assert "0 of 16" in sd.prompt.read_text()
     assert "Hint level: vague" in sd.prompt.read_text()
+    # A coordinator's plan replaces the choice of change, never the rules.
+    assert ("THE PLAN" in sd.prompt.read_text()) == (plan is not None)
+    if plan is not None:
+        assert json.loads((rw.package / "run" / "intervention_plan.json").read_text()) == plan
+        assert "is the original task, unchanged" in sd.prompt.read_text()
     assert (
         seen["kwargs"]["env"]["PATH"].startswith(str(Path(sys.executable).parent) + ":")
         or True
