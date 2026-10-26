@@ -157,6 +157,22 @@ class _EngineStatsLogger(StatLoggerBase):
             f"preempted={self._preempted} preempted_total={self._preempted_total} "
             f"prefix_hit={prefix_hit} window_s={now - self._last:.0f}"
         )
+        # Also to the structured log: it is mirrored into the run dump while the
+        # job runs, unlike this process's stdout.
+        sl.log_trace_scalar(
+            {
+                "vllm_stats.running": self._running,
+                "vllm_stats.waiting": self._waiting,
+                "vllm_stats.kv_peak": self._kv_peak,
+                "vllm_stats.preempted": self._preempted,
+                "vllm_stats.preempted_total": self._preempted_total,
+                **(
+                    {"vllm_stats.prefix_hit": self._prefix_hits / self._prefix_queries}
+                    if self._prefix_queries
+                    else {}
+                ),
+            }
+        )
         self._last = now
         self._kv_peak = 0.0
         self._preempted = 0
