@@ -172,3 +172,11 @@ def test_retire_and_weights_follow_the_plan(job, monkeypatch):
     pool = _pool(sched)
     assert [v["status"] for v in pool.values() if v["rev"] == 1] == ["retired"] and pool[V0]["weight"] == 2.0
     assert "weight r9: not an active version" in t.state["rounds"][1]["done"]
+
+
+def test_a_resumed_run_numbers_its_groups_after_the_earlier_runs(job, monkeypatch):
+    t = _setup(job, monkeypatch, Script(lambda w: {}))
+    _settle(t)
+    for run, group in [("a", 0), ("a", 3), ("b", 0), ("b", 1)]:
+        t.on_event({"event": "group_done", "run": run, "version": V0, "group": group, "passed": 0, "scored": 12})
+    assert [g["group"] for g in t.groups[V0]] == [0, 3, 4, 5]

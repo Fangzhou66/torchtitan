@@ -203,6 +203,9 @@ class Teacher:
         self.groups: dict[str, list[dict]] = collections.defaultdict(list)
         self.attempts: dict[str, list[dict]] = collections.defaultdict(list)
         self.steps = 0
+        # A resumed run is a new run directory whose groups count from 0 again; the teacher numbers
+        # groups across the whole training, each run's after the highest group of the runs before it.
+        self._runs: dict[str, int] = {}  # run -> highest group seen in it
         self._seen: set[tuple] = set()
         self.pending: list[str] = []  # why the teacher should be called, oldest first
         self.news: list[str] = []
@@ -249,19 +252,30 @@ class Teacher:
         if key in self._seen:
             return
         self._seen.add(key)
+        group = self._group(e.get("run"), int(e.get("group") or 0))
         if kind == "rollout_done":
-            self.attempts[vid].append({"run": e.get("run"), "path": e["record_path"], "group": e.get("group"),
+            self.attempts[vid].append({"run": e.get("run"), "path": e["record_path"], "group": group,
                                        "idx": e.get("idx"), "reward": e.get("reward"), "end": e.get("finish_reason")})
             return
         if not e.get("scored"):
             return
-        g = {"group": e.get("group"), "passed": int(e["passed"]), "scored": int(e["scored"]), "at": e.get("stamp")}
+        g = {"group": group, "passed": int(e["passed"]), "scored": int(e["scored"]), "at": e.get("stamp")}
         self.groups[vid].append(g)
         label = self.label(vid)
         self.news.append(f"{label} g{g['group']} finished: {g['passed']}/{g['scored']} passed")
         near = self.policy.near
         if g["passed"] <= near or g["passed"] >= g["scored"] - near:
             self.pending.append(f"{label}'s group g{g['group']} ended {g['passed']}/{g['scored']}")
+
+    def _group(self, run: str | None, group: int) -> int:
+        run = run or ""
+        offset = 0
+        for r, top in self._runs.items():
+            if r == run:
+                break
+            offset += top + 1
+        self._runs[run] = max(self._runs.get(run, -1), group)
+        return offset + group
 
     def which_version(self, candidates: list[dict]) -> str | None:
         """The next version the teacher's draw_first names that is still active; else the weighted draw."""
