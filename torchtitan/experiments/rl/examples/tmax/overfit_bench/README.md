@@ -396,3 +396,27 @@ Its state is in `evolution/interventions/`:
 
 Every decision is one `policy ...` line in `evolution/loop.log`. It reads
 training records only, never the readout. It takes the evolve loop's lock.
+
+## The teacher rewriter
+
+`teacher_rewriter.py <job> --prepare` before training, then
+`REWRITER_MODE=teacher ./start_reference_rewriter.sh <job>`. One codex session, continued round after
+round in one working directory (`evolution/teacher/work/`), runs the curriculum; this process only
+gives it the run and carries out its plan.
+
+- **When it is called**: once before training, and whenever a training group ends close to all failed
+  or all passed (`--near 1`: at most one attempt away), the groups that teach nothing. Events that
+  arrive while it works are kept for its next round.
+- **What it reads**: `AGENTS.md` (`teacher_agents.md`: the goal, how training works with the numbers
+  read from `recipe.env`, what it may do, the directory), and the directory: `problems/<label>/` (every
+  version that has been in the pool, in full, with `status.json` and `diff.patch` against the original),
+  `attempts/<label>/g<group>/NN.jsonl` (every training attempt of the run: a summary line with each
+  test's result, then one line per turn), `summary.md` and `history.md` (its rounds, predictions and
+  what each version then scored). Each round's prompt says only why it is called and what happened since.
+- **What it decides** (`plan.json`): new versions, written as complete task directories under `new/`,
+  with anything changed (instruction, environment, starting state, tests, reference solution); versions
+  to retire, the original included; weights; and `draw_first`, versions the next groups draw before
+  the weighted draw.
+- **What this process enforces**: a new version joins only after two checks on Daytona (its reference
+  solution passes its tests; its untouched starting state fails them); at most `--max-active` (8)
+  versions are in the pool; the teacher never sees the readout or another run's records (see "Two loops").
