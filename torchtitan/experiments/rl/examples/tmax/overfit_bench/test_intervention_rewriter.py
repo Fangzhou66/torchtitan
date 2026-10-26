@@ -340,3 +340,11 @@ def test_a_restart_does_not_put_an_already_drawn_version_first_again(job, monkey
     co2.start()
     second = co2.which_version(cands)
     assert first and second and first != second and co2.which_version(cands) is None
+
+
+def test_per_test_results_come_from_the_verifier_output_or_its_shadow():
+    out = "PASSED ../tests/test_outputs.py::test_a\nFAILED ../tests/test_outputs.py::test_b[2-True] - Err\n1 failed, 1 passed"
+    assert ir.test_results(out) == {"test_a": True, "test_b[2-True]": False}
+    assert ir.verifier_output({"verifier": {"output_tail": out}}) == out
+    assert ir.verifier_output({"verifier": {"shadow": {"output_tail": out}}}) == out
+    assert ir.verifier_output({}) == ""
