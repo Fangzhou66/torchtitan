@@ -61,8 +61,16 @@ def _rollouts(run, sched, *, version, rev, group, rewards):
                                  reward=r, finish_reason="submit", record_path=rel, policy_versions=[0, 0]))
 
 
-def _drain(co) -> None:
-    co.step(0.5)
+def _drain(co, n_attempts=0, n_groups=0) -> None:
+    """Step until the scheduler delivered this many attempts and groups in all
+    (events arrive asynchronously) and every session started has ended."""
+
+    def seen():
+        return (sum(map(len, co.attempts.values())) >= n_attempts
+                and sum(map(len, co.groups.values())) >= n_groups)
+
+    assert _until(lambda: (co.step(0.05), seen() and not co._futs)[1])
+    co.step(0.05)
     assert _until(lambda: (co.step(0.05), not co._futs)[1])
 
 
@@ -85,10 +93,10 @@ def test_cold_start_diagnoses_after_cold_min_scored_attempts_and_builds_each_pro
     root, run, sched, client = job
     co, evolve, diag = _start(job, monkeypatch, [_cand("say install"), _cand("smaller", "smaller_instance", "none")])
     _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 5)
-    _drain(co)
+    _drain(co, 5, 0)
     assert diag.calls == []  # 5 < cold_min
     _rollouts(run, sched, version=V0, rev=0, group=1, rewards=[0.0])
-    _drain(co)
+    _drain(co, 6, 0)
     assert len(diag.calls) == 1
     # Both proposals built, each from the original row, each with its own set.
     assert sorted(c["data"]["intervention_plan"]["version"][0]["name"] for c in evolve.calls) == [
@@ -109,12 +117,12 @@ def test_versions_are_built_from_the_original_with_the_whole_set(job, monkeypatc
     root, run, sched, client = job
     co, evolve, diag = _start(job, monkeypatch, [_cand("A")], [_cand("B", "feedback")])
     _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
-    _drain(co)
+    _drain(co, 6, 0)
     va = _set_version(co, "i1")
     # {i1} fails a whole group: diagnose with {i1} as base, build {i1, i2}.
     _rollouts(run, sched, version=va, rev=1, group=1, rewards=[0.0] * 12)
     _group_done(sched, version=va, rev=1, group=1, passed=0)
-    _drain(co)
+    _drain(co, 18, 1)
     assert len(diag.calls) == 2 and diag.calls[1]["catalog"]["base_set"] == ["i1"]
     last = evolve.calls[-1]
     assert [i["id"] for i in last["data"]["intervention_plan"]["version"]] == ["i1", "i2"]
@@ -126,18 +134,18 @@ def test_no_new_diagnosis_while_a_descendant_is_untested_or_learnable(job, monke
     root, run, sched, client = job
     co, evolve, diag = _start(job, monkeypatch, [_cand("A")], [_cand("B")])
     _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
-    _drain(co)
+    _drain(co, 6, 0)
     _group_done(sched, version=V0, rev=0, group=0, passed=0)
-    _drain(co)
+    _drain(co, 6, 1)
     assert len(diag.calls) == 1  # {i1} is untested
     va = _set_version(co, "i1")
     _group_done(sched, version=va, rev=1, group=1, passed=5)
     _group_done(sched, version=V0, rev=0, group=2, passed=0)
-    _drain(co)
+    _drain(co, 6, 3)
     assert len(diag.calls) == 1  # {i1} is learnable
     _rollouts(run, sched, version=va, rev=1, group=3, rewards=[0.0] * 12)
     _group_done(sched, version=va, rev=1, group=3, passed=0)
-    _drain(co)
+    _drain(co, 18, 4)
     # {i1} now all-failed in its latest group: it is diagnosed as a base.
     assert len(diag.calls) == 2
 
@@ -147,15 +155,15 @@ def test_a_mastered_version_withdraws_setup_hints_before_scope_removals(job, mon
     co, evolve, diag = _start(job, monkeypatch, [_cand("forward out of scope", "scope_removal", "none")],
                               [_cand("say install", "setup_hint", "specific")])
     _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
-    _drain(co)
+    _drain(co, 6, 0)
     v1 = _set_version(co, "i1")
     _rollouts(run, sched, version=v1, rev=1, group=1, rewards=[0.0] * 12)
     _group_done(sched, version=v1, rev=1, group=1, passed=0)
-    _drain(co)
+    _drain(co, 18, 1)
     v12 = _set_version(co, "i1", "i2")
     _rollouts(run, sched, version=v12, rev=2, group=2, rewards=[1.0] * 12)
     _group_done(sched, version=v12, rev=2, group=2, passed=12)
-    _drain(co)
+    _drain(co, 30, 2)
     # {i1} exists already, so withdrawing i2 (the setup hint, rank 0) is skipped
     # only because it was built; the next is i1 -> {i2}.
     assert "i2" in co.state["sets"] and co.state["sets"]["i2"]["base"] == "i1,i2"
@@ -179,7 +187,7 @@ def test_a_diagnosis_without_a_valid_candidate_builds_nothing(job, monkeypatch):
     co, evolve, diag = _start(job, monkeypatch, [{"name": "x", "kind": "magic", "hint_level": "none",
                                                   "spec": "s", "mechanism": "m"}])
     _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
-    _drain(co)
+    _drain(co, 6, 0)
     assert evolve.calls == [] and co.state["diagnoses"][""]["status"] == "failed"
     with pytest.raises(ValueError):
         ir.check_diagnosis({"bottleneck": {"name": "b"}, "candidates": []}, catalog={}, max_candidates=3)
@@ -189,7 +197,7 @@ def test_the_diagnosis_reads_training_attempts_only(job, monkeypatch):
     root, run, sched, client = job
     co, evolve, diag = _start(job, monkeypatch, [_cand("A")])
     _rollouts(run, sched, version=V0, rev=0, group=0, rewards=[0.0] * 6)
-    _drain(co)
+    _drain(co, 6, 0)
     work = diag.calls[0]["work"]
     index = json.loads((work / "index.json").read_text())
     assert index and all(i["path"].startswith("rollouts/") for i in index.values())
