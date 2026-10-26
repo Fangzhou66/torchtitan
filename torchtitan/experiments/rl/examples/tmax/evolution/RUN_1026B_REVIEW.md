@@ -96,10 +96,10 @@ rewrite quality has clear gaps that the oracle check cannot see.
   `software-engineering_20260417_112147_020` was rewritten harder 6 times and every
   revision trained 12/12: each round appended requirements (pinned build
   requirements, a self-contained wheel, a complete sdist) that the standard fix
-  already satisfies. 73 tasks went harder -> 0/12 -> easier, undoing each other. 18%
-  of accepted harder rewrites changed tests without changing the instruction.
-- **Easier rewrites weaken verifiers.** 79% of accepted easier rewrites touched
-  tests; e.g. `virtuslab__git-machete-330` replaced a 58-line negative-control test
+  already satisfies. 73 tasks went harder -> 0/12 -> easier, undoing each other. 16%
+  of accepted harder rewrites (53 of 335) changed tests without changing the instruction.
+- **Easier rewrites weaken verifiers.** 72% of accepted easier rewrites (620 of
+  863) touched tests; e.g. `virtuslab__git-machete-330` replaced a 58-line negative-control test
   with a 15-line `isinstance` check and deleted the matching instruction line, then
   trained 12/12.
 - **Long chains drift off the original skill** (`amueller__word_cloud…` r0 -> r5).
