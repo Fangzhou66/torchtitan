@@ -281,14 +281,12 @@ class Teacher:
             d = w / "problems" / label
             if not d.exists():
                 src = task.rev(int(v["rev"])) if int(v["rev"]) else r0
-                d.mkdir(parents=True)
-                for p in PACKAGE:
-                    if (src / p).is_dir():
-                        shutil.copytree(src / p, d / p)
-                    elif (src / p).exists():
-                        shutil.copy2(src / p, d / p)
+                # The whole task package (task.toml included: the row is built from it), less the
+                # rewrite pipeline's own run/ and traces/.
+                shutil.copytree(src, d, ignore=shutil.ignore_patterns("run", "traces", ".gitignore"))
                 if int(v["rev"]):
-                    diff = subprocess.run(["diff", "-ruN", "--exclude=.*", "../r0", "."], cwd=d,
+                    diff = subprocess.run(["diff", "-ruN", "--exclude=.*", "--exclude=status.json",
+                                           "--exclude=diff.patch", "../r0", "."], cwd=d,
                                           capture_output=True, text=True, check=False).stdout
                     (d / "diff.patch").write_text(diff)
             info = self.state["versions"].get(label, {})
