@@ -73,6 +73,7 @@ from torchtitan.experiments.rl.examples.tmax.prepare_tmax_data import (
     _DEFAULT_IMAGE_PREFIX,
     _REWARD_PATH,
 )
+from torchtitan.experiments.rl.examples.tmax.tb2_1_resources import RESOURCE_OVERRIDES
 
 # HF mirror of github.com/harbor-framework/terminal-bench-2-1 (same tree, same
 # commit -- its registry.json records the mirrored GitHub SHA).
@@ -336,50 +337,17 @@ def _after_shebang(test_sh: str, block: str) -> str:
     return block + test_sh
 
 
-# Per-task Daytona sizes that replace the declared ones. Every task declares a 10 GB
-# disk, which Daytona enforces (Harbor's Modal and Docker backends do not); in the
-# 2026-10-25 eval the tasks below filled it in 33 trials (CUDA torch installs,
-# httpstan's fit cache), twice inside the verifier's own install. They get 20 GB.
-# extract-moves-from-video also declares 1 CPU / 2 GB for decoding a video frame by
-# frame: 3 of 5 trials showed OOM and a fourth lost its sandbox ("failed to resolve
-# container IP"), so it gets 2 CPU / 4 GB as well. compile-compcert (coq build at
-# 4 GB) and mteb-leaderboard (loading results at 8 GB) were OOM-killed in 3 of 5
-# trials each, so they get 4 GB more memory.
-_DISK_20GB = {"daytona_disk_gb": 20}
-_RESOURCE_OVERRIDES: dict[str, dict[str, int]] = {
-    "extract-moves-from-video": {"daytona_cpu": 2, "daytona_mem_gb": 4, **_DISK_20GB},
-    "compile-compcert": {"daytona_mem_gb": 8},
-    "mteb-leaderboard": {"daytona_mem_gb": 12},
-    **{
-        task_id: _DISK_20GB
-        for task_id in (
-            "chess-best-move",
-            "code-from-image",
-            "count-dataset-tokens",
-            "gcode-to-text",
-            "gpt2-codegolf",
-            "pytorch-model-cli",
-            "pytorch-model-recovery",
-            "rstan-to-pystan",
-            "sam-cell-seg",
-            "torch-pipeline-parallelism",
-            "torch-tensor-parallelism",
-        )
-    },
-}
-
-
 def apply_env_patches(row: dict) -> dict:
     """Apply this task's ``_ENV_PATCHES`` entry to ``row`` in place.
 
-    ``_RESOURCE_OVERRIDES`` is applied here too and recorded in
+    ``tb2_1_resources.RESOURCE_OVERRIDES`` is applied here too and recorded in
     ``metadata.resource_patch``. This is a no-op for any task without an entry in
     either table. It is idempotent: a ``test_sh``
     that already carries the injected block is left alone. The patched row also
     records its upstream source in ``metadata.env_patch``.
     """
     md = row["metadata"]
-    resources = _RESOURCE_OVERRIDES.get(md.get("instance_id"))
+    resources = RESOURCE_OVERRIDES.get(md.get("instance_id"))
     if resources is not None:
         md.update(resources)
         md["resource_patch"] = dict(resources)

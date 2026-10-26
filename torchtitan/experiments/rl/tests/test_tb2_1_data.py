@@ -705,3 +705,26 @@ def test_a_rewritten_separate_task_builds_its_verifier_from_tests(tmp_path):
     assert separate_verifier(
         tomllib.loads(_TASK_TOML), str(task), build=True
     ) == (None, "")
+
+
+def test_a_tb2_1_row_built_before_an_override_gets_it_at_load():
+    from torchtitan.experiments.rl.examples.tmax.data import _parse_sample_row
+
+    def row(tb_version):
+        return {
+            "label": "compile-compcert",
+            "metadata": {
+                "instance_id": "compile-compcert",
+                "image": "docker.io/alexgshaw/compile-compcert:20260403",
+                "tmax": {"test_sh": "#!/bin/bash\n"},
+                "tb_version": tb_version,
+                "daytona_cpu": 2,
+                "daytona_mem_gb": 4,
+                "daytona_disk_gb": 10,
+            },
+        }
+
+    sample = _parse_sample_row(row("2.1"))
+    assert (sample.daytona_cpu, sample.daytona_mem_gb, sample.daytona_disk_gb) == (2, 8, 10)
+    other = _parse_sample_row(row(None))
+    assert other.daytona_mem_gb == 4
