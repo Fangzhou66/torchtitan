@@ -310,3 +310,72 @@ difficulty). The version keeps training beside its child, and the original is
 never hardened. Measured reason: on v7 (2026-10-23), r3 was learnable from step
 33 but never solved a whole group, so at the default ratio 1.0 the ladder never
 built the next rung; at 0.75 it would have done so only at step 177.
+
+## The intervention rewriter
+
+`REWRITER_MODE=interventions ./start_reference_rewriter.sh <job>` runs
+`intervention_rewriter.py`. It uses the same bench interface and the same
+rewrite machinery as the ladder (`evolve_ondella.handle`, with its oracle,
+probes, verifier and grader replay). It differs in what a version is:
+
+- **A version is the original plus a named set of interventions.** An
+  intervention is one change to the original: its kind (`setup_hint`,
+  `check_hint`, `direction_hint`, `decomposition`, `feedback`,
+  `smaller_instance`, `supplied_work`, `scope_removal`), its spec and the
+  bottleneck it targets. Every build starts from the original package and
+  applies the whole set. The author reads the set in
+  `run/intervention_plan.json` and is told to add no other help. So no
+  version carries help left over from its parent.
+- **Easier means one intervention added; harder means one withdrawn.**
+  Withdrawal order:
+  1. setup and checking hints first;
+  2. then direction, decomposition, feedback and smaller-instance changes;
+  3. then supplied work;
+  4. scope removals last.
+- **The diagnosis chooses what to add.** A codex session reads:
+  - the original package;
+  - the training attempts of every version (the base version's newest 24,
+    and 6 of each other version);
+  - the catalog of interventions and built sets.
+
+  It names the base version's dominant bottleneck, citing attempts. It then
+  proposes up to 3 interventions that differ in mechanism, not only in
+  strength (`--candidates`). Each proposal is built in parallel as
+  base + proposal. A proposal may reuse a cataloged intervention. A scope
+  removal is proposed only when other kinds have failed on that bottleneck.
+- **Cold start.** The first diagnosis runs as soon as 6 attempts on the
+  original have been scored (`--cold-min`, counted from `rollout_done`), not
+  when the first group ends. The interface has no idle draw, so the slots
+  keep drawing the original meanwhile.
+- **When to act.**
+  - A version whose latest group solved nothing is diagnosed again, as base,
+    if:
+    - nothing whose set contains its own is learnable, untested or being
+      built;
+    - and it has had a group since its last diagnosis.
+  - A version whose latest group solved at least `--mastered` (0.9) of its
+    scored attempts builds its set minus the next intervention in withdrawal
+    order whose set has not been built.
+- **Draws.** `which_version` answers with a version that has had no group
+  drawn yet, oldest first. Otherwise it gives no answer and the weighted draw
+  decides.
+- **Weights.**
+  - `p(1-p)` over the last 3 groups, as in the ladder.
+  - 0.25 while a version is untested.
+  - Never below 0.05 for the original.
+  - At the cap of 8 active versions (`--max-active`), a new version replaces
+    the version with the longest all-failed streak. It never replaces the
+    original or a version that solved anything in its last 3 groups.
+  - A version is retired after 2 all-failed groups in a row
+    (`--stale-after`) while something built on its set is alive.
+
+Its state is in `evolution/interventions/`:
+
+- `state.json`: the catalog, every set with its build status and version,
+  and every diagnosis;
+- `diagnoses/<stamp>--<set>/`: the inputs, the session, and
+  `diagnosis.json`;
+- `signals/`: the plan of every build.
+
+Every decision is one `policy ...` line in `evolution/loop.log`. It reads
+training records only, never the readout. It takes the evolve loop's lock.
