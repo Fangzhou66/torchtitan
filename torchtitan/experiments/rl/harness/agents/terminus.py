@@ -655,6 +655,28 @@ _PANE_CAP_BYTES = 8 * 1024 * 1024
 # rollout record. Off by default because a run of 22,000 rollouts fetching up
 # to 8 MiB each is tens of gigabytes: turn it on for a run you mean to audit.
 
+# The pane's shell. Harbor starts it as a bare ``bash --login``, and three of an
+# interactive bash's defaults cost turns or whole episodes for reasons no task is
+# about:
+#   * no DEBIAN_FRONTEND: debconf asks on the pane's terminal, so an
+#     ``apt-get install`` that pulls in tzdata stops at a region prompt and waits
+#     out the episode (the reference solutions of adaptive-rejection-sampler and
+#     sqlite-with-gcov run out of time on this path; mini-swe-agent's plain exec
+#     has no terminal for debconf to ask on, and both pass there);
+#   * history expansion: a ``!`` inside double quotes is "event not found", and
+#     the command never runs;
+#   * EOF at the prompt exits: a stray C-d ends the shell and the episode with it.
+# They are set on the shell's own command line, so nothing is typed into the pane
+# and the first observation is what it was. DEBIAN_FRONTEND is exported to what
+# the agent runs (apt is its child); the two options stay this shell's own, so a
+# nested ``bash`` starts with the usual defaults. The verifier runs through its
+# own exec and sees none of this.
+_AGENT_SHELL = (
+    "env DEBIAN_FRONTEND=noninteractive bash --login +o histexpand -o ignoreeof"
+)
+# What harbor 0.22.0 (TmuxSession._tmux_start_session) starts the pane with.
+_HARBOR_PANE_SHELL = "bash --login"
+
 
 class _SandboxExecutionError(RuntimeError):
     """The sandbox API failed without returning a command result."""
@@ -759,6 +781,7 @@ class _SandboxEnvironment:
     ):
         if cwd:
             command = f"cd {shlex.quote(cwd)} && {command}"
+        command = self._agent_pane_shell(command)
         command = self._bound_pane_pipe(command)
         command = self._end_send_keys_options(command)
         # Classified before the turn-start prefix makes it a compound command.
@@ -1007,6 +1030,40 @@ class _SandboxEnvironment:
             if not stderr:
                 stderr = stdout
         return ExecResult(stdout=stdout, stderr=stderr, return_code=exit_code)
+
+    def _agent_pane_shell(self, command: str) -> str:
+        """Start the pane in ``_AGENT_SHELL`` rather than harbor's bare login shell.
+
+        Only harbor's own ``tmux new-session`` is rewritten, recognized by its
+        top-level tokens: keys the agent types arrive as one quoted send-keys
+        argument, so they are never touched even when they spell this command.
+        """
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return command
+        starts = [
+            i
+            for i in range(len(tokens) - 1)
+            if tokens[i] == "tmux" and tokens[i + 1] == "new-session"
+        ]
+        if not starts:
+            return command
+        rest = tokens[starts[0] + 2 :]
+        name = shell = None
+        if "-s" in rest and rest.index("-s") + 2 < len(rest):
+            name = rest[rest.index("-s") + 1]
+            shell = rest[rest.index("-s") + 2]
+        old = f"-s {name} {shlex.quote(_HARBOR_PANE_SHELL)}"
+        if shell != _HARBOR_PANE_SHELL or command.count(old) != 1:
+            logger.warning(
+                "[terminus] pane started without harbor's %r; shell defaults "
+                "not applied: %r",
+                _HARBOR_PANE_SHELL,
+                command[:400],
+            )
+            return command
+        return command.replace(old, f"-s {name} {shlex.quote(_AGENT_SHELL)}", 1)
 
     _PANE_PIPE = re.compile(r"pipe-pane\s+(?:-\w+\s+\S+\s+)*'cat > (?P<path>[^']+)'")
 
