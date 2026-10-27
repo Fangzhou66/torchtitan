@@ -102,6 +102,7 @@ def test_the_first_round_writes_a_version_that_joins_the_pool_and_is_drawn_first
     assert t.which_version(list(_pool(sched).values())) is None  # each once
     assert (t.work / "AGENTS.md").read_text().startswith("# You are the teacher")
     assert "12 times" in (t.work / "AGENTS.md").read_text()
+    assert "GB of disk" in (t.work / "AGENTS.md").read_text()
 
 
 def test_a_group_near_all_failed_calls_the_teacher_and_a_mixed_group_does_not(job, monkeypatch):

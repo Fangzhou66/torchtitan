@@ -79,7 +79,8 @@ def recipe() -> dict[str, str]:
     return out
 
 
-def agents_md(policy: Policy) -> str:
+def agents_md(policy: Policy, sandbox: dict) -> str:
+    """``sandbox``: the original row's daytona_* fields (SANDBOX), the box every attempt runs in."""
     r = recipe()
     return (HERE / "teacher_agents.md").read_text().format(
         slots=r.get("SWE_MAX_ACTIVE_GROUPS", "?"), group=r.get("SWE_GROUP_SIZE", "?"),
@@ -87,7 +88,8 @@ def agents_md(policy: Policy) -> str:
         context=r.get("SWE_MAX_CONTEXT_LEN", "?"),
         hours=f"{int(r.get('SWE_BENCH_TRAIN_BUDGET_SEC', '0')) / 3600:g}",
         stale=r.get("SWE_OFFPOLICY_STEPS", "?"), val_every=r.get("SWE_VAL_INTERVAL", "?"),
-        cap=policy.max_active)
+        cap=policy.max_active, cpu=sandbox.get("daytona_cpu") or "?",
+        mem=sandbox.get("daytona_mem_gb") or "?", disk=sandbox.get("daytona_disk_gb") or "?")
 
 
 def verifier_output(head: dict) -> str:
@@ -293,7 +295,7 @@ class Teacher:
 
     def stage(self) -> None:
         w = self.work
-        (w / "AGENTS.md").write_text(agents_md(self.policy))
+        (w / "AGENTS.md").write_text(agents_md(self.policy, self._sandbox()))
         task = self.root.evolution.task(self.task_id)
         r0 = task.rev(0)
         if not r0.exists():
@@ -454,9 +456,12 @@ class Teacher:
 
     # -- new versions ------------------------------------------------------------------
 
-    def validate(self, package: Path) -> dict:
+    def _sandbox(self) -> dict:
         original = next(v for v in self.versions.values() if int(v["rev"]) == 0)
-        sandbox = {k: original["row"]["metadata"].get(k) for k in SANDBOX.values()}
+        return {k: original["row"]["metadata"].get(k) for k in SANDBOX.values()}
+
+    def validate(self, package: Path) -> dict:
+        sandbox = self._sandbox()
         solved = self.check(package, shortcut=None, timeout=self.policy.check_timeout, sandbox=sandbox)
         if reward_of(solved) != 1.0:
             return {"ok": False, "package": str(package),
