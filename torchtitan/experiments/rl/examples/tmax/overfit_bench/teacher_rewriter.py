@@ -381,6 +381,11 @@ class Teacher:
         why = "; ".join(self.pending) if self.pending else "training has not started; the student has made no attempt yet"
         news, self.pending, self.news = self.news, [], []
         self.stage()
+        # A resumed thread keeps the AGENTS.md it started with; tell it when the file has changed since.
+        agents = (self.work / "AGENTS.md").read_text()
+        if self.state.get("agents_md") not in (None, agents):
+            news.append("AGENTS.md has changed since your last round; read it again")
+        self.state["agents_md"] = agents
         shutil.rmtree(self.work / "new", ignore_errors=True)
         (self.work / "new").mkdir()
         (self.work / "plan.json").unlink(missing_ok=True)
