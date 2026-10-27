@@ -680,6 +680,7 @@ _AGENT_SHELL = (
 _HARBOR_PANE_SHELL = "bash --login"
 
 
+
 class _SandboxExecutionError(RuntimeError):
     """The sandbox API failed without returning a command result."""
 
@@ -701,6 +702,90 @@ def _status_unanswered(error: BaseException) -> bool:
 # sandbox resumes.
 _TMUX_QUERIES = frozenset({"has-session", "capture-pane", "display-message", "-V"})
 _TMUX_KEYS = frozenset({"send-keys"})
+
+# tmux echoes every line typed into the pane, so a heredoc the model writes
+# comes back in the next observation as "> "-prefixed lines -- 16% of the
+# context of 1022/1026b's trajectories that hit the context limit. A run of at
+# least this many such lines, each equal to a line typed this turn or the one
+# before, collapses to one marker line; 0 shows them all, as stock Terminus-2.
+_COLLAPSE_ECHO_MIN_LINES = int(os.environ.get("TMAX_COLLAPSE_ECHO_MIN_LINES", "3"))
+_TMUX_KEY_NAME = re.compile(
+    r"(?:[CMS]-.+|Enter|Escape|Tab|BTab|BSpace|Space|Up|Down|Left|Right|Home|End"
+    r"|IC|DC|NPage|PPage|PageUp|PageDown|F\d+|KP.+)"
+)
+
+
+def _typed_keys(command: str) -> str:
+    """The literal text a ``tmux send-keys`` command types; key names
+    (Enter, C-c, ...) are left out, Enter as a newline."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return ""
+    if tokens[:1] == ["timeout"]:
+        tokens = tokens[2:]
+    if tokens[:2] != ["tmux", "send-keys"]:
+        return ""
+    keys = tokens[2:]
+    if keys[:1] == ["-t"]:
+        keys = keys[2:]
+    if keys[:1] == ["--"]:
+        keys = keys[1:]
+    return "".join(
+        ("\n" if k in ("Enter", "C-m") else "") if _TMUX_KEY_NAME.fullmatch(k) else k
+        for k in keys
+    )
+
+
+# A continuation prompt line. Characters typed ahead of the shell sometimes land
+# in front of the prompt ("a>     ast = parse(...)"), hence up to 3 of them.
+_ECHO_LINE = re.compile(r"^.{0,3}?> ?(.*)$")
+
+
+def _collapse_echo(text: str, typed: str, min_lines: int) -> tuple[str, int]:
+    """Replace runs of echoed heredoc/continuation lines with one marker.
+
+    A line is echo when it is a continuation prompt (">" or "> X", see
+    _ECHO_LINE) and X is a line in ``typed``. The
+    run's last line (the closing delimiter) is kept, and a run that ends the
+    text is left whole: the shell is still waiting for input there, which the
+    model must see. Returns the text and how many lines were removed."""
+    if min_lines <= 0 or not typed:
+        return text, 0
+    typed_lines = {line.rstrip() for line in typed.split("\n")}
+    lines = text.split("\n")
+    last = len(lines) - 1
+    while last >= 0 and not lines[last].strip():
+        last -= 1
+
+    def is_echo(line: str) -> bool:
+        m = _ECHO_LINE.match(line)
+        return m is not None and m.group(1).rstrip() in typed_lines
+
+    out: list[str] = []
+    removed = 0
+    i = 0
+    while i < len(lines):
+        j = i
+        # A blank line between echo lines is one too (a blank heredoc line).
+        while j < len(lines) and (
+            is_echo(lines[j])
+            or (j > i and not lines[j] and j + 1 < len(lines) and is_echo(lines[j + 1]))
+        ):
+            j += 1
+        if j - i - 1 >= min_lines and j - 1 < last:
+            n = j - i - 1
+            out.append(f"[{n} lines you typed were echoed back; omitted]")
+            out.append(lines[j - 1])
+            removed += n
+            i = j
+        elif j > i:
+            out.extend(lines[i:j])
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out), removed
 
 
 def _tmux_client_kind(command: str) -> str:
@@ -752,6 +837,9 @@ class _SandboxEnvironment:
         self.pane_path: str | None = None
         self._pane_name = agent_dir.name + ".pane"
         self._observed_once = False
+        # Text typed into the pane this turn and the one before (_collapse_echo).
+        self._typed_now = ""
+        self._typed_before = ""
         # Returns the context-budget line for this turn ("" for none); set to
         # _AdapterLLM.context_notice once the session's LLM exists.
         self.context_notice: Callable[[], str] | None = None
@@ -788,6 +876,8 @@ class _SandboxEnvironment:
         command = self._end_send_keys_options(command)
         # Classified before the turn-start prefix makes it a compound command.
         kind = _tmux_client_kind(command)
+        if kind == "keys":
+            self._typed_now += _typed_keys(command)
         command = self._record_turn_start(command)
 
         async def run(cmd: str):
@@ -963,6 +1053,14 @@ class _SandboxEnvironment:
             mode = "first"
         elif stale:
             mode = "screen"
+        echo_collapsed = 0
+        if mode == "new":
+            new_text, echo_collapsed = _collapse_echo(
+                new_text,
+                self._typed_before + "\n" + self._typed_now,
+                _COLLAPSE_ECHO_MIN_LINES,
+            )
+        self._typed_before, self._typed_now = self._typed_now, ""
         if mode == "new" and new_text.strip():
             observation = f"New Terminal Output:\n{new_text}"
         else:
@@ -987,6 +1085,7 @@ class _SandboxEnvironment:
                 "start": start,
                 "new_bytes": len(new_text.encode("utf-8", errors="replace")),
                 "screen_bytes": len(screen.encode("utf-8", errors="replace")),
+                "echo_collapsed": echo_collapsed,
             }
         )
         return observation
