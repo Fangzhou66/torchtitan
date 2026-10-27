@@ -807,6 +807,18 @@ def _tmux_client_kind(command: str) -> str:
     return ""
 
 
+def _with_pinned_tmux(command: str, tmux_command: str) -> str:
+    """``command`` with every ``tmux`` it runs replaced by ``tmux_command``
+    (TerminalLifecycle.pin_tmux): a shell function covers each call in the
+    script, and a leading ``timeout N tmux`` (which execs by PATH) is rewritten."""
+    if not tmux_command:
+        return command
+    command = re.sub(
+        r"^(timeout\s+\S+\s+)tmux(?=\s)", lambda m: m.group(1) + tmux_command, command
+    )
+    return f'tmux() {{ {tmux_command} "$@"; }}; {command}'
+
+
 class _SandboxEnvironment:
     """Our ``Sandbox`` in the shape Terminus-2 expects of a harbor environment."""
 
@@ -1105,7 +1117,7 @@ class _SandboxEnvironment:
         started_at = time.time()
         try:
             exit_code, stdout, stderr = await self._sandbox.exec(
-                command,
+                _with_pinned_tmux(command, self.terminal.tmux_command),
                 user=str(user or self.default_user),
                 env=env,
                 check=False,
