@@ -14,6 +14,9 @@ After training, the student is examined on the original task alone. Learning it 
 - An attempt scores 1 only when every test of its version passes, and 0 otherwise. An attempt
   that runs out of budget without submitting is still graded.
 - Each attempt has at most {turns} turns, {context} tokens of context and {hours} hours.
+- Each attempt runs in a fresh sandbox with {cpu} CPU, {mem} GB of memory and {disk} GB of disk, for
+  every version alike; the platform fixes these and no version can raise them. The tests run in the
+  same sandbox once the student has finished, with whatever the student left on its disk.
 - Which version a group gets: a version is drawn with probability proportional to its weight,
   unless your last plan named versions in `draw_first`: those are served first, each once, in your
   order. Groups up to {stale} steps old still train the student.
