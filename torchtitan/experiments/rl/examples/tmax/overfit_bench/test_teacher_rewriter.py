@@ -181,3 +181,14 @@ def test_a_resumed_run_numbers_its_groups_after_the_earlier_runs(job, monkeypatc
     for run, group in [("a", 0), ("a", 3), ("b", 0), ("b", 1)]:
         t.on_event({"event": "group_done", "run": run, "version": V0, "group": group, "passed": 0, "scored": 12})
     assert [g["group"] for g in t.groups[V0]] == [0, 3, 4, 5]
+
+
+def test_a_changed_agents_md_is_announced_in_the_next_round(job, monkeypatch):
+    root, run, sched, client = job
+    script = Script(lambda w: {}, lambda w: {})
+    t = _setup(job, monkeypatch, script)
+    _settle(t)
+    monkeypatch.setattr(tr, "agents_md", lambda policy, sandbox: "# changed")
+    _attempts(run, sched, group=0, rewards=[0.0] * 12)
+    _settle(t, lambda: len(script.prompts) == 2)
+    assert "AGENTS.md has changed" in script.prompts[1] and "AGENTS.md has changed" not in script.prompts[0]
